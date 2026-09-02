@@ -1,18 +1,30 @@
 (function () {
     'use strict';
 
-    const VIDEO_WORLD_VERSION = 3;
+    const VIDEO_WORLD_VERSION = 6;
+    const STORY_BLOCK_BRANCHING = 3;
+    const STORY_BLOCK_DEPTHS = new Set([1, 2]);
     const DEFAULT_DIRECTOR_MODEL = 'google/gemma-4-31b-it';
     const RESOLUTIONS = new Set(['480P', '768P']);
     const DURATIONS = new Set([5, 10, 15]);
     const ASPECTS = new Set(['21:9', '16:9', '4:3', '1:1', '3:4', '9:16']);
     const VIEWPOINTS = new Set(['third_person', 'first_person']);
     const VIDEO_RENDERERS = new Set(['minimax/h3-max', 'alibaba/wan-3.0', 'alibaba/wan-3.0-prime', 'fal-ai/ltx-2.3/fast']);
+    const SPICY_VIDEO_RENDERERS = new Set(['minimax-h3-spicy', 'seedance-2.0-fast-spicy', 'seedance-2.0-spicy', 'seedance-2.5-spicy']);
+    const CONTENT_ROUTES = new Set(['standard', 'standard_then_spicy', 'spicy_first']);
+    const REFERENCE_STRATEGIES = new Set(['auto', 'direct', 'keyframe']);
+    const REFERENCE_KEYFRAME_COST = 0.08;
     const VIDEO_RENDERER_LABELS = Object.freeze({
         'minimax/h3-max': 'H3 Max',
         'alibaba/wan-3.0': 'Wan 3.0',
         'alibaba/wan-3.0-prime': 'Wan 3.0 Prime',
         'fal-ai/ltx-2.3/fast': 'LTX-2.3 Fast'
+    });
+    const SPICY_RENDERER_LABELS = Object.freeze({
+        'minimax-h3-spicy': 'MiniMax H3 Spicy',
+        'seedance-2.0-fast-spicy': 'Seedance 2.0 Fast Spicy',
+        'seedance-2.0-spicy': 'Seedance 2.0 Spicy',
+        'seedance-2.5-spicy': 'Seedance 2.5 Spicy'
     });
     const VISUAL_PRESETS = [
         ['adult_2d', '2D adult animation', 'Bold adult television animation, graphic shapes, expressive acting, clean linework and limited but intentional motion.'],
@@ -32,7 +44,6 @@
     let generationClock = null;
     let generationStartedAt = 0;
     let generationPhase = '';
-    const directorChoiceRequests = new Set();
     const resumedVideoJobs = new Set();
 
     const byId = id => document.getElementById(id);
@@ -73,12 +84,17 @@
             playerDescription: String(source.playerDescription || '').trim().slice(0, 3000),
             playerReferenceImage: safeImage(source.playerReferenceImage),
             characters: Array.isArray(source.characters) ? source.characters.slice(0, 40).map(normalizeCharacter).filter(item => item.name) : [],
+            referenceStrategy: REFERENCE_STRATEGIES.has(source.referenceStrategy) ? source.referenceStrategy : 'auto',
             directorModel: String(source.directorModel || DEFAULT_DIRECTOR_MODEL).trim().slice(0, 500),
+            // This controls only the inexpensive LLM decision tree. Video is
+            // always rendered lazily along the player's chosen path.
+            storyBlockDepth: STORY_BLOCK_DEPTHS.has(Number(source.storyBlockDepth)) ? Number(source.storyBlockDepth) : 1,
             openingShot: String(source.openingShot || '').trim().slice(0, 6000),
             resolution: RESOLUTIONS.has(source.resolution) ? source.resolution : '480P',
             duration: DURATIONS.has(Number(source.duration)) ? Number(source.duration) : 5,
             aspectRatio: ASPECTS.has(source.aspectRatio) ? source.aspectRatio : '16:9',
             falSafetyChecker: source.falSafetyChecker !== false,
+            contentRoute: CONTENT_ROUTES.has(source.contentRoute) ? source.contentRoute : 'standard',
             rendererPrimary: VIDEO_RENDERERS.has(source.rendererPrimary) ? source.rendererPrimary : 'minimax/h3-max',
             rendererFallback: source.rendererFallback === '' ? ''
                 : VIDEO_RENDERERS.has(source.rendererFallback) ? source.rendererFallback : 'alibaba/wan-3.0',
@@ -86,6 +102,11 @@
             // migration, an explicitly empty selection continues to mean None.
             rendererFallback2: source.rendererFallback2 === '' && storedVersion >= 3 ? ''
                 : VIDEO_RENDERERS.has(source.rendererFallback2) ? source.rendererFallback2 : 'fal-ai/ltx-2.3/fast',
+            spicyRendererPrimary: SPICY_VIDEO_RENDERERS.has(source.spicyRendererPrimary) ? source.spicyRendererPrimary : 'minimax-h3-spicy',
+            spicyRendererFallback: source.spicyRendererFallback === '' ? ''
+                : SPICY_VIDEO_RENDERERS.has(source.spicyRendererFallback) ? source.spicyRendererFallback : 'seedance-2.0-fast-spicy',
+            spicyRendererFallback2: source.spicyRendererFallback2 === '' ? ''
+                : SPICY_VIDEO_RENDERERS.has(source.spicyRendererFallback2) ? source.spicyRendererFallback2 : '',
             sessionBudget: clamp(source.sessionBudget, 0.1, 10000, 5),
             createdAt: Number(source.createdAt) || Date.now(),
             updatedAt: Number(source.updatedAt) || Date.now()
@@ -99,11 +120,14 @@
             action: String(source.action || '').slice(0, 3000),
             sceneSummary: String(source.sceneSummary || '').slice(0, 3000),
             directorPlan: source.directorPlan && typeof source.directorPlan === 'object' ? source.directorPlan : null,
+            storyNodeId: String(source.storyNodeId || '').slice(0, 100),
+            prepared: source.prepared === true,
             prompt: String(source.prompt || '').slice(0, 12000),
             mediaId: /^[a-f0-9]{32}$/.test(String(source.mediaId || '')) ? String(source.mediaId) : '',
             mediaPath: String(source.mediaPath || '').slice(0, 200),
             requestId: String(source.requestId || '').slice(0, 200),
             model: String(source.model || 'minimax/h3-max/text-to-video').slice(0, 200),
+            provider: ['fal', 'hotapi'].includes(source.provider) ? source.provider : (String(source.model || '').includes('spicy') ? 'hotapi' : 'fal'),
             resolution: RESOLUTIONS.has(source.resolution) ? source.resolution : '480P',
             duration: DURATIONS.has(Number(source.duration)) ? Number(source.duration) : 5,
             seed: Number(source.seed) || 0,
@@ -117,6 +141,14 @@
     function normalizeSession(source = {}, index = 0) {
         const shots = Array.isArray(source.shots) ? source.shots.slice(0, 5000).map(normalizeShot) : [];
         const shotIds = new Set(shots.map(shot => shot.id));
+        let storyBlock = null;
+        try { storyBlock = source.storyBlock ? normalizeStoryBlock(source.storyBlock) : null; }
+        catch (error) { console.warn('Discarded invalid stored Video Adventure story block:', error); }
+        const nodeIds = new Set(storyBlock?.nodes?.map(node => node.id) || []);
+        const activeNodeId = nodeIds.has(source.activeNodeId) ? source.activeNodeId : '';
+        const pathShotIds = Array.isArray(source.pathShotIds)
+            ? source.pathShotIds.map(String).filter(id => shotIds.has(id)).slice(0, 500)
+            : shots.filter(shot => !shot.prepared).map(shot => shot.id);
         return {
             version: VIDEO_WORLD_VERSION,
             id: String(source.id || uid('video_run')).slice(0, 100),
@@ -125,8 +157,13 @@
             updatedAt: Number(source.updatedAt) || Date.now(),
             shots,
             storyState: source.storyState && typeof source.storyState === 'object' ? source.storyState : { facts: [], relationships: [], threads: [] },
+            storyBlock,
+            activeNodeId,
+            visitedNodeIds: Array.isArray(source.visitedNodeIds)
+                ? source.visitedNodeIds.map(String).filter(id => nodeIds.has(id)).slice(0, 500) : [],
+            pathShotIds,
             directorChoices: Array.isArray(source.directorChoices) ? source.directorChoices.slice(0, 4) : [],
-            playingShotId: shotIds.has(source.playingShotId) ? source.playingShotId : shots[shots.length - 1]?.id || '',
+            playingShotId: shotIds.has(source.playingShotId) ? source.playingShotId : pathShotIds[pathShotIds.length - 1] || '',
             queuedShotId: shotIds.has(source.queuedShotId) ? source.queuedShotId : '',
             pendingDirectorPlan: source.pendingDirectorPlan && typeof source.pendingDirectorPlan === 'object' ? source.pendingDirectorPlan : null,
             pendingVideoJob: source.pendingVideoJob && typeof source.pendingVideoJob === 'object'
@@ -135,11 +172,16 @@
                     action: String(source.pendingVideoJob.action || '').slice(0, 3000),
                     prompt: String(source.pendingVideoJob.prompt || '').slice(0, 12000),
                     plan: source.pendingVideoJob.plan && typeof source.pendingVideoJob.plan === 'object' ? source.pendingVideoJob.plan : null,
+                    storyNodeId: String(source.pendingVideoJob.storyNodeId || '').slice(0, 100),
+                    prepared: source.pendingVideoJob.prepared === true,
+                    provider: source.pendingVideoJob.provider === 'hotapi' ? 'hotapi' : 'fal',
                     cost: clamp(source.pendingVideoJob.cost, 0, 10000, 0),
                     transitionFrame: safeImage(source.pendingVideoJob.transitionFrame),
                     createdAt: Number(source.pendingVideoJob.createdAt) || Date.now()
                 } : null,
-            spent: shots.reduce((sum, shot) => sum + (Number(shot.cost) || 0), 0),
+            transitionFrame: safeImage(source.transitionFrame),
+            referenceSpend: clamp(source.referenceSpend, 0, 10000, 0),
+            spent: shots.reduce((sum, shot) => sum + (Number(shot.cost) || 0), 0) + clamp(source.referenceSpend, 0, 10000, 0),
             lastFrame: /^data:image\/(?:jpeg|png|webp);base64,/i.test(String(source.lastFrame || ''))
                 ? String(source.lastFrame).slice(0, 12 * 1024 * 1024) : ''
         };
@@ -195,6 +237,10 @@
     }
 
     function rendererRate(renderer, resolution) {
+        if (renderer === 'minimax-h3-spicy') return resolution === '768P' ? 0.12 : 0.08;
+        if (renderer === 'seedance-2.0-fast-spicy') return resolution === '768P' ? 0.24 : 0.112;
+        if (renderer === 'seedance-2.0-spicy') return resolution === '768P' ? 0.304 : 0.14;
+        if (renderer === 'seedance-2.5-spicy') return resolution === '768P' ? 0.462 : 0.206;
         if (renderer === 'alibaba/wan-3.0') return resolution === '768P' ? 0.10 : 0.05;
         if (renderer === 'alibaba/wan-3.0-prime') return resolution === '768P' ? 0.14 : 0.068;
         if (renderer === 'fal-ai/ltx-2.3/fast') return 0.06;
@@ -206,6 +252,23 @@
             .filter((renderer, index, list) => VIDEO_RENDERERS.has(renderer) && list.indexOf(renderer) === index);
     }
 
+    function referenceRendererChain(world) {
+        const chain = rendererChain(world);
+        return [...chain.filter(renderer => renderer === 'minimax/h3-max' || renderer === 'alibaba/wan-3.0'),
+            ...chain.filter(renderer => renderer !== 'minimax/h3-max' && renderer !== 'alibaba/wan-3.0')];
+    }
+
+    function spicyRendererChain(world) {
+        return [world.spicyRendererPrimary, world.spicyRendererFallback, world.spicyRendererFallback2]
+            .filter((renderer, index, list) => SPICY_VIDEO_RENDERERS.has(renderer) && list.indexOf(renderer) === index);
+    }
+
+    function activeRendererChain(world) {
+        if (world.contentRoute === 'spicy_first') return spicyRendererChain(world);
+        if (world.contentRoute === 'standard_then_spicy') return [...rendererChain(world), ...spicyRendererChain(world)];
+        return rendererChain(world);
+    }
+
     function rendererDuration(renderer, duration) {
         const requested = clamp(duration, 1, 30, 5);
         if (renderer !== 'fal-ai/ltx-2.3/fast') return requested;
@@ -215,12 +278,28 @@
 
     function rendererFamily(model) {
         const value = String(model || '');
+        if (SPICY_VIDEO_RENDERERS.has(value)) return value;
         if (value.includes('ltx-2.3/') && value.endsWith('/fast')) return 'fal-ai/ltx-2.3/fast';
         return Object.keys(VIDEO_RENDERER_LABELS).find(renderer => value.startsWith(renderer)) || '';
     }
 
     function shotCost(world) {
-        return Math.max(...rendererChain(world).map(renderer => rendererDuration(renderer, world.duration) * rendererRate(renderer, world.resolution)));
+        return Math.max(...activeRendererChain(world).map(renderer => rendererDuration(renderer, world.duration) * rendererRate(renderer, world.resolution)));
+    }
+
+    function referenceShotCost(world) {
+        return Math.max(shotCost(world), referenceRendererChain(world).includes('minimax/h3-max') ? world.duration * 0.08 : 0);
+    }
+
+    function storyBlockNodeCount(depth) {
+        const safeDepth = STORY_BLOCK_DEPTHS.has(Number(depth)) ? Number(depth) : 2;
+        let total = 0;
+        for (let level = 0; level <= safeDepth; level++) total += STORY_BLOCK_BRANCHING ** level;
+        return total;
+    }
+
+    function storyBlockCost(world) {
+        return (world.storyBlockDepth + 1) * shotCost(world);
     }
 
     function money(value) {
@@ -237,7 +316,7 @@
         const grid = byId('video-world-grid');
         if (!grid) return;
         if (!state.videoWorlds.length) {
-            grid.innerHTML = `<div class="video-world-empty-library"><span>🎬</span><h2>Create your first playable film</h2><p>Video Adventures are independent cinematic role-playing experiences. Define the story, cast and visual language, then play one continuity-linked scene at a time.</p><button class="btn btn-primary" data-video-world-create type="button">Create Video Adventure</button></div>`;
+            grid.innerHTML = `<div class="video-world-empty-library"><span>🎬</span><h2>Create your first playable film</h2><p>Define the story, cast and visual language. The Director preplans a coherent decision tree, while Horde films only the path the player actually takes.</p><button class="btn btn-primary" data-video-world-create type="button">Create Video Adventure</button></div>`;
         } else {
             grid.innerHTML = state.videoWorlds.map(world => {
                 const store = sessionStore(world.id);
@@ -289,15 +368,29 @@
     }
 
     function bindImageInput(input, target, onReady) {
-        input.onchange = () => {
+        input.onchange = async () => {
             const file = input.files?.[0];
             if (!file) return;
             if (!/^image\/(?:jpeg|png|webp)$/i.test(file.type) || file.size > 6 * 1024 * 1024) return showToast('Use a JPEG, PNG or WebP image smaller than 6 MB.', 'error');
+            if (typeof normalizeUploadedImage === 'function') {
+                try {
+                    const data = safeImage(await normalizeUploadedImage(file, 1024, 0.86));
+                    if (!data) throw new Error('Empty normalized image');
+                    onReady(data);
+                    updateEditorCost();
+                    if (target.contains(input)) {
+                        target.querySelectorAll('img, span').forEach(item => item.remove());
+                        input.insertAdjacentHTML('beforebegin', `<img src="${html(data)}" alt="Reference preview">`);
+                    } else target.innerHTML = `<img src="${html(data)}" alt="Reference preview">`;
+                    return;
+                } catch (error) { console.warn('Reference normalization failed; using the original image.', error); }
+            }
             const reader = new FileReader();
             reader.onload = () => {
                 const data = safeImage(reader.result);
                 if (!data) return showToast('That image could not be read.', 'error');
                 onReady(data);
+                updateEditorCost();
                 if (target.contains(input)) {
                     target.querySelectorAll('img, span').forEach(item => item.remove());
                     input.insertAdjacentHTML('beforebegin', `<img src="${html(data)}" alt="Reference preview">`);
@@ -308,7 +401,7 @@
     }
 
     function bindCharacterCard(card) {
-        card.querySelector('.video-world-character-remove').onclick = () => card.remove();
+        card.querySelector('.video-world-character-remove').onclick = () => { card.remove(); updateEditorCost(); };
         const target = card.querySelector('.video-world-character-reference');
         const input = card.querySelector('[data-character-image]');
         bindImageInput(input, target, data => { card.dataset.referenceImage = data; });
@@ -355,11 +448,17 @@
         byId('video-world-aspect').value = value.aspectRatio;
         byId('video-world-safety-checker').checked = state.globalSettings?.falSafetyChecker !== false
             && value.falSafetyChecker !== false;
+        byId('video-world-content-route').value = value.contentRoute;
         byId('video-world-renderer-primary').value = value.rendererPrimary;
         byId('video-world-renderer-fallback').value = value.rendererFallback === value.rendererPrimary ? '' : value.rendererFallback;
         byId('video-world-renderer-fallback-2').value = [value.rendererPrimary, value.rendererFallback].includes(value.rendererFallback2) ? '' : value.rendererFallback2;
+        byId('video-world-spicy-primary').value = value.spicyRendererPrimary;
+        byId('video-world-spicy-fallback').value = value.spicyRendererFallback === value.spicyRendererPrimary ? '' : value.spicyRendererFallback;
+        byId('video-world-spicy-fallback-2').value = [value.spicyRendererPrimary, value.spicyRendererFallback].includes(value.spicyRendererFallback2) ? '' : value.spicyRendererFallback2;
         byId('video-world-budget').value = value.sessionBudget.toFixed(2);
         byId('video-world-director-model').value = value.directorModel || DEFAULT_DIRECTOR_MODEL;
+        byId('video-world-story-depth').value = String(value.storyBlockDepth);
+        byId('video-world-reference-strategy').value = value.referenceStrategy;
         byId('video-world-director-status').textContent = `Provider: ${typeof cloudProviderName === 'function' ? cloudProviderName() : state.globalSettings?.apiProvider || 'default'} · Not tested`;
         byId('delete-video-world-btn').classList.toggle('hidden', !world);
         updateEditorCost();
@@ -399,11 +498,17 @@
             duration: Number(byId('video-world-duration').value),
             aspectRatio: byId('video-world-aspect').value,
             falSafetyChecker: byId('video-world-safety-checker').checked,
+            contentRoute: byId('video-world-content-route').value,
             rendererPrimary: byId('video-world-renderer-primary').value,
             rendererFallback: byId('video-world-renderer-fallback').value,
             rendererFallback2: byId('video-world-renderer-fallback-2').value,
+            spicyRendererPrimary: byId('video-world-spicy-primary').value,
+            spicyRendererFallback: byId('video-world-spicy-fallback').value,
+            spicyRendererFallback2: byId('video-world-spicy-fallback-2').value,
             sessionBudget: Number(byId('video-world-budget').value),
             directorModel: byId('video-world-director-model').value,
+            storyBlockDepth: Number(byId('video-world-story-depth').value),
+            referenceStrategy: byId('video-world-reference-strategy').value,
             updatedAt: Date.now()
         });
     }
@@ -411,10 +516,14 @@
     function updateEditorCost() {
         const resolution = byId('video-world-resolution')?.value || '480P';
         const duration = Number(byId('video-world-duration')?.value) || 5;
+        const route = CONTENT_ROUTES.has(byId('video-world-content-route')?.value) ? byId('video-world-content-route').value : 'standard';
         const primary = byId('video-world-renderer-primary')?.value || 'minimax/h3-max';
         const fallback = byId('video-world-renderer-fallback')?.value || '';
         const fallback2 = byId('video-world-renderer-fallback-2')?.value || '';
-        const chain = [primary, fallback, fallback2].filter((item, index, list) => VIDEO_RENDERERS.has(item) && list.indexOf(item) === index);
+        const standardChain = [primary, fallback, fallback2].filter((item, index, list) => VIDEO_RENDERERS.has(item) && list.indexOf(item) === index);
+        const spicyValues = [byId('video-world-spicy-primary')?.value || 'minimax-h3-spicy', byId('video-world-spicy-fallback')?.value || '', byId('video-world-spicy-fallback-2')?.value || ''];
+        const spicyChain = spicyValues.filter((item, index, list) => SPICY_VIDEO_RENDERERS.has(item) && list.indexOf(item) === index);
+        const chain = route === 'spicy_first' ? spicyChain : route === 'standard_then_spicy' ? [...standardChain, ...spicyChain] : standardChain;
         const estimates = chain.map(renderer => ({
             renderer,
             duration: rendererDuration(renderer, duration),
@@ -422,9 +531,44 @@
         }));
         const maximum = Math.max(...estimates.map(item => item.cost));
         const target = byId('video-world-cost-preview');
-        if (target) target.innerHTML = `<span>Reserved shot budget</span><strong>${money(maximum)}</strong><small>${estimates.map(item => `${VIDEO_RENDERER_LABELS[item.renderer]} ${item.duration}s ${money(item.cost)}`).join(' · ')}. Only the renderer that completes is recorded; an upstream failed request may still be billable by Fal.</small>`;
+        if (target) target.innerHTML = `<span>Maximum successful shot</span><strong>${money(maximum)}</strong><small>${estimates.map(item => `${VIDEO_RENDERER_LABELS[item.renderer] || SPICY_RENDERER_LABELS[item.renderer]} ${item.duration}s ${money(item.cost)}`).join(' · ')}. Failed upstream requests can still be billable before a fallback begins.</small>`;
         const note = byId('video-world-renderer-note');
-        if (note) note.textContent = `Renderers: Fal · ${chain.map(renderer => VIDEO_RENDERER_LABELS[renderer]).join(' → ')}`;
+        if (note) note.textContent = route === 'standard'
+            ? `Standard: Fal · ${standardChain.map(renderer => VIDEO_RENDERER_LABELS[renderer]).join(' → ')}`
+            : route === 'spicy_first'
+                ? `Spicy: HotAPI · ${spicyChain.map(renderer => SPICY_RENDERER_LABELS[renderer]).join(' → ')}`
+                : `Smart fallback: Fal (${standardChain.map(renderer => VIDEO_RENDERER_LABELS[renderer]).join(' → ')}) then HotAPI (${spicyChain.map(renderer => SPICY_RENDERER_LABELS[renderer]).join(' → ')})`;
+        const standardGroup = byId('video-world-standard-renderers');
+        const spicyGroup = byId('video-world-spicy-renderers');
+        standardGroup?.classList.toggle('hidden', route === 'spicy_first');
+        spicyGroup?.classList.toggle('hidden', route === 'standard');
+        byId('video-world-fal-safety-controls')?.classList.toggle('hidden', route === 'spicy_first');
+        const routeNote = byId('video-world-content-route-note');
+        if (routeNote) {
+            routeNote.classList.toggle('spicy', route !== 'standard');
+            routeNote.textContent = route === 'standard'
+                ? 'Fastest and cheapest. Uses only the configured Fal chain and its provider safety behavior.'
+                : route === 'standard_then_spicy'
+                    ? 'Recommended mixed mode. Fal gets the first attempt; if the complete Fal chain rejects or fails, the original scene moves to your HotAPI spicy chain.'
+                    : 'Uses HotAPI for every scene from the opening onward. This avoids switching visual families after a refusal, but preparation is slower and more expensive.';
+        }
+        const depth = Number(byId('video-world-story-depth')?.value) || 2;
+        const plannedBeats = storyBlockNodeCount(depth);
+        const pathScenes = depth + 1;
+        const blockTarget = byId('video-world-block-cost-preview');
+        const referenceStrategy = byId('video-world-reference-strategy')?.value || 'auto';
+        const hasReferences = !!byId('video-world-player-reference-preview')?.dataset.image
+            || [...(byId('video-world-characters')?.querySelectorAll('.video-world-character-card') || [])].some(card => !!card.dataset.referenceImage);
+        const nativeReferences = route !== 'spicy_first' && standardChain.some(renderer => renderer === 'minimax/h3-max' || renderer === 'alibaba/wan-3.0');
+        const nativeReferenceShot = standardChain.includes('minimax/h3-max') ? Math.max(maximum, duration * 0.08) : maximum;
+        const keyframeLikely = hasReferences && (referenceStrategy === 'keyframe' || (referenceStrategy === 'auto' && !nativeReferences));
+        const chosenPathEstimate = maximum * pathScenes
+            + (hasReferences && nativeReferences && referenceStrategy !== 'keyframe' ? nativeReferenceShot - maximum : 0)
+            + (keyframeLikely ? REFERENCE_KEYFRAME_COST : 0);
+        const referenceNote = referenceStrategy === 'direct'
+            ? 'Direct references add no separate anchor-image charge when H3 or Wan is available; native reference-video rates may differ from ordinary shots.'
+            : `An identity anchor is generated only when the opening or a new cast entrance requires one; each anchor currently adds about ${money(REFERENCE_KEYFRAME_COST)}.`;
+        if (blockTarget) blockTarget.innerHTML = `<span>Chosen-path estimate</span><strong>${money(chosenPathEstimate)}</strong><small>${plannedBeats} text-planned beats · only ${pathScenes} paid video${pathScenes === 1 ? '' : 's'} if one complete path is played · nothing is charged for unused branches. ${referenceNote} More new-character entrances can add more anchors. Failed upstream requests may still be billable.</small>`;
     }
 
     async function saveEditor() {
@@ -432,6 +576,7 @@
         if (!world.name || ['Untitled Video World', 'Untitled Video Adventure'].includes(world.name)) return showToast('Name your Video Adventure first.', 'error');
         if (!world.premise) return showToast('Add a premise and player role.', 'error');
         if (!world.openingShot) return showToast('Describe the opening shot.', 'error');
+        if (shotCost(world) > world.sessionBudget + 0.000001) return showToast(`One video shot can cost up to ${money(shotCost(world))}, above the ${money(world.sessionBudget)} timeline limit. Raise the limit or choose a cheaper renderer, duration or resolution.`, 'error');
         const existingIndex = state.videoWorlds.findIndex(item => item.id === state.editingVideoWorldId);
         if (existingIndex >= 0) state.videoWorlds[existingIndex] = world;
         else state.videoWorlds.unshift(world);
@@ -458,9 +603,9 @@
         status.textContent = 'Testing story planning…';
         try {
             const session = normalizeSession({});
-            const plan = await requestDirectorPlan(world, session, '', { signal: controller.signal });
+            const plan = await requestStoryBlock(world, session, '', { signal: controller.signal, depth: world.storyBlockDepth });
             const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
-            status.textContent = `Ready in ${elapsed}s · ${plan.choices.length} contextual choices`;
+            status.textContent = `Ready in ${elapsed}s · ${plan.nodes.length} planned scenes`;
             showToast('World Director is ready.', 'success');
         } catch (error) {
             status.textContent = controller.signal.aborted
@@ -516,18 +661,26 @@
         runSelect.innerHTML = store.sessions.map(item => `<option value="${html(item.id)}">${html(item.name)}</option>`).join('');
         runSelect.value = session.id;
         byId('video-world-run-spend').textContent = `${money(session.spent)} / ${money(world.sessionBudget)}`;
-        byId('video-world-next-cost').textContent = `Estimated shot: ${money(shotCost(world))}`;
-        const isOpening = session.shots.length === 0;
-        byId('video-world-action-label').textContent = isOpening ? 'Opening shot' : 'Choose your next beat';
-        byId('video-world-generate').textContent = isOpening ? 'Film opening' : 'Generate next shot';
-        byId('video-world-action').placeholder = isOpening
-            ? 'Optional: add one detail to the authored opening shot…'
-            : 'Describe what you attempt or what should happen next…';
+        const block = session.storyBlock;
+        const activeNode = blockNode(session);
+        const blockReady = block?.status === 'ready' && activeNode;
+        const blockComplete = blockReady && activeNode.choices.length === 0;
+        byId('video-world-next-cost').textContent = blockReady && !blockComplete
+            ? `Next chosen video: up to ${money(shotCost(world))}`
+            : `Opening video: up to ${money(shotCost(world))}`;
+        byId('video-world-action-label').textContent = !blockReady ? (block ? 'Resume opening scene' : 'Begin your story') : blockComplete ? 'Planned story complete' : 'Choose your next beat';
+        byId('video-world-generate').textContent = block?.status && block.status !== 'ready' ? 'Resume opening' : blockComplete ? 'Plan next story' : 'Plan & film opening';
+        byId('video-world-generate').classList.toggle('hidden', blockReady && !blockComplete);
+        byId('video-world-action').placeholder = blockComplete
+            ? 'Optional: tell the Director where the next story plan should begin…'
+            : 'Optional: add one direction before the decision tree is planned…';
         renderActionChoices(world, session);
         if (session.pendingVideoJob?.jobId) void resumeVideoJob(world, session);
-        if (session.shots.length && !session.directorChoices.length) void ensureDirectorChoices(world, session);
 
-        let current = session.shots.find(shot => shot.id === session.playingShotId) || session.shots[session.shots.length - 1];
+        let current = session.shots.find(shot => shot.id === session.playingShotId)
+            || (activeNode ? blockNodeShot(session, activeNode) : null)
+            || session.shots.find(shot => shot.id === session.pathShotIds.at(-1))
+            || null;
         if (current && !session.playingShotId) session.playingShotId = current.id;
         const player = byId('video-world-player');
         byId('video-world-stage').classList.toggle('has-footage', !!current);
@@ -563,10 +716,13 @@
         }
 
         const timeline = byId('video-world-timeline');
-        timeline.innerHTML = session.shots.length ? [...session.shots].reverse().map(shot => `
-            <button class="video-world-shot-card${shot.id === current?.id ? ' active' : ''}" data-video-shot-id="${html(shot.id)}" type="button">
-                <span>${String(shot.index).padStart(2, '0')}</span><div><strong>${html(shot.index === 1 ? 'Opening shot' : shot.action || 'Generated beat')}</strong><small>${shot.duration}s · ${html(shot.resolution.replace('P', 'p'))} · ${money(shot.cost)}${shot.continuityCaptured ? ' · chained' : ''}</small></div>
-            </button>`).join('') : '<div class="video-world-empty-timeline"><strong>No footage yet</strong><span>Film the opening to begin this timeline.</span></div>';
+        const pathShots = session.pathShotIds.map(id => session.shots.find(shot => shot.id === id)).filter(Boolean);
+        timeline.innerHTML = pathShots.length ? [...pathShots].reverse().map((shot, reverseIndex) => {
+            const pathIndex = pathShots.length - reverseIndex;
+            return `<button class="video-world-shot-card${shot.id === current?.id ? ' active' : ''}" data-video-shot-id="${html(shot.id)}" type="button">
+                <span>${String(pathIndex).padStart(2, '0')}</span><div><strong>${html(pathIndex === 1 ? 'Opening shot' : shot.action || 'Planned beat')}</strong><small>${shot.duration}s · ${html(shot.resolution.replace('P', 'p'))} · ${money(shot.cost)}${shot.continuityCaptured ? ' · prepared' : ''}</small></div>
+            </button>`;
+        }).join('') : '<div class="video-world-empty-timeline"><strong>No footage yet</strong><span>Plan the story and film its opening scene to begin.</span></div>';
         timeline.querySelectorAll('[data-video-shot-id]').forEach(button => {
             button.onclick = () => {
                 const shot = session.shots.find(item => item.id === button.dataset.videoShotId);
@@ -584,30 +740,34 @@
         const container = byId('video-world-choices');
         const input = byId('video-world-action');
         if (!container || !input) return;
-        const isOpening = !session.shots.length;
-        container.classList.toggle('hidden', isOpening);
-        if (isOpening) {
+        const block = session.storyBlock;
+        const activeNode = blockNode(session);
+        const ready = block?.status === 'ready' && activeNode;
+        container.classList.toggle('hidden', !ready);
+        if (!ready) {
             input.classList.remove('hidden');
             input.dataset.customAction = '';
             return;
         }
-        if (session.queuedShotId) {
-            container.innerHTML = '<div class="video-world-choice-status"><strong>Continuation ready</strong><small>Finishing the current scene before the story advances…</small></div>';
-            input.classList.add('hidden');
+        const options = activeNode.choices || [];
+        if (!options.length) {
+            container.innerHTML = '<div class="video-world-choice-status"><strong>Planned story complete</strong><small>This chosen path reached the end of its current plan. Plan the next decision tree when you are ready to continue.</small></div>';
+            input.classList.remove('hidden');
+            input.dataset.customAction = 'true';
             return;
         }
-        const options = Array.isArray(session.directorChoices) ? session.directorChoices : [];
+        const selectedShotEstimate = money(shotCost(world));
         container.innerHTML = options.length
-            ? options.map(option => `<button type="button" data-video-world-choice="${html(option.action)}"><strong>${html(option.label)}</strong><small>${html(option.consequenceHint || option.action)}</small></button>`).join('') + '<button type="button" class="video-world-custom-choice" data-video-world-custom>Write my own…</button>'
-            : '<div class="video-world-choice-status"><strong>Director is preparing this scene…</strong><small>Story-aware choices will appear here.</small></div>';
+            ? options.map(option => `<button type="button" data-video-world-target="${html(option.targetId)}"><strong>${html(option.label)}</strong><small>${html(option.consequenceHint || option.action)} · renders one video up to ${selectedShotEstimate}</small></button>`).join('') + '<button type="button" class="video-world-custom-choice" data-video-world-custom>Go off-script…</button>'
+            : '';
         input.classList.toggle('hidden', input.dataset.customAction !== 'true');
-        container.querySelectorAll('[data-video-world-choice]').forEach(button => {
+        container.querySelectorAll('[data-video-world-target]').forEach(button => {
             button.onclick = () => {
-                input.value = button.dataset.videoWorldChoice || '';
+                input.value = '';
                 input.dataset.customAction = '';
                 input.classList.add('hidden');
                 container.querySelectorAll('button').forEach(item => item.classList.toggle('active', item === button));
-                queueMicrotask(() => generateShot());
+                queueMicrotask(() => { void choosePreparedBranch(button.dataset.videoWorldTarget); });
             };
         });
         const custom = container.querySelector('[data-video-world-custom]');
@@ -615,6 +775,8 @@
             input.value = '';
             input.dataset.customAction = 'true';
             input.classList.remove('hidden');
+            byId('video-world-generate').classList.remove('hidden');
+            byId('video-world-generate').textContent = 'Plan custom path';
             container.querySelectorAll('button').forEach(item => item.classList.remove('active'));
             input.focus();
         };
@@ -670,100 +832,146 @@
         catch (_) { throw new Error('The text provider returned a non-JSON API response. Check its base URL and model compatibility.'); }
     }
 
-    async function parseOrRepairDirectorPlan(payload, body, signal) {
-        const raw = directorMessageText(payload);
-        try { return normalizeDirectorPlan(extractJson(raw)); }
-        catch (firstError) {
-            if (!raw) throw new Error('The Director returned an empty response. Choose another text model and test it first.');
-            setGenerationDetail('The Director returned malformed JSON. Repairing the story plan…');
-            const repairBody = {
-                model: body.model, stream: false, temperature: 0, max_tokens: 1000,
-                response_format: { type: 'json_object' },
-                messages: [{ role: 'system', content: 'Repair the supplied malformed JSON into one valid JSON object. Preserve its story content. Do not add commentary or markdown. The object must contain sceneSummary, videoPrompt, dialogue, exactly three choices, and statePatch. Every choice must contain label, action, consequenceHint, and nextBeat.' },
-                    { role: 'user', content: raw.slice(0, 12000) }]
-            };
-            try {
-                const repairedPayload = await fetchDirectorPayload(repairBody, signal);
-                return normalizeDirectorPlan(extractJson(directorMessageText(repairedPayload)));
-            } catch (repairError) {
-                throw new Error(`The selected Director model returned malformed JSON twice. Choose a model with structured JSON support and run Test Director.`);
-            }
-        }
-    }
-
     function normalizeBeatPlan(raw = {}) {
+        const names = value => Array.isArray(value)
+            ? [...new Set(value.map(item => String(item || '').trim().slice(0, 120)).filter(Boolean))].slice(0, 12)
+            : [];
         return {
             sceneSummary: String(raw.sceneSummary || '').trim().slice(0, 3000),
             videoPrompt: String(raw.videoPrompt || '').trim().slice(0, 6000),
+            visibleCharacters: names(raw.visibleCharacters),
+            introducedCharacters: names(raw.introducedCharacters),
             dialogue: Array.isArray(raw.dialogue) ? raw.dialogue.slice(0, 6).map(line => ({ speaker: String(line?.speaker || '').slice(0, 120), line: String(line?.line || '').slice(0, 500), language: String(line?.language || 'English').slice(0, 40) })).filter(line => line.speaker && line.line) : [],
             statePatch: raw.statePatch && typeof raw.statePatch === 'object' ? raw.statePatch : {}
         };
     }
 
-    function normalizeDirectorPlan(raw = {}) {
-        const choices = Array.isArray(raw.choices) ? raw.choices.slice(0, 3).map((choice, index) => ({
-            label: String(choice?.label || `Choice ${index + 1}`).trim().slice(0, 80),
-            action: String(choice?.action || '').trim().slice(0, 600),
-            consequenceHint: String(choice?.consequenceHint || '').trim().slice(0, 180),
-            nextBeat: choice?.nextBeat && typeof choice.nextBeat === 'object' ? normalizeBeatPlan(choice.nextBeat) : null
-        })).filter(choice => choice.action) : [];
-        if (choices.length < 2) throw new Error('The Director did not provide enough playable choices.');
-        return { ...normalizeBeatPlan(raw), choices };
+    function normalizeStoryBlock(raw = {}) {
+        const requestedDepth = STORY_BLOCK_DEPTHS.has(Number(raw.depth)) ? Number(raw.depth) : 2;
+        const normalized = {
+            id: String(raw.id || uid('story_block')).slice(0, 100),
+            title: String(raw.title || 'Story block').trim().slice(0, 160),
+            summary: String(raw.summary || '').trim().slice(0, 1000),
+            depth: requestedDepth,
+            rootId: '',
+            status: ['planned', 'preparing', 'ready', 'partial', 'failed'].includes(raw.status) ? raw.status : 'planned',
+            sourceAction: String(raw.sourceAction || '').trim().slice(0, 3000),
+            createdAt: Number(raw.createdAt) || Date.now(),
+            nodes: []
+        };
+        if (Array.isArray(raw.nodes)) {
+            const seen = new Set();
+            normalized.nodes = raw.nodes.slice(0, 100).map((source, index) => {
+                let id = String(source?.id || `node_${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 100);
+                while (seen.has(id)) id = `${id}_${index + 1}`;
+                seen.add(id);
+                return {
+                    id,
+                    parentId: String(source?.parentId || '').slice(0, 100),
+                    level: clamp(source?.level, 0, 10, 0),
+                    inboundLabel: String(source?.inboundLabel || '').trim().slice(0, 80),
+                    inboundAction: String(source?.inboundAction || '').trim().slice(0, 600),
+                    inboundHint: String(source?.inboundHint || '').trim().slice(0, 180),
+                    ...normalizeBeatPlan(source),
+                    choices: Array.isArray(source?.choices) ? source.choices.slice(0, 3).map(choice => ({
+                        label: String(choice?.label || '').trim().slice(0, 80),
+                        action: String(choice?.action || '').trim().slice(0, 600),
+                        consequenceHint: String(choice?.consequenceHint || '').trim().slice(0, 180),
+                        targetId: String(choice?.targetId || '').slice(0, 100)
+                    })).filter(choice => choice.label && choice.action && choice.targetId) : [],
+                    shotId: String(source?.shotId || '').slice(0, 100),
+                    referenceFrame: safeImage(source?.referenceFrame),
+                    renderError: String(source?.renderError || '').slice(0, 500)
+                };
+            });
+            const ids = new Set(normalized.nodes.map(node => node.id));
+            normalized.rootId = ids.has(raw.rootId) ? raw.rootId : normalized.nodes.find(node => !node.parentId)?.id || normalized.nodes[0]?.id || '';
+            normalized.nodes.forEach(node => { node.choices = node.choices.filter(choice => ids.has(choice.targetId)); });
+        } else if (raw.root && typeof raw.root === 'object') {
+            let counter = 0;
+            const walk = (beat, level, parentId = '', inbound = {}) => {
+                counter++;
+                const id = `block_node_${counter}`;
+                const node = {
+                    id, parentId, level,
+                    inboundLabel: String(inbound.label || '').trim().slice(0, 80),
+                    inboundAction: String(inbound.action || '').trim().slice(0, 600),
+                    inboundHint: String(inbound.consequenceHint || '').trim().slice(0, 180),
+                    ...normalizeBeatPlan(beat), choices: [], shotId: '', referenceFrame: '', renderError: ''
+                };
+                normalized.nodes.push(node);
+                if (level < requestedDepth) {
+                    const choices = Array.isArray(beat?.choices) ? beat.choices.slice(0, 3) : [];
+                    if (choices.length !== STORY_BLOCK_BRANCHING || choices.some(choice => !choice?.nextBeat)) {
+                        throw new Error(`The Director returned an incomplete decision tree at level ${level + 1}.`);
+                    }
+                    node.choices = choices.map((choice, index) => {
+                        const normalizedChoice = {
+                            label: String(choice?.label || `Choice ${index + 1}`).trim().slice(0, 80),
+                            action: String(choice?.action || '').trim().slice(0, 600),
+                            consequenceHint: String(choice?.consequenceHint || '').trim().slice(0, 180)
+                        };
+                        if (!normalizedChoice.action) throw new Error('The Director returned a choice without a playable action.');
+                        const child = walk(choice.nextBeat, level + 1, id, normalizedChoice);
+                        return { ...normalizedChoice, targetId: child.id };
+                    });
+                }
+                return node;
+            };
+            normalized.rootId = walk(raw.root, 0).id;
+        }
+        if (!normalized.rootId || !normalized.nodes.length) throw new Error('The Director returned an empty story block.');
+        const expected = storyBlockNodeCount(normalized.depth);
+        if (normalized.nodes.length !== expected) throw new Error(`The Director planned ${normalized.nodes.length} scenes; this block requires ${expected}.`);
+        return normalized;
+    }
+
+    async function requestStoryBlock(world, session, action = '', options = {}) {
+        const model = world.directorModel || DEFAULT_DIRECTOR_MODEL;
+        if (!model) throw new Error('Choose a fast text model before preparing a Video Adventure.');
+        const depth = STORY_BLOCK_DEPTHS.has(Number(options.depth)) ? Number(options.depth) : world.storyBlockDepth;
+        const context = directorContext(world, session, action);
+        context.blockDepth = depth;
+        context.requiredSceneCount = storyBlockNodeCount(depth);
+        context.lastVisitedScene = session.activeNodeId && session.storyBlock
+            ? session.storyBlock.nodes.find(node => node.id === session.activeNodeId)?.sceneSummary || '' : '';
+        const recursiveExample = depth === 1
+            ? 'The root has exactly three choices. Each choice has one terminal nextBeat with choices: [].'
+            : 'The root has exactly three choices. Each level-1 nextBeat has exactly three choices. Every level-2 nextBeat is terminal with choices: [].';
+        const system = `You are the story architect for a playable cinematic role-playing block. Plan the COMPLETE decision tree before play; you will not be called between choices. Preserve authored canon, causality, player agency, recurring character identity, foreshadowing and payoff. Choices must be specific actions available in the current scene, produce visibly different immediate consequences, and still form one coherent short episode. Never use generic labels such as Engage, Investigate, Continue or Take action. Never place the adventure title in dialogue. Keep dialogue short enough for one ${world.duration}-second shot. For every beat, visibleCharacters must list the exact names of authored cast visibly present, and introducedCharacters must list exact authored names entering the film for the first time on that branch. Never put invented or unauthored names in either list. Return JSON only with this recursive shape: {"title":"private block label","summary":"arc summary","depth":${depth},"root":{"sceneSummary":"one sentence","videoPrompt":"under 80 words; concrete staging, acting, camera and sound","visibleCharacters":["exact authored name"],"introducedCharacters":["exact authored name"],"dialogue":[{"speaker":"name","line":"short exact line","language":"English"}],"statePatch":{"facts":[],"relationships":[],"threads":[]},"choices":[{"label":"2-7 specific words","action":"one sentence player intent","consequenceHint":"under 12 words","nextBeat":{"sceneSummary":"causal result","videoPrompt":"under 70 words","visibleCharacters":[],"introducedCharacters":[],"dialogue":[],"statePatch":{"facts":[],"relationships":[],"threads":[]},"choices":[]}}]}}. ${recursiveExample} Every nonterminal beat must have exactly three choices; terminal beats must have none. Do not use markdown.`;
+        const body = {
+            model, stream: false, temperature: 0.62, max_tokens: depth === 1 ? 2600 : 6500,
+            response_format: { type: 'json_object' },
+            messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(context) }]
+        };
+        const payload = await fetchDirectorPayload(body, options.signal);
+        const raw = directorMessageText(payload);
+        try {
+            return normalizeStoryBlock({ ...extractJson(raw), sourceAction: action, status: 'planned' });
+        } catch (firstError) {
+            if (!raw) throw new Error('The Director returned an empty story block.');
+            setGenerationDetail('The Director returned an invalid tree. Repairing the complete block…');
+            const repairBody = {
+                model, stream: false, temperature: 0, max_tokens: depth === 1 ? 3000 : 7000,
+                response_format: { type: 'json_object' },
+                messages: [{ role: 'system', content: `${system}\nRepair the supplied draft. Preserve its story but satisfy the exact tree depth and scene count. Return only the corrected object.` },
+                    { role: 'user', content: raw.slice(0, 48000) }]
+            };
+            const repaired = await fetchDirectorPayload(repairBody, options.signal);
+            try { return normalizeStoryBlock({ ...extractJson(directorMessageText(repaired)), sourceAction: action, status: 'planned' }); }
+            catch (_) { throw new Error(`The selected Director could not produce a valid ${storyBlockNodeCount(depth)}-scene decision tree. Choose a stronger structured-output model or use a Short block.`); }
+        }
     }
 
     function directorContext(world, session, action) {
-        const cast = (world.characters || []).map(character => ({ name: character.name, role: character.role, personality: character.personality, appearance: character.appearance }));
-        const recent = session.shots.slice(-6).map(shot => ({ action: shot.action, scene: shot.sceneSummary || shot.directorPlan?.sceneSummary || '' }));
+        const cast = (world.characters || []).map(character => ({ name: character.name, role: character.role, personality: character.personality, appearance: character.appearance, hasReferenceImage: !!character.referenceImage }));
+        // Only the selected path is ever rendered or canonical. The unvisited
+        // text-planned branches must not leak into the next story plan.
+        const canonicalShots = session.pathShotIds?.length
+            ? session.pathShotIds.map(id => session.shots.find(shot => shot.id === id)).filter(Boolean)
+            : session.shots.filter(shot => shot.prepared !== true);
+        const recent = canonicalShots.slice(-6).map(shot => ({ action: shot.action, scene: shot.sceneSummary || shot.directorPlan?.sceneSummary || '' }));
         return { premise: world.premise, rules: world.storyRules, player: world.playerDescription, viewpoint: world.viewpoint, cast, storyState: session.storyState, recentBeats: recent, playerChoice: action || '', openingSituation: session.shots.length ? '' : world.openingShot };
-    }
-
-    async function requestDirectorPlan(world, session, action = '', options = {}) {
-        const model = world.directorModel || DEFAULT_DIRECTOR_MODEL;
-        if (!model) throw new Error('Choose a fast text model in Settings before playing. Video Adventures require a World Director.');
-        const context = directorContext(world, session, action);
-        if (options.plannedBeat) context.plannedBeatThatWillBeCurrent = normalizeBeatPlan(options.plannedBeat);
-        const task = options.choicesOnly
-            ? `The current clip already happened. Do not advance the top-level beat. Return the current sceneSummary, blank top-level videoPrompt, no top-level dialogue or state changes, and exactly three specific actions the player can choose NOW.`
-            : `Continue causally from canonical state. Write a filmable next beat with at most two short spoken lines that fit inside the configured shot.`;
-        const body = {
-            model,
-            stream: false,
-            temperature: 0.72,
-            max_tokens: 900,
-            response_format: { type: 'json_object' },
-            messages: [{ role: 'system', content: `You are the fast World Director for a playable role-playing story. Preserve causality, character voice and player agency. Never decide the player's feelings or actions. Adventure titles are private interface metadata: never invent, announce, quote or place a title, project name or episode name in dialogue. ${task} Return compact JSON only. Keep the entire response below 750 tokens: {"sceneSummary":"one sentence","videoPrompt":"under 90 words; concrete staging, acting, camera and sound","dialogue":[{"speaker":"name","line":"one short exact line","language":"English"}],"choices":[{"label":"2-6 specific words","action":"one sentence player intent","consequenceHint":"under 12 words","nextBeat":{"sceneSummary":"one sentence causal result","videoPrompt":"under 55 words, ready to render","dialogue":[{"speaker":"name","line":"one short exact line","language":"English"}]}}],"statePatch":{"facts":["at most two"],"relationships":["at most one"],"threads":["at most two"]}}. Return exactly three contextual choices with compact nextBeat render briefs. Never use generic labels such as Engage, Investigate, Continue or Take action.` }, { role: 'user', content: JSON.stringify(context) }]
-        };
-        const data = await fetchDirectorPayload(body, options.signal);
-        return parseOrRepairDirectorPlan(data, body, options.signal);
-    }
-
-    async function ensureDirectorChoices(world, session) {
-        if (!world || !session?.shots?.length || session.directorChoices?.length || directorChoiceRequests.has(session.id)) return;
-        directorChoiceRequests.add(session.id);
-        const controller = new AbortController();
-        const deadline = setTimeout(() => controller.abort(), 60000);
-        try {
-            const plan = await requestDirectorPlan(world, session, '', { choicesOnly: true, signal: controller.signal });
-            if (!state.videoWorldSessions[world.id]?.sessions.includes(session)) return;
-            session.directorChoices = plan.choices;
-            await saveState();
-            if (activeWorld()?.id === world.id && activeSession(world, false)?.id === session.id) renderPlay();
-        } catch (error) {
-            console.error('World Director choice generation failed:', error);
-            const container = byId('video-world-choices');
-            if (container) {
-                container.innerHTML = `<div class="video-world-choice-status error"><strong>World Director unavailable</strong><small>${html(error.message || 'Configure a text model in Settings.')}</small></div><button type="button" class="video-world-custom-choice" data-video-world-custom>Write my own…</button>`;
-                container.querySelector('[data-video-world-custom]').onclick = () => {
-                    const input = byId('video-world-action');
-                    input.dataset.customAction = 'true';
-                    input.classList.remove('hidden');
-                    input.focus();
-                };
-            }
-        } finally {
-            clearTimeout(deadline);
-            directorChoiceRequests.delete(session.id);
-        }
     }
 
     function commitDirectorState(session, plan) {
@@ -772,28 +980,9 @@
             const additions = Array.isArray(plan.statePatch?.[key]) ? plan.statePatch[key].map(String).filter(Boolean) : [];
             stateNow[key] = [...new Set([...(Array.isArray(stateNow[key]) ? stateNow[key] : []), ...additions])].slice(-120);
         }
-        session.directorChoices = plan.choices;
     }
 
-    async function activateQueuedShot(world = activeWorld(), session = activeSession(world, false)) {
-        if (!world || !session?.queuedShotId) return false;
-        const shot = session.shots.find(item => item.id === session.queuedShotId);
-        if (!shot) {
-            session.queuedShotId = '';
-            session.pendingDirectorPlan = null;
-            return false;
-        }
-        session.playingShotId = shot.id;
-        session.queuedShotId = '';
-        if (session.pendingDirectorPlan) commitDirectorState(session, session.pendingDirectorPlan);
-        session.pendingDirectorPlan = null;
-        await saveState();
-        renderPlay();
-        byId('video-world-player').play().catch(() => {});
-        return true;
-    }
-
-    function buildPrompt(world, session, action, plan = null) {
+    function buildPrompt(world, session, action, plan = null, referencePlan = null) {
         const preset = VISUAL_PRESETS.find(item => item[0] === world.visualPreset) || VISUAL_PRESETS[3];
         const cast = world.characters?.length ? world.characters.map(character => `${character.name} — ${character.role || 'recurring character'}. Personality/voice: ${character.personality || 'natural and distinctive'}. Fixed appearance: ${character.appearance || 'match the supplied canonical reference when available'}.`).join('\n') : 'No recurring cast has been authored yet.';
         const common = [
@@ -809,6 +998,7 @@
         ].filter(Boolean);
         if (plan?.sceneSummary) common.push(`STORY PURPOSE OF THIS BEAT: ${plan.sceneSummary}`);
         if (plan?.videoPrompt) common.push(`DIRECTOR'S SHOT PLAN: ${plan.videoPrompt}`);
+        if (referencePlan?.mapped?.length) common.push(`CANONICAL IMAGE REFERENCES:\n${referencePlan.mapped.map((item, index) => `Image ${index + 1} = ${item.label}. Preserve this identity, face, hair, wardrobe silhouette and distinguishing features.`).join('\n')}\nDo not merge identities or copy one referenced person's face onto another.`);
         const dialogue = (plan?.dialogue || []).filter(line => !String(line.line || '').toLowerCase().includes(String(world.name || '').trim().toLowerCase()));
         if (dialogue.length) common.push(`Perform only this exact scripted dialogue with clear natural speech and accurate lip synchronization:\n${dialogue.map(line => `${line.speaker}: <d>[${line.language || 'English'}] ${line.line}</d>`).join('\n')}`);
         if (!session.shots.length) {
@@ -859,7 +1049,7 @@
         const hasFootage = !!activeSession(activeWorld(), false)?.shots?.length;
         overlay.classList.toggle('hidden', !active);
         overlay.classList.toggle('compact', active && hasFootage);
-        if (active) byId('video-world-generating-title').textContent = hasFootage ? 'Preparing next scene…' : 'Creating opening scene…';
+        if (active) byId('video-world-generating-title').textContent = hasFootage ? 'Filming your chosen scene…' : 'Planning and filming your opening…';
         byId('video-world-generate').disabled = active;
         byId('video-world-stage-generate').disabled = active;
         byId('video-world-new-run').disabled = active;
@@ -868,7 +1058,7 @@
         byId('video-world-choices').querySelectorAll('button').forEach(button => { button.disabled = active; });
         if (active) {
             generationStartedAt = Date.now();
-            setGenerationDetail(detail || 'H3 Max is rendering and Horde will save the finished MP4 locally.');
+            setGenerationDetail(detail || 'The story is planned; only the selected video scene is being rendered.');
             clearInterval(generationClock);
             generationClock = setInterval(() => setGenerationDetail(generationPhase), 1000);
         } else {
@@ -887,13 +1077,14 @@
         videoGenerationController.abort();
         videoGenerationController = null;
         if (jobId) {
+            const provider = session?.pendingVideoJob?.provider === 'hotapi' ? 'hotapi' : 'fal';
             session.pendingVideoJob = null;
             void saveState();
-            void mcpBridgeRequest(`/fal/video/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', body: {}, timeoutMs: 10000 })
+            void mcpBridgeRequest(`/${provider}/video/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', body: {}, timeoutMs: 10000 })
                 .catch(error => console.warn('Could not mark video job cancelled:', error));
         }
         setGenerating(false);
-        showToast('Generation cancelled. No scene or story state was committed; Fal may still bill work already started.', 'info');
+        showToast('Video render cancelled. Completed clips remain recoverable; the active provider may still bill work already started.', 'info');
     }
 
     async function captureLastFrame(url) {
@@ -936,11 +1127,11 @@
         });
     }
 
-    async function waitForVideoJob(jobId, signal) {
-        const deadline = Date.now() + 6 * 60 * 1000;
+    async function waitForVideoJob(jobId, signal, provider = 'fal') {
+        const deadline = Date.now() + (provider === 'hotapi' ? 16 : 6) * 60 * 1000;
         while (Date.now() < deadline) {
             if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
-            const job = await mcpBridgeRequest(`/fal/video/jobs/${encodeURIComponent(jobId)}`, { timeoutMs: 12000, signal });
+            const job = await mcpBridgeRequest(`/${provider}/video/jobs/${encodeURIComponent(jobId)}`, { timeoutMs: 12000, signal });
             if (job.status === 'completed') return job.result;
             if (job.status === 'failed' || job.status === 'cancelled') {
                 const error = new Error(job.error || `Video job ${job.status}.`);
@@ -948,25 +1139,32 @@
                 error.fields = Array.isArray(job.errorFields) ? job.errorFields : [];
                 throw error;
             }
-            const attempt = job.currentModel ? ` ${VIDEO_RENDERER_LABELS[job.currentModel] || job.currentModel}` : '';
-            setGenerationDetail(job.status === 'queued' ? 'Fal accepted the shot. Waiting for a renderer…' : `${attempt.trim() || 'Fal'} is filming the scripted scene…`);
+            const attempt = job.currentModel ? ` ${VIDEO_RENDERER_LABELS[job.currentModel] || SPICY_RENDERER_LABELS[job.currentModel] || job.currentModel}` : '';
+            const providerLabel = provider === 'hotapi' ? 'HotAPI' : 'Fal';
+            setGenerationDetail(job.status === 'queued' ? `${providerLabel} accepted the shot. Waiting for a renderer…` : `${attempt.trim() || providerLabel} is filming the scripted scene…`);
             await new Promise((resolve, reject) => {
                 const timer = setTimeout(resolve, 1200);
                 signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('Generation cancelled.', 'AbortError')); }, { once: true });
             });
         }
-        throw new Error('Video generation exceeded six minutes. The job remains recoverable after reloading.');
+        throw new Error(`Video generation exceeded ${provider === 'hotapi' ? 'sixteen' : 'six'} minutes. The job remains recoverable after reloading.`);
     }
 
-    async function requestVideoRender(session, pending, body, signal) {
+    async function requestVideoRender(session, pending, body, signal, provider = 'fal') {
         try {
-            const submitted = await mcpBridgeRequest('/fal/video/jobs', {
+            const submitted = await mcpBridgeRequest(`/${provider}/video/jobs`, {
                 method: 'POST', timeoutMs: 15000, signal, body
             });
-            session.pendingVideoJob = { ...pending, jobId: submitted.jobId, createdAt: Date.now() };
+            session.pendingVideoJob = { ...pending, provider, jobId: submitted.jobId, createdAt: Date.now() };
             await saveState();
-            return await waitForVideoJob(submitted.jobId, signal);
+            return await waitForVideoJob(submitted.jobId, signal, provider);
         } catch (error) {
+            if (provider === 'hotapi') {
+                if (/Unknown MCP provider|Unknown bridge endpoint|request failed \(404\)/i.test(error.message || '')) {
+                    throw new Error('HotAPI support needs the current local bridge. Restart Horde Studio once, then retry.');
+                }
+                throw error;
+            }
             if (!/Unknown MCP provider|Unknown bridge endpoint|request failed \(404\)/i.test(error.message || '')) throw error;
             session.pendingVideoJob = null;
             await saveState();
@@ -977,6 +1175,44 @@
             return mcpBridgeRequest('/fal/video/generate', {
                 method: 'POST', timeoutMs: 360000, signal, body: { ...body, latencyMode: 'queue' }
             });
+        }
+    }
+
+    async function requestRoutedVideoRender(world, session, pending, renderBody, signal) {
+        const hotBody = {
+            ...renderBody,
+            apiKey: state.hotapiApiKey,
+            models: spicyRendererChain(world)
+        };
+        if (world.contentRoute === 'spicy_first') {
+            setGenerationDetail('Sending this scene directly to the HotAPI spicy chain…');
+            return requestVideoRender(session, pending, hotBody, signal, 'hotapi');
+        }
+        try {
+            return await requestVideoRender(session, pending, renderBody, signal, 'fal');
+        } catch (error) {
+            if (signal?.aborted || error?.name === 'AbortError') throw error;
+            if (world.contentRoute !== 'standard_then_spicy') throw error;
+            session.pendingVideoJob = null;
+            await saveState();
+            setGenerationDetail('The Fal chain could not render this scene. Trying the configured HotAPI spicy chain…');
+            showToast('Standard renderers declined or failed this scene. Moving the original scene to HotAPI.', 'info');
+            if (world.referenceStrategy !== 'direct' && renderBody.referenceImageDataUrls?.length) {
+                try {
+                    const referencePlan = referencePlanForBeat(world, session, pending.plan || {}, pending.transitionFrame || '');
+                    if (!pending.plan?.referenceFrame && session.spent + shotCost(world) + REFERENCE_KEYFRAME_COST > world.sessionBudget + 0.000001) {
+                        throw new Error('The identity-anchor fallback would exceed this timeline budget.');
+                    }
+                    hotBody.imageDataUrl = await buildReferenceKeyframe(world, session, pending.plan || {}, referencePlan, signal);
+                    hotBody.referenceImageDataUrls = [];
+                } catch (referenceError) {
+                    console.warn('Could not compose the spicy fallback identity anchor:', referenceError);
+                    hotBody.imageDataUrl = renderBody.referenceImageDataUrls.find(Boolean) || renderBody.imageDataUrl;
+                    hotBody.referenceImageDataUrls = [];
+                    showToast('The identity anchor could not be composed; the spicy fallback will use one primary reference.', 'info');
+                }
+            }
+            return requestVideoRender(session, pending, hotBody, signal, 'hotapi');
         }
     }
 
@@ -991,26 +1227,40 @@
             id: uid('video_shot'), index: session.shots.length + 1,
             action: session.shots.length ? pending.action : (pending.action || world.openingShot),
             sceneSummary: plan.sceneSummary, directorPlan: plan, prompt: pending.prompt,
+            storyNodeId: pending.storyNodeId || '', prepared: pending.prepared === true,
             mediaId: result.mediaId, mediaPath: result.mediaUrl, requestId: result.requestId,
-            model: result.model, resolution: world.resolution, duration: Number(result.duration) || world.duration,
+            model: result.model, provider: result.provider || pending.provider || (String(result.model || '').includes('spicy') ? 'hotapi' : 'fal'),
+            resolution: world.resolution, duration: Number(result.duration) || world.duration,
             seed: result.seed,
-            cost: (Number(result.duration) || world.duration) * rendererRate(rendererFamily(result.model) || world.rendererPrimary, world.resolution),
+            cost: Number.isFinite(Number(result.actualCost)) && Number(result.actualCost) > 0
+                ? Number(result.actualCost)
+                : String(result.model || '').includes('/reference-to-video') && String(result.model || '').startsWith('minimax/h3-max')
+                    ? (Number(result.duration) || world.duration) * 0.08
+                    : (Number(result.duration) || world.duration) * rendererRate(rendererFamily(result.model) || world.rendererPrimary, world.resolution),
             inferenceSeconds: result.inferenceSeconds, createdAt: Date.now()
         });
         session.shots.push(shot);
         session.pendingVideoJob = null;
-        session.transitionFrame = pending.transitionFrame || '';
-        session.spent = session.shots.reduce((sum, item) => sum + item.cost, 0);
+        if (!pending.prepared) session.transitionFrame = pending.transitionFrame || '';
+        session.spent = session.shots.reduce((sum, item) => sum + item.cost, 0) + (session.referenceSpend || 0);
         session.updatedAt = Date.now();
         setGenerationDetail('Shot saved. Capturing its final continuity frame…');
+        let capturedFrame = '';
         try {
-            session.lastFrame = await captureLastFrame(`${mcpBridgeBase()}${result.mediaUrl}`);
+            capturedFrame = await captureLastFrame(`${mcpBridgeBase()}${result.mediaUrl}`);
             shot.continuityCaptured = true;
         } catch (error) {
-            session.lastFrame = '';
             shot.continuityCaptured = false;
             console.warn('Video Adventure continuity frame capture failed:', error);
         }
+        if (pending.prepared && pending.storyNodeId && session.storyBlock) {
+            const node = session.storyBlock.nodes.find(item => item.id === pending.storyNodeId);
+            if (node) { node.shotId = shot.id; node.renderError = ''; }
+            Object.defineProperty(shot, '_continuityFrame', { value: capturedFrame, configurable: true, enumerable: false });
+            await saveState();
+            return shot;
+        }
+        session.lastFrame = capturedFrame;
         const hasPlayingScene = !!session.playingShotId && session.playingShotId !== shot.id;
         if (hasPlayingScene) {
             session.queuedShotId = shot.id;
@@ -1029,10 +1279,13 @@
         resumedVideoJobs.add(pending.jobId);
         const controller = new AbortController();
         videoGenerationController = controller;
-        setGenerating(true, 'Recovering the in-progress H3 Max shot…');
+        let recoveredNode = null;
+        setGenerating(true, 'Recovering the selected video scene…');
         try {
-            const result = await waitForVideoJob(pending.jobId, controller.signal);
+            const result = await waitForVideoJob(pending.jobId, controller.signal, pending.provider === 'hotapi' ? 'hotapi' : 'fal');
             const shot = await finishVideoJob(world, session, pending, result);
+            recoveredNode = shot && pending.storyNodeId ? blockNode(session, pending.storyNodeId) : null;
+            if (shot && recoveredNode) await activateStoryNode(session, recoveredNode, shot);
             renderPlay();
             if (shot) showToast(`Recovered shot ${shot.index}.`, 'success');
         } catch (error) {
@@ -1048,110 +1301,301 @@
         }
     }
 
-    async function generateShot() {
+    function blockNode(session, id = session?.activeNodeId) {
+        return session?.storyBlock?.nodes?.find(node => node.id === id) || null;
+    }
+
+    function blockNodeShot(session, node) {
+        return node?.shotId ? session.shots.find(shot => shot.id === node.shotId) || null : null;
+    }
+
+    async function activateStoryNode(session, node, shot) {
+        if (!session || !node || !shot) return;
+        if (session.storyBlock) session.storyBlock.status = 'ready';
+        session.activeNodeId = node.id;
+        if (!session.visitedNodeIds.includes(node.id)) {
+            session.visitedNodeIds = [...session.visitedNodeIds, node.id].slice(-500);
+        }
+        if (session.pathShotIds.at(-1) !== shot.id) {
+            session.pathShotIds = [...session.pathShotIds, shot.id].slice(-500);
+        }
+        session.playingShotId = shot.id;
+        session.queuedShotId = '';
+        session.pendingDirectorPlan = null;
+        session.pendingVideoJob = null;
+        commitDirectorState(session, node);
+        session.updatedAt = Date.now();
+        await saveState();
+    }
+
+    async function continuityFrameForShot(shot) {
+        if (!shot) return '';
+        try { return await captureLastFrame(mediaUrl(shot)); }
+        catch (error) {
+            console.warn('Could not recover a prepared continuity frame:', error);
+            return '';
+        }
+    }
+
+    function referencePlanForBeat(world, session, node, inputFrame = '') {
+        const byName = new Map((world.characters || []).map(character => [character.name.toLowerCase(), character]));
+        const exact = names => [...new Set((names || []).map(name => byName.get(String(name || '').trim().toLowerCase())).filter(Boolean))];
+        const searchable = `${node.sceneSummary || ''} ${node.videoPrompt || ''} ${(node.dialogue || []).map(line => `${line.speaker} ${line.line}`).join(' ')}`.toLowerCase();
+        let visible = exact(node.visibleCharacters);
+        if (!visible.length) visible = (world.characters || []).filter(character => searchable.includes(character.name.toLowerCase()));
+        const seen = new Set((session.pathShotIds || []).flatMap(id => {
+            const plan = session.shots.find(shot => shot.id === id)?.directorPlan;
+            return [...(plan?.visibleCharacters || []), ...(plan?.introducedCharacters || [])].map(name => String(name).toLowerCase());
+        }));
+        let introduced = exact(node.introducedCharacters);
+        if (!introduced.length) introduced = visible.filter(character => !seen.has(character.name.toLowerCase()));
+        const opening = !inputFrame && !(session.pathShotIds || []).length;
+        let required = opening ? visible : introduced;
+        if (opening && !required.length) required = (world.characters || []).filter(character => character.referenceImage);
+        const mapped = [];
+        if (inputFrame && introduced.length) mapped.push({ label: 'the exact final frame of the previous canonical shot', dataUrl: inputFrame, kind: 'continuity' });
+        for (const character of required) {
+            if (character.referenceImage) mapped.push({ label: character.name, dataUrl: character.referenceImage, kind: 'character' });
+        }
+        if (opening && world.viewpoint !== 'first_person' && world.playerReferenceImage) {
+            mapped.unshift({ label: 'the player character', dataUrl: world.playerReferenceImage, kind: 'player' });
+        }
+        const bounded = [];
+        let bytes = 0;
+        for (const item of mapped) {
+            if (bounded.length >= 4 || bytes + item.dataUrl.length > 22 * 1024 * 1024) continue;
+            bounded.push(item);
+            bytes += item.dataUrl.length;
+        }
+        return { opening, introduced: introduced.map(item => item.name), mapped: bounded };
+    }
+
+    function canUseDirectReferences(world) {
+        return world.contentRoute !== 'spicy_first'
+            && rendererChain(world).some(model => model === 'minimax/h3-max' || model === 'alibaba/wan-3.0');
+    }
+
+    function shouldBuildReferenceKeyframe(world, referencePlan) {
+        if (!referencePlan.mapped.length) return false;
+        if (world.referenceStrategy === 'keyframe') return true;
+        if (world.referenceStrategy === 'direct') return false;
+        return !canUseDirectReferences(world);
+    }
+
+    async function buildReferenceKeyframe(world, session, node, referencePlan, signal) {
+        if (node.referenceFrame) return node.referenceFrame;
+        if (!state.falApiKey) {
+            showToast('Fal is needed to compose multiple references for this route. Using the strongest single reference instead.', 'info');
+            return referencePlan.mapped[0]?.dataUrl || '';
+        }
+        setGenerationDetail(`Composing one identity anchor for ${referencePlan.opening ? 'the opening' : `new cast: ${referencePlan.introduced.join(', ')}`}…`);
+        const map = referencePlan.mapped.map((item, index) => `Image ${index + 1} is ${item.label}.`).join(' ');
+        const result = await mcpBridgeRequest('/fal/image/generate', {
+            method: 'POST', timeoutMs: 240000, signal,
+            body: {
+                apiKey: state.falApiKey,
+                model: 'fal-ai/nano-banana-2/edit',
+                prompt: `${map} Create a single cinematic identity anchor frame for this exact story beat: ${node.videoPrompt || node.sceneSummary}. Preserve every referenced person's identity and distinguishing wardrobe. Do not merge faces or duplicate people. Match ${world.aspectRatio} composition and ${VISUAL_PRESETS.find(item => item[0] === world.visualPreset)?.[1] || 'cinematic'} style. No text, captions, logos or UI.`,
+                imageDataUrls: referencePlan.mapped.map(item => item.dataUrl),
+                aspectRatio: world.aspectRatio,
+                enableSafetyChecker: state.globalSettings?.falSafetyChecker !== false && world.falSafetyChecker !== false
+            }
+        });
+        const image = safeImage(typeof normalizeGeneratedImageSource === 'function' ? normalizeGeneratedImageSource(result.image) : result.image);
+        if (!image) throw new Error('The reference compositor completed without a usable identity anchor.');
+        node.referenceFrame = image;
+        session.referenceSpend = clamp(session.referenceSpend, 0, 10000, 0) + REFERENCE_KEYFRAME_COST;
+        session.spent = session.shots.reduce((sum, shot) => sum + shot.cost, 0) + session.referenceSpend;
+        await saveState();
+        return image;
+    }
+
+    async function renderStoryNode(world, session, node, inputFrame, progress, signal) {
+        let shot = blockNodeShot(session, node);
+        if (shot) {
+            setGenerationDetail('Using the already-rendered selected scene…');
+            return { shot, frame: node.choices.length ? await continuityFrameForShot(shot) : '' };
+        }
+        const action = node.inboundAction || session.storyBlock?.sourceAction || (node.level === 0 ? world.openingShot : node.sceneSummary);
+        const hasCanonicalPredecessor = !!node.parentId || session.pathShotIds.length > 0;
+        const promptSession = { ...session, shots: hasCanonicalPredecessor ? [{}] : [] };
+        const referencePlan = referencePlanForBeat(world, session, node, inputFrame);
+        let renderFrame = inputFrame || '';
+        let directReferences = [];
+        if (referencePlan.mapped.length) {
+            if (shouldBuildReferenceKeyframe(world, referencePlan)) {
+                if (!node.referenceFrame && session.spent + shotCost(world) + REFERENCE_KEYFRAME_COST > world.sessionBudget + 0.000001) {
+                    throw new Error(`This scene needs a ${money(REFERENCE_KEYFRAME_COST)} identity anchor plus up to ${money(shotCost(world))} for video, exceeding the remaining timeline budget.`);
+                }
+                renderFrame = await buildReferenceKeyframe(world, session, node, referencePlan, signal);
+            } else if (canUseDirectReferences(world)) {
+                directReferences = referencePlan.mapped;
+                renderFrame ||= directReferences.find(item => item.kind !== 'continuity')?.dataUrl || directReferences[0]?.dataUrl || '';
+            } else {
+                renderFrame ||= referencePlan.mapped.find(item => item.kind !== 'continuity')?.dataUrl || referencePlan.mapped[0]?.dataUrl || '';
+            }
+        }
+        if (directReferences.length && session.spent + referenceShotCost(world) > world.sessionBudget + 0.000001) {
+            throw new Error(`This native reference scene can cost up to ${money(referenceShotCost(world))}, exceeding the remaining timeline budget.`);
+        }
+        const effectiveReferencePlan = directReferences.length ? { ...referencePlan, mapped: directReferences } : null;
+        const prompt = buildPrompt(world, promptSession, action, node, effectiveReferencePlan);
+        const pending = {
+            action, prompt, plan: node, storyNodeId: node.id, prepared: true,
+            cost: shotCost(world), transitionFrame: inputFrame || ''
+        };
+        const renderBody = {
+            apiKey: state.falApiKey, prompt, duration: world.duration, resolution: world.resolution,
+            aspectRatio: world.aspectRatio, imageDataUrl: renderFrame,
+            referenceImageDataUrls: directReferences.map(item => item.dataUrl),
+            enableSafetyChecker: state.globalSettings?.falSafetyChecker !== false && world.falSafetyChecker !== false,
+            models: directReferences.length ? referenceRendererChain(world) : rendererChain(world),
+            seed: Math.floor(Math.random() * 2_000_000_000)
+        };
+        setGenerationDetail(progress?.opening
+            ? `Filming the opening scene · ${session.storyBlock?.nodes?.length || 0} story beats were text-planned…`
+            : `Filming only your selected branch · story level ${node.level + 1}…`);
+        let result;
+        let completedPending = pending;
+        try {
+            result = await requestRoutedVideoRender(world, session, pending, renderBody, signal);
+        } catch (error) {
+            const policyRejected = error.code === 'content_policy_violation'
+                || /content_policy_violation|content checker/i.test(error.message || '');
+            if (world.contentRoute !== 'standard' || !policyRejected || state.globalSettings?.falSafetyChecker === false || world.falSafetyChecker === false) throw error;
+            const referenceMap = directReferences.length
+                ? `\n\nCANONICAL IMAGE REFERENCES:\n${directReferences.map((item, index) => `Image ${index + 1} = ${item.label}. Preserve identity and do not merge faces.`).join('\n')}` : '';
+            const safePrompt = buildPolicyRestagedPrompt(world, action, node) + referenceMap;
+            const rejectedFrame = error.fields?.includes('image_url') || /image_url/i.test(error.message || '');
+            setGenerationDetail('The selected scene was filtered. Restaging it once…');
+            completedPending = { ...pending, prompt: safePrompt, transitionFrame: rejectedFrame ? '' : inputFrame };
+            result = await requestRoutedVideoRender(world, session, completedPending, {
+                ...renderBody, prompt: safePrompt, imageDataUrl: rejectedFrame ? '' : renderBody.imageDataUrl,
+                referenceImageDataUrls: rejectedFrame ? [] : renderBody.referenceImageDataUrls,
+                seed: Math.floor(Math.random() * 2_000_000_000)
+            }, signal);
+        }
+        shot = await finishVideoJob(world, session, completedPending, result);
+        if (!shot) shot = blockNodeShot(session, node);
+        if (!shot) throw new Error('The selected scene completed without a playable media file.');
+        return { shot, frame: shot._continuityFrame || (node.choices.length ? await continuityFrameForShot(shot) : '') };
+    }
+
+    async function prepareStoryBlock(options = {}) {
         const world = activeWorld();
         const session = activeSession(world, false);
         if (!world || !session) return;
-        if (!state.falApiKey) {
-            showToast('Add your Fal API key in Settings → Connections first.', 'error');
+        const needsFal = world.contentRoute !== 'spicy_first';
+        const needsHotApi = world.contentRoute !== 'standard';
+        if ((needsFal && !state.falApiKey) || (needsHotApi && !state.hotapiApiKey)) {
+            const missing = [needsFal && !state.falApiKey ? 'Fal' : '', needsHotApi && !state.hotapiApiKey ? 'HotAPI' : ''].filter(Boolean).join(' and ');
+            showToast(`Add your ${missing} API key${missing.includes(' and ') ? 's' : ''} in Settings → Connections first.`, 'error');
             showGlobalSettings();
             if (typeof activateSettingsSection === 'function') activateSettingsSection('accounts');
             return;
         }
         const action = byId('video-world-action').value.trim();
-        if (session.shots.length && !action) return showToast('Describe your next action or story beat.', 'error');
-        const cost = shotCost(world);
-        if (session.spent + cost > world.sessionBudget + 0.000001) {
-            return showToast(`This shot would exceed the ${money(world.sessionBudget)} timeline limit. Raise it in Video Adventure Studio or start a new timeline.`, 'error');
+        const resume = options.resume === true && session.storyBlock && session.storyBlock.status !== 'ready';
+        const requiredCost = shotCost(world);
+        if (session.spent + requiredCost > world.sessionBudget + 0.000001) {
+            return showToast(`The next selected video can cost up to ${money(requiredCost)}, exceeding the remaining timeline budget. Raise the limit, start a new timeline, or choose a cheaper renderer.`, 'error');
         }
         const token = ++generationToken;
-        const transitionFrame = session.lastFrame || '';
         videoGenerationController?.abort();
-        videoGenerationController = new AbortController();
-        const controller = videoGenerationController;
-        const deadline = setTimeout(() => controller.abort(), 370000);
-        setGenerating(true, 'The World Director is writing the next story beat…');
+        const controller = new AbortController();
+        videoGenerationController = controller;
+        const deadline = setTimeout(() => controller.abort(), 30 * 60 * 1000);
+        setGenerating(true, resume ? 'Resuming the opening video…' : 'The Director is cheaply planning the complete text decision tree…');
         try {
-            const selectedChoice = session.directorChoices.find(choice => choice.action === action);
-            let plan = selectedChoice?.nextBeat ? { ...selectedChoice.nextBeat, choices: [] } : null;
-            let futureChoicesPromise = null;
-            if (plan) {
-                setGenerationDetail('Branch prepared. H3 Max is filming immediately…');
-                const futureController = new AbortController();
-                const futureDeadline = setTimeout(() => futureController.abort(), 60000);
-                futureChoicesPromise = requestDirectorPlan(world, session, action, { choicesOnly: true, plannedBeat: plan, signal: futureController.signal })
-                    .catch(error => { console.warn('Background choice preparation failed:', error); return null; })
-                    .finally(() => clearTimeout(futureDeadline));
-            } else {
-                plan = await requestDirectorPlan(world, session, action, { signal: controller.signal });
+            let entryFrame = '';
+            const currentShot = session.shots.find(shot => shot.id === session.playingShotId);
+            if (!resume && currentShot) {
+                setGenerationDetail('Capturing the current ending before planning the next story…');
+                entryFrame = await continuityFrameForShot(currentShot);
             }
-            if (token !== generationToken) return;
-            const prompt = buildPrompt(world, session, action, plan);
-            if (!futureChoicesPromise) setGenerationDetail('Story beat written. H3 Max is filming the scripted scene…');
-            const pending = { action, prompt, plan, cost, transitionFrame };
-            const renderBody = {
-                apiKey: state.falApiKey, prompt, duration: world.duration, resolution: world.resolution,
-                aspectRatio: world.aspectRatio, imageDataUrl: session.lastFrame || '',
-                enableSafetyChecker: state.globalSettings?.falSafetyChecker !== false
-                    && world.falSafetyChecker !== false,
-                models: rendererChain(world),
-                seed: Math.floor(Math.random() * 2_000_000_000)
-            };
-            let result;
-            let completedPending = pending;
-            try {
-                result = await requestVideoRender(session, pending, renderBody, controller.signal);
-            } catch (error) {
-                const policyRejected = error.code === 'content_policy_violation'
-                    || /content_policy_violation|content checker/i.test(error.message || '');
-                if (!policyRejected || state.globalSettings?.falSafetyChecker === false
-                    || world.falSafetyChecker === false) throw error;
-                const safePrompt = buildPolicyRestagedPrompt(world, action, plan);
-                const rejectedFrame = error.fields?.includes('image_url') || /image_url/i.test(error.message || '');
-                setGenerationDetail(`Fal rejected ${rejectedFrame ? 'the prompt and continuity frame' : 'the prompt'}. Restaging once as a PG-13 scene…`);
-                showToast(`Fal's filter rejected ${rejectedFrame ? 'the scene and previous frame' : 'the scene'}. Retrying once with a non-explicit restaging${rejectedFrame ? ' without that frame' : ''}.`, 'info');
-                const safePending = { ...pending, prompt: safePrompt, transitionFrame: rejectedFrame ? '' : transitionFrame };
-                completedPending = safePending;
-                result = await requestVideoRender(session, safePending, {
-                    ...renderBody,
-                    prompt: safePrompt,
-                    imageDataUrl: rejectedFrame ? '' : renderBody.imageDataUrl,
-                    seed: Math.floor(Math.random() * 2_000_000_000)
-                }, controller.signal);
-            }
-            if (token !== generationToken || !state.videoWorldSessions[world.id]?.sessions.includes(session)) return;
-            const shot = await finishVideoJob(world, session, completedPending, result);
-            if (futureChoicesPromise) void futureChoicesPromise.then(async futurePlan => {
-                if (!futurePlan || !state.videoWorldSessions[world.id]?.sessions.includes(session)) return;
-                plan.choices = futurePlan.choices;
-                shot.directorPlan = plan;
-                if (session.playingShotId === shot.id) session.directorChoices = plan.choices;
-                if (session.queuedShotId === shot.id) session.pendingDirectorPlan = plan;
+            if (!resume) {
+                session.storyBlock = await requestStoryBlock(world, session, action, {
+                    depth: world.storyBlockDepth, signal: controller.signal
+                });
+                session.storyBlock.status = 'preparing';
+                session.activeNodeId = '';
+                session.visitedNodeIds = [];
                 await saveState();
-                if (activeWorld()?.id === world.id && activeSession(world, false)?.id === session.id) renderPlay();
-            });
+            } else {
+                session.storyBlock.status = 'preparing';
+                if (currentShot) entryFrame = await continuityFrameForShot(currentShot);
+            }
+            const block = session.storyBlock;
+            const root = block.nodes.find(node => node.id === block.rootId);
+            if (!root) throw new Error('The planned story has no opening beat.');
+            const result = await renderStoryNode(world, session, root, entryFrame, { opening: true }, controller.signal);
+            if (token !== generationToken) return;
+            await activateStoryNode(session, root, result.shot);
+            session.directorChoices = [];
             await saveState();
             byId('video-world-action').value = '';
+            byId('video-world-action').dataset.customAction = '';
             renderPlay();
-            const player = byId('video-world-player');
-            if (session.queuedShotId && (player.ended || player.currentTime >= Math.max(0, player.duration - 0.12))) await activateQueuedShot(world, session);
-            else player.play().catch(() => {});
-            const renderedBy = VIDEO_RENDERER_LABELS[rendererFamily(shot.model)] || shot.model;
-            showToast(`Shot ${shot.index} ready · ${renderedBy} · ${money(shot.cost)} estimated`, 'success');
+            byId('video-world-player').play().catch(() => {});
+            showToast(`${block.nodes.length} story beats planned; only the opening video was charged.`, 'success');
         } catch (error) {
-            if (token !== generationToken) return;
-            console.error('Video Adventure generation failed:', error);
-            const policyRejected = /content_policy_violation|content checker/i.test(error.message || '');
-            const attemptedRenderers = rendererChain(world).map(renderer => VIDEO_RENDERER_LABELS[renderer]).join(' → ');
-            const message = policyRejected
-                ? `${attemptedRenderers} all rejected this scene after the configured safety setting. Fal or the hosted models applied mandatory filtering; revise the scene, change the reference frame, or choose another renderer.`
-                : (error.message || 'Video generation failed.');
-            showToast(controller.signal.aborted ? 'Generation stopped after its deadline. Your previous scene is unchanged; try again.' : message, 'error');
+            if (session.storyBlock && session.storyBlock.status === 'preparing') session.storyBlock.status = 'partial';
+            await saveState();
+            if (token === generationToken && error.name !== 'AbortError') {
+                console.error('Story block preparation failed:', error);
+                showToast(error.message || 'Could not plan the story and film its opening.', 'error');
+            }
         } finally {
             clearTimeout(deadline);
             if (videoGenerationController === controller) videoGenerationController = null;
-            if (token === generationToken) setGenerating(false);
+            if (token === generationToken) { setGenerating(false); renderPlay(); }
         }
+    }
+
+    async function choosePreparedBranch(targetId) {
+        const world = activeWorld();
+        const session = activeSession(world, false);
+        const current = blockNode(session);
+        const choice = current?.choices?.find(item => item.targetId === targetId);
+        const target = blockNode(session, targetId);
+        if (!world || !session || !choice || !target) return showToast('That planned branch is unavailable.', 'error');
+        const maximum = shotCost(world);
+        if (!blockNodeShot(session, target) && session.spent + maximum > world.sessionBudget + 0.000001) {
+            return showToast(`This chosen scene can cost up to ${money(maximum)}, exceeding the remaining timeline budget.`, 'error');
+        }
+        const token = ++generationToken;
+        videoGenerationController?.abort();
+        const controller = new AbortController();
+        videoGenerationController = controller;
+        const deadline = setTimeout(() => controller.abort(), 30 * 60 * 1000);
+        setGenerating(true, `Choice locked: ${choice.label}. Filming only this branch…`);
+        try {
+            const currentShot = session.shots.find(shot => shot.id === session.playingShotId)
+                || blockNodeShot(session, current);
+            const entryFrame = currentShot ? await continuityFrameForShot(currentShot) : '';
+            const result = await renderStoryNode(world, session, target, entryFrame, { opening: false }, controller.signal);
+            if (token !== generationToken) return;
+            await activateStoryNode(session, target, result.shot);
+            renderPlay();
+            byId('video-world-player').play().catch(() => {});
+        } catch (error) {
+            if (token === generationToken && error.name !== 'AbortError') {
+                console.error('Selected Video Adventure branch failed:', error);
+                showToast(error.message || 'Could not film the selected branch.', 'error');
+            }
+        } finally {
+            clearTimeout(deadline);
+            if (videoGenerationController === controller) videoGenerationController = null;
+            if (token === generationToken) { setGenerating(false); renderPlay(); }
+        }
+    }
+
+    function prepareFromComposer() {
+        const world = activeWorld();
+        const session = activeSession(world, false);
+        const custom = byId('video-world-action').dataset.customAction === 'true';
+        const resume = !custom && session?.storyBlock && ['planned', 'preparing', 'partial', 'failed'].includes(session.storyBlock.status);
+        void prepareStoryBlock({ resume });
     }
 
     async function newTimeline() {
@@ -1213,10 +1657,13 @@
         byId('video-world-play-back').onclick = () => switchView('videoWorlds');
         byId('save-video-world-btn').onclick = saveEditor;
         byId('delete-video-world-btn').onclick = deleteEditorWorld;
-        byId('video-world-generate').onclick = generateShot;
-        byId('video-world-stage-generate').onclick = generateShot;
+        byId('video-world-generate').onclick = prepareFromComposer;
+        byId('video-world-stage-generate').onclick = prepareFromComposer;
         byId('video-world-cancel-generation').onclick = cancelGeneration;
-        byId('video-world-player').onended = () => { void activateQueuedShot(); };
+        byId('video-world-player').onended = () => {
+            // Choices are already available from the text plan. The selected
+            // successor is rendered only after the player chooses it.
+        };
         byId('video-world-new-run').onclick = newTimeline;
         byId('video-world-rename-run').onclick = renameTimeline;
         byId('video-world-delete-run').onclick = deleteTimeline;
@@ -1244,7 +1691,7 @@
             renderPlay();
         };
         byId('video-world-edit').onclick = () => activeWorld() && openEditor(activeWorld().id);
-        ['video-world-resolution', 'video-world-duration', 'video-world-renderer-primary', 'video-world-renderer-fallback', 'video-world-renderer-fallback-2']
+        ['video-world-resolution', 'video-world-duration', 'video-world-content-route', 'video-world-reference-strategy', 'video-world-renderer-primary', 'video-world-renderer-fallback', 'video-world-renderer-fallback-2', 'video-world-spicy-primary', 'video-world-spicy-fallback', 'video-world-spicy-fallback-2', 'video-world-story-depth', 'video-world-budget']
             .forEach(id => byId(id).onchange = updateEditorCost);
         byId('video-world-viewpoint').querySelectorAll('[data-value]').forEach(button => button.onclick = () => selectButtonValue('video-world-viewpoint', button.dataset.value));
         byId('video-world-add-character').onclick = () => {
@@ -1270,7 +1717,9 @@
         onView,
         normalizeWorld,
         normalizeSession,
+        normalizeStoryBlock,
         buildPrompt,
-        shotCost
+        shotCost,
+        storyBlockCost
     };
 })();

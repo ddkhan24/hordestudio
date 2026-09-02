@@ -200,6 +200,33 @@ class McpBridgeAudit(unittest.TestCase):
         safe.assert_called_once_with("https://v3b.fal.media/files/image.jpg", media=True)
         download.assert_called_once()
 
+    @mock.patch.object(bridge, "download_image", return_value="data:image/jpeg;base64,result")
+    @mock.patch.object(bridge, "safe_fal_url")
+    @mock.patch.object(bridge, "fal_json_request")
+    def test_nano_banana_composes_multiple_reference_images(self, request, _safe, _download):
+        request.return_value = {"images": [{"url": "https://v3b.fal.media/files/anchor.jpg"}]}
+        reference = "data:image/jpeg;base64,YQ=="
+        bridge.generate_fal_image({
+            "apiKey": "test:key", "prompt": "Compose Image 1 and Image 2",
+            "model": "fal-ai/nano-banana-2/edit", "aspectRatio": "16:9",
+            "imageDataUrls": [reference, reference],
+        })
+        payload = request.call_args.kwargs["payload"]
+        self.assertEqual(payload["image_urls"], [reference, reference])
+        self.assertEqual(payload["resolution"], "1K")
+        self.assertEqual(payload["aspect_ratio"], "16:9")
+
+    def test_h3_and_wan_support_native_multi_reference_video(self):
+        reference = "data:image/jpeg;base64,YQ=="
+        endpoint, payload, _, _ = bridge._fal_video_request(
+            "minimax/h3-max", {}, "Image 1 is Ada", "", [reference], 10, "480P", "16:9", 7)
+        self.assertEqual(endpoint, "minimax/h3-max/reference-to-video")
+        self.assertEqual(payload["reference_image_urls"], [reference])
+        endpoint, payload, _, _ = bridge._fal_video_request(
+            "alibaba/wan-3.0", {}, "Image 1 is Ada", "", [reference], 5, "768P", "16:9", 7)
+        self.assertEqual(endpoint, "alibaba/wan-3.0/reference-to-video")
+        self.assertEqual(payload["reference_image_urls"], [reference])
+
     def test_fal_input_contract_rejects_invalid_resolution_and_frame(self):
         with self.assertRaises(ValueError):
             bridge.generate_fal_video({"apiKey": "x", "prompt": "shot", "resolution": "4K"})

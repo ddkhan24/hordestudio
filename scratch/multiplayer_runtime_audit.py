@@ -52,6 +52,7 @@ class MultiplayerRuntimeAudit(unittest.TestCase):
         following = self.runtime.state(self.guest)
         self.assertEqual(following["round"]["number"], 2)
         self.assertEqual(following["round"]["activePlayerId"], self.host["playerId"])
+        self.assertEqual(following["snapshot"]["history"][-1]["text"], "Resolved")
 
     def test_guest_cannot_commit_or_apply_vote(self) -> None:
         self.runtime.submit({**self.host, "text": "Host acts"})

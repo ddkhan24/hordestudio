@@ -7,8 +7,8 @@ const STORE_NAME = 'state';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
-const HORDE_STUDIO_VERSION = '17.0.0';
-const HORDE_STUDIO_RELEASED_AT = '2026-09-02T01:38:52+05:00';
+const HORDE_STUDIO_VERSION = '17.1.0';
+const HORDE_STUDIO_RELEASED_AT = '2026-09-02T22:43:54+05:00';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
 let worldMediaDirty = false;
@@ -1065,6 +1065,7 @@ let state = {
     evolinkApiKey: '',
     wavespeedApiKey: '',
     falApiKey: '',
+    hotapiApiKey: '',
     nanogptApiKey: '',
     nvidiaApiKey: '',
     bedrockApiKey: '',
@@ -1328,6 +1329,20 @@ function validateCharacterData(value, label = 'Character') {
             ['id', 'label', 'color', 'guidance'].forEach(key => requireString(meter[key], `${label} chat HUD meter ${index + 1} ${key}`, { optional: true, max: 500 }));
         });
     }
+    if (value.chatCapabilities !== undefined) {
+        requirePlainObject(value.chatCapabilities, `${label} Chat capabilities`);
+        ['imageUpload', 'pdfUpload', 'audioUpload', 'videoUpload', 'webSearch', 'imageGeneration'].forEach(key => {
+            if (value.chatCapabilities[key] !== undefined && typeof value.chatCapabilities[key] !== 'boolean') {
+                throw new Error(`${label} Chat capabilities ${key} must be true or false`);
+            }
+        });
+        ['imageProvider', 'imageModel'].forEach(key =>
+            requireString(value.chatCapabilities[key], `${label} Chat capabilities ${key}`, { optional: true, max: 500 }));
+    }
+    ['modelInputModalities', 'modelOutputModalities'].forEach(key => {
+        requireArray(value[key], `${label} ${key}`, { optional: true, max: 20 });
+        (value[key] || []).forEach((item, index) => requireString(item, `${label} ${key} ${index + 1}`, { max: 40 }));
+    });
     return safeJsonClone(value);
 }
 
@@ -1618,6 +1633,18 @@ function validateBackupData(value) {
             }
         });
     }
+    if (value.chatAssets !== undefined) {
+        requirePlainObject(value.chatAssets, 'Backup Chat assets');
+        if (Object.keys(value.chatAssets).length > 5000) throw new Error('Backup has too many Chat assets');
+        Object.entries(value.chatAssets).forEach(([assetId, source]) => {
+            requireSafeId(assetId, 'Backup Chat asset id');
+            requireString(source, `Backup Chat asset ${assetId}`, { max: 128 * 1024 * 1024 });
+            if (!/^data:(?:image|video|audio|application\/pdf)\/[a-z0-9.+-]+;base64,/i.test(source)
+                && !/^data:application\/pdf;base64,/i.test(source)) {
+                throw new Error(`Backup Chat asset ${assetId} is invalid`);
+            }
+        });
+    }
     (value.systemPresets || []).forEach((item, index) => {
         requirePlainObject(item, `Backup preset ${index + 1}`);
         requireString(item.name, `Backup preset ${index + 1} name`, { max: 300 });
@@ -1821,6 +1848,15 @@ function repairLoadedState() {
     state.characters.forEach(character => {
         character.tags = character.tags || [];
         character.lorebook = character.lorebook || [];
+        // Chat media/tools are creator permissions, so old characters migrate
+        // conservatively to text-only instead of gaining features implicitly.
+        character.chatCapabilities = normalizeChatCreatorCapabilities(character.chatCapabilities);
+        character.modelInputModalities = Array.isArray(character.modelInputModalities)
+            ? [...new Set(character.modelInputModalities.map(value => String(value).toLowerCase()).filter(Boolean))]
+            : ['text'];
+        character.modelOutputModalities = Array.isArray(character.modelOutputModalities)
+            ? [...new Set(character.modelOutputModalities.map(value => String(value).toLowerCase()).filter(Boolean))]
+            : ['text'];
         character.memory = (character.memory || []).map((memory, index) => {
             const raw = typeof memory === 'string' ? { text: memory } : memory;
             if (!raw?.id || !raw?.createdAt) chatMemoryMigrationDirty = true;
@@ -1925,6 +1961,7 @@ async function loadState() {
         state.evolinkApiKey = sessionStorage.getItem('horde_evolink_api_key') || '';
         state.wavespeedApiKey = sessionStorage.getItem('horde_wavespeed_api_key') || '';
         state.falApiKey = sessionStorage.getItem('horde_fal_api_key') || '';
+        state.hotapiApiKey = sessionStorage.getItem('horde_hotapi_api_key') || '';
         state.nanogptApiKey = sessionStorage.getItem('horde_nanogpt_api_key') || '';
         state.nvidiaApiKey = sessionStorage.getItem('horde_nvidia_api_key') || '';
         state.bedrockApiKey = sessionStorage.getItem('horde_bedrock_api_key') || '';
@@ -1958,6 +1995,7 @@ async function loadState() {
         const storedEvolinkApiKey = await HordeDB.get('evolinkApiKey') || '';
         const storedWaveSpeedApiKey = await HordeDB.get('wavespeedApiKey') || '';
         const storedFalApiKey = await HordeDB.get('falApiKey') || '';
+        const storedHotApiKey = await HordeDB.get('hotapiApiKey') || '';
         const storedNanoGPTApiKey = await HordeDB.get('nanogptApiKey') || '';
         const storedNvidiaApiKey = await HordeDB.get('nvidiaApiKey') || '';
         const storedBedrockApiKey = await HordeDB.get('bedrockApiKey') || '';
@@ -1973,6 +2011,8 @@ async function loadState() {
         if (state.wavespeedApiKey) sessionStorage.setItem('horde_wavespeed_api_key', state.wavespeedApiKey);
         state.falApiKey = sessionStorage.getItem('horde_fal_api_key') || storedFalApiKey;
         if (state.falApiKey) sessionStorage.setItem('horde_fal_api_key', state.falApiKey);
+        state.hotapiApiKey = sessionStorage.getItem('horde_hotapi_api_key') || storedHotApiKey;
+        if (state.hotapiApiKey) sessionStorage.setItem('horde_hotapi_api_key', state.hotapiApiKey);
         state.nanogptApiKey = sessionStorage.getItem('horde_nanogpt_api_key') || storedNanoGPTApiKey;
         if (state.nanogptApiKey) sessionStorage.setItem('horde_nanogpt_api_key', state.nanogptApiKey);
         state.nvidiaApiKey = sessionStorage.getItem('horde_nvidia_api_key') || storedNvidiaApiKey;
@@ -2546,6 +2586,7 @@ async function persistStateSnapshot() {
             evolinkApiKey: state.globalSettings.rememberApiKey ? (state.evolinkApiKey || '') : '',
             wavespeedApiKey: state.globalSettings.rememberApiKey ? (state.wavespeedApiKey || '') : '',
             falApiKey: state.globalSettings.rememberApiKey ? (state.falApiKey || '') : '',
+            hotapiApiKey: state.globalSettings.rememberApiKey ? (state.hotapiApiKey || '') : '',
             nanogptApiKey: state.globalSettings.rememberApiKey ? (state.nanogptApiKey || '') : '',
             nvidiaApiKey: state.globalSettings.rememberApiKey ? (state.nvidiaApiKey || '') : '',
             bedrockApiKey: state.globalSettings.rememberApiKey ? (state.bedrockApiKey || '') : '',
@@ -2675,6 +2716,7 @@ async function persistGlobalSettingsOnly() {
         evolinkApiKey: remember ? (state.evolinkApiKey || '') : '',
         wavespeedApiKey: remember ? (state.wavespeedApiKey || '') : '',
         falApiKey: remember ? (state.falApiKey || '') : '',
+        hotapiApiKey: remember ? (state.hotapiApiKey || '') : '',
         nanogptApiKey: remember ? (state.nanogptApiKey || '') : '',
         nvidiaApiKey: remember ? (state.nvidiaApiKey || '') : '',
         bedrockApiKey: remember ? (state.bedrockApiKey || '') : '',
@@ -5142,6 +5184,15 @@ function renderLibrary() {
         const isFav = !!char.isFavorite;
         const model = (char.model || 'No Model').split('/').pop();
         const tagsHtml = (char.tags || []).map(t => `<div class="mini-tag">${escapeHTML(t)}</div>`).join('');
+        const capability = normalizeChatCreatorCapabilities(char.chatCapabilities);
+        const capabilityLabels = [
+            capability.imageUpload || capability.pdfUpload || capability.audioUpload || capability.videoUpload ? 'Attachments' : '',
+            capability.webSearch ? 'Web' : '',
+            capability.imageGeneration ? 'Image creation' : ''
+        ].filter(Boolean);
+        const capabilityHtml = capabilityLabels.length
+            ? capabilityLabels.map(label => `<div class="mini-tag char-capability-tag">${escapeHTML(label)}</div>`).join('')
+            : '<div class="mini-tag char-capability-tag muted">Text only</div>';
         const avatarInitials = displayInitials(char.name);
 
         card.innerHTML = `
@@ -5154,7 +5205,7 @@ function renderLibrary() {
             <div class="char-card-body">
                 <div class="char-card-name">${escapeHTML(char.name)}</div>
                 <div class="char-card-desc">${escapeHTML(char.desc || 'No description provided.')}</div>
-                <div class="char-card-tags">${tagsHtml}</div>
+                <div class="char-card-tags">${tagsHtml}${capabilityHtml}</div>
                 <div class="char-card-tag">${escapeHTML(model)}</div>
                 <div class="char-card-actions">
                     <button class="btn btn-primary char-card-play" type="button">Play</button>
@@ -5604,11 +5655,16 @@ async function fetchModelData(modelId, prefix, targetObj) {
             if (targetObj) {
                 targetObj.supportedParams = supportedParams;
                 targetObj.contextSize = Math.min(matchingModel.context_length || 8192, 16384);
+                targetObj.modelInputModalities = Array.isArray(matchingModel?.architecture?.input_modalities)
+                    ? matchingModel.architecture.input_modalities.map(value => String(value).toLowerCase()) : ['text'];
+                targetObj.modelOutputModalities = Array.isArray(matchingModel?.architecture?.output_modalities)
+                    ? matchingModel.architecture.output_modalities.map(value => String(value).toLowerCase()) : ['text'];
             }
 
             // Update UI
             populateModelInfoCard(matchingModel, prefix);
             updateReasoningVisibility(supportedParams, modelId, false, prefix);
+            if (targetObj === state.editingChar) updateChatCreatorCapabilityStatus(targetObj);
 
             showToast(`Model verified: ${matchingModel.name}`, 'success');
             return matchingModel;
@@ -5794,6 +5850,88 @@ function updateReasoningVisibility(supportedParams, modelId = '', forceShow = fa
     }
 }
 
+function normalizeChatCreatorCapabilities(raw) {
+    const value = isPlainObject(raw) ? raw : {};
+    return {
+        imageUpload: value.imageUpload === true,
+        pdfUpload: value.pdfUpload === true,
+        audioUpload: value.audioUpload === true,
+        videoUpload: value.videoUpload === true,
+        webSearch: value.webSearch === true,
+        imageGeneration: value.imageGeneration === true,
+        imageProvider: ['inherit', 'openrouter', 'gptproto', 'nanogpt', 'fal', 'local'].includes(value.imageProvider)
+            ? value.imageProvider : 'inherit',
+        imageModel: String(value.imageModel || '').trim().slice(0, 500)
+    };
+}
+
+function loadChatCreatorCapabilityControls(character) {
+    if (!character) return;
+    const capability = normalizeChatCreatorCapabilities(character.chatCapabilities);
+    character.chatCapabilities = capability;
+    const fieldMap = {
+        'studio-chat-image-upload': 'imageUpload',
+        'studio-chat-pdf-upload': 'pdfUpload',
+        'studio-chat-audio-upload': 'audioUpload',
+        'studio-chat-video-upload': 'videoUpload',
+        'studio-chat-web-search': 'webSearch',
+        'studio-chat-image-generation': 'imageGeneration'
+    };
+    Object.entries(fieldMap).forEach(([id, key]) => {
+        const input = document.getElementById(id);
+        if (input) input.checked = capability[key];
+    });
+    const provider = document.getElementById('studio-chat-image-provider');
+    const model = document.getElementById('studio-chat-image-model');
+    if (provider) provider.value = capability.imageProvider;
+    if (model) model.value = capability.imageModel;
+    const settings = document.getElementById('studio-chat-image-generation-settings');
+    settings?.classList.toggle('hidden', !capability.imageGeneration);
+    const preview = () => {
+        const draft = { ...character, chatCapabilities: chatCreatorCapabilityValuesFromControls() };
+        settings?.classList.toggle('hidden', !draft.chatCapabilities.imageGeneration);
+        updateChatCreatorCapabilityStatus(draft);
+    };
+    [...Object.keys(fieldMap), 'studio-chat-image-provider', 'studio-chat-image-model'].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) input.oninput = preview;
+    });
+    updateChatCreatorCapabilityStatus(character);
+}
+
+function chatCreatorCapabilityValuesFromControls() {
+    const checked = id => document.getElementById(id)?.checked === true;
+    return normalizeChatCreatorCapabilities({
+        imageUpload: checked('studio-chat-image-upload'),
+        pdfUpload: checked('studio-chat-pdf-upload'),
+        audioUpload: checked('studio-chat-audio-upload'),
+        videoUpload: checked('studio-chat-video-upload'),
+        webSearch: checked('studio-chat-web-search'),
+        imageGeneration: checked('studio-chat-image-generation'),
+        imageProvider: document.getElementById('studio-chat-image-provider')?.value,
+        imageModel: document.getElementById('studio-chat-image-model')?.value
+    });
+}
+
+function readChatCreatorCapabilityControls(character) {
+    character.chatCapabilities = chatCreatorCapabilityValuesFromControls();
+}
+
+function updateChatCreatorCapabilityStatus(character) {
+    const status = document.getElementById('studio-chat-capability-status');
+    const hint = document.getElementById('studio-chat-capability-hint');
+    if (!status || !character) return;
+    const capability = normalizeChatCreatorCapabilities(character.chatCapabilities);
+    const enabled = Object.entries(capability).filter(([key, value]) =>
+        !['imageProvider', 'imageModel'].includes(key) && value === true).map(([key]) => key);
+    status.textContent = enabled.length ? `${enabled.length} enabled` : 'Text only';
+    const model = openRouterModels.find(item => item.id === character.model);
+    const modalities = chatModelInputModalities(character, model);
+    if (hint) hint.textContent = modalities.length
+        ? `Reported model inputs: ${modalities.join(', ')}. Creator permissions and runtime support must both agree.`
+        : 'Model media support is unknown. Fetch model data above; unsupported player controls remain unavailable at runtime.';
+}
+
 function createNewCharacter() {
     state.editingChar = {
         id: 'char_' + Date.now(),
@@ -5815,6 +5953,9 @@ function createNewCharacter() {
         includeReasoning: false,
         reasoningEffort: '',
         supportedParams: [],
+        modelInputModalities: ['text'],
+        modelOutputModalities: ['text'],
+        chatCapabilities: normalizeChatCreatorCapabilities({}),
         prompt: '',
         studioMode: 'advanced',
         systemPrompt: '',
@@ -5869,6 +6010,7 @@ function loadStudioData() {
 
     document.getElementById('studio-intro').value = c.intro;
     document.getElementById('studio-model').value = c.model || '';
+    loadChatCreatorCapabilityControls(c);
     document.getElementById('studio-tags').value = (c.tags || []).join(', ');
     
     document.getElementById('studio-temp').value = c.temp || 0.9;
@@ -6177,6 +6319,7 @@ async function saveStudioCharacter() {
     c.reasoning = document.getElementById('studio-reasoning').checked;
     c.includeReasoning = document.getElementById('studio-include-reasoning').checked;
     c.reasoningEffort = document.getElementById('studio-reasoning-effort').value;
+    readChatCreatorCapabilityControls(c);
     
     c.activePresetId = document.getElementById('studio-system-preset').value;
     
@@ -6495,15 +6638,387 @@ function recordImmediateChatMemory(session, config, text, targetChar) {
     return record || null;
 }
 
+// --- Capability-aware Chat media -----------------------------------------
+// Character creators opt into each capability. Runtime model/provider support
+// is a second, independent gate: creator permission never fabricates support,
+// and model support never exposes a tool the creator did not enable.
+const chatPendingAttachments = new Map();
+const chatWebSearchBySession = new Map();
+const chatImageModeBySession = new Map();
+const chatAssetObjectUrls = new Map();
+
+function chatInteractionKey() {
+    return getCurrentSession()?.id || state.activeRoomId || state.activeCharId || '';
+}
+
+function chatModelInputModalities(character, catalogModel = null) {
+    const live = Array.isArray(catalogModel?.architecture?.input_modalities)
+        ? catalogModel.architecture.input_modalities : [];
+    const stored = Array.isArray(character?.modelInputModalities) ? character.modelInputModalities : [];
+    return [...new Set((live.length ? live : stored).map(value => String(value).toLowerCase()).filter(Boolean))];
+}
+
+function chatImageGenerationProvider(character) {
+    const capability = normalizeChatCreatorCapabilities(character?.chatCapabilities);
+    return capability.imageProvider === 'inherit' ? normalizedProviderId() : capability.imageProvider;
+}
+
+function chatRuntimeCapabilities(character) {
+    const creator = normalizeChatCreatorCapabilities(character?.chatCapabilities);
+    const modelId = character?.model || state.globalSettings.defaultModel || '';
+    const model = openRouterModels.find(item => item.id === modelId) || null;
+    const inputs = new Set(chatModelInputModalities(character, model));
+    const provider = normalizedProviderId();
+    const imageProvider = chatImageGenerationProvider(character);
+    return {
+        creator, provider, modelId, inputs,
+        image: creator.imageUpload && inputs.has('image'),
+        pdf: creator.pdfUpload && (provider === 'openrouter' || inputs.has('file') || inputs.has('pdf')),
+        audio: creator.audioUpload && inputs.has('audio'),
+        video: creator.videoUpload && inputs.has('video'),
+        web: creator.webSearch && provider === 'openrouter',
+        imageGeneration: creator.imageGeneration && providerHasCredentials(imageProvider),
+        imageProvider
+    };
+}
+
+function chatPendingForCurrentSession() {
+    const key = chatInteractionKey();
+    if (!chatPendingAttachments.has(key)) chatPendingAttachments.set(key, []);
+    return chatPendingAttachments.get(key);
+}
+
+function humanFileSize(bytes) {
+    const value = Math.max(0, Number(bytes) || 0);
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function chatAttachmentIcon(kind) {
+    return ({ image: '🖼️', pdf: '📄', audio: '🎙️', video: '🎬' })[kind] || '📎';
+}
+
+function chatAttachmentLimit(kind) {
+    return ({ image: 25, pdf: 25, audio: 30, video: 75 })[kind] * 1024 * 1024;
+}
+
+function renderPendingChatAttachments() {
+    const tray = document.getElementById('chat-attachment-tray');
+    if (!tray) return;
+    const pending = chatPendingForCurrentSession();
+    tray.classList.toggle('hidden', pending.length === 0);
+    tray.innerHTML = '';
+    pending.forEach((item, index) => {
+        const chip = document.createElement('div');
+        chip.className = 'chat-attachment-chip';
+        const preview = item.kind === 'image'
+            ? `<img src="${escapeHTML(item.previewUrl)}" alt="">`
+            : `<span class="chat-attachment-icon" aria-hidden="true">${chatAttachmentIcon(item.kind)}</span>`;
+        chip.innerHTML = `${preview}<span><strong title="${escapeHTML(item.file.name)}">${escapeHTML(item.file.name)}</strong><small>${humanFileSize(item.file.size)}</small></span><button class="chat-attachment-remove" type="button" aria-label="Remove ${escapeHTML(item.file.name)}">×</button>`;
+        chip.querySelector('button').onclick = () => {
+            if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+            pending.splice(index, 1);
+            renderPendingChatAttachments();
+            updateChatSendButton();
+        };
+        tray.appendChild(chip);
+    });
+}
+
+function updateChatSendButton() {
+    const button = document.getElementById('send-btn');
+    const input = document.getElementById('user-input');
+    if (!button || generationController) return;
+    const hasDestination = !!(state.activeCharId || state.activeRoomId);
+    const hasInput = !!input?.value.trim() || chatPendingForCurrentSession().length > 0;
+    button.disabled = !hasDestination || !hasInput;
+}
+
+function renderChatCapabilityBar() {
+    const bar = document.getElementById('chat-capability-bar');
+    if (!bar) return;
+    const character = !state.activeRoomId ? state.characters.find(item => item.id === state.activeCharId) : null;
+    if (!character) {
+        bar.classList.add('hidden');
+        document.getElementById('chat-attachment-tray')?.classList.add('hidden');
+        return;
+    }
+    const runtime = chatRuntimeCapabilities(character);
+    const attachKinds = ['image', 'pdf', 'audio', 'video'].filter(kind => runtime[kind]);
+    const attach = document.getElementById('chat-attach-btn');
+    const web = document.getElementById('chat-web-btn');
+    const imageMode = document.getElementById('chat-image-mode-btn');
+    const note = document.getElementById('chat-capability-note');
+    const key = chatInteractionKey();
+    const any = attachKinds.length || runtime.web || runtime.imageGeneration;
+    bar.classList.toggle('hidden', !any);
+    attach?.classList.toggle('hidden', attachKinds.length === 0);
+    web?.classList.toggle('hidden', !runtime.web);
+    imageMode?.classList.toggle('hidden', !runtime.imageGeneration);
+    if (web) {
+        const active = runtime.web && chatWebSearchBySession.get(key) === true;
+        web.classList.toggle('active', active);
+        web.setAttribute('aria-pressed', String(active));
+    }
+    if (imageMode) {
+        const active = runtime.imageGeneration && chatImageModeBySession.get(key) === true;
+        imageMode.classList.toggle('active', active);
+        imageMode.setAttribute('aria-pressed', String(active));
+        document.querySelector('#chat-view .input-wrap')?.classList.toggle('chat-image-mode', active);
+        const input = document.getElementById('user-input');
+        if (input) input.placeholder = active ? 'Describe the image to create…' : 'Type your message...';
+    }
+    document.querySelectorAll('#chat-attach-menu [data-chat-attachment]').forEach(button => {
+        button.disabled = !attachKinds.includes(button.dataset.chatAttachment);
+        button.classList.toggle('hidden', button.disabled);
+    });
+    if (note) note.textContent = runtime.web && chatWebSearchBySession.get(key) ? 'Live search may add cost' : '';
+    renderPendingChatAttachments();
+    updateChatSendButton();
+
+    if (!openRouterModels.length) getOpenRouterModels().then(() => {
+        if (state.activeCharId === character.id) renderChatCapabilityBar();
+    }).catch(() => {});
+}
+
+function addPendingChatFiles(kind, files) {
+    const character = state.characters.find(item => item.id === state.activeCharId);
+    const runtime = character ? chatRuntimeCapabilities(character) : null;
+    if (!runtime?.[kind]) return showToast(`The creator and selected model have not enabled ${kind} input.`, 'info');
+    const pending = chatPendingForCurrentSession();
+    for (const file of Array.from(files || []).slice(0, 8)) {
+        if (file.size > chatAttachmentLimit(kind)) {
+            showToast(`${file.name} is too large. ${kind} attachments are limited to ${humanFileSize(chatAttachmentLimit(kind))}.`, 'error');
+            continue;
+        }
+        if (pending.reduce((sum, item) => sum + item.file.size, 0) + file.size > 100 * 1024 * 1024) {
+            showToast('This message exceeds the 100 MB attachment limit.', 'error');
+            break;
+        }
+        pending.push({ kind, file, previewUrl: kind === 'image' ? URL.createObjectURL(file) : '' });
+    }
+    renderPendingChatAttachments();
+    updateChatSendButton();
+}
+
+function setupChatCapabilityControls() {
+    const attach = document.getElementById('chat-attach-btn');
+    if (!attach || attach.dataset.bound === 'true') return;
+    attach.dataset.bound = 'true';
+    const menu = document.getElementById('chat-attach-menu');
+    attach.onclick = () => {
+        const open = menu.classList.toggle('hidden') === false;
+        attach.setAttribute('aria-expanded', String(open));
+    };
+    document.querySelectorAll('#chat-attach-menu [data-chat-attachment]').forEach(button => {
+        button.onclick = () => {
+            menu.classList.add('hidden');
+            attach.setAttribute('aria-expanded', 'false');
+            document.getElementById(`chat-${button.dataset.chatAttachment}-input`)?.click();
+        };
+    });
+    ['image', 'pdf', 'audio', 'video'].forEach(kind => {
+        const input = document.getElementById(`chat-${kind}-input`);
+        if (input) input.onchange = () => {
+            addPendingChatFiles(kind, input.files);
+            input.value = '';
+        };
+    });
+    document.getElementById('chat-web-btn').onclick = () => {
+        const key = chatInteractionKey();
+        chatWebSearchBySession.set(key, chatWebSearchBySession.get(key) !== true);
+        renderChatCapabilityBar();
+    };
+    document.getElementById('chat-image-mode-btn').onclick = () => {
+        const key = chatInteractionKey();
+        chatImageModeBySession.set(key, chatImageModeBySession.get(key) !== true);
+        renderChatCapabilityBar();
+        document.getElementById('user-input')?.focus();
+    };
+}
+
+function dataUrlToBlob(dataUrl) {
+    const match = String(dataUrl || '').match(/^data:([^;,]+)(?:;[^,]*)?;base64,([\s\S]+)$/i);
+    if (!match) throw new Error('Invalid embedded media data.');
+    const binary = atob(match[2]);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+    return new Blob([bytes], { type: match[1] });
+}
+
+function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('The browser could not encode an attachment.'));
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function persistChatAttachment(item) {
+    const id = newChatMemoryId('asset');
+    let blob = item.file;
+    if (item.kind === 'image') {
+        const normalized = await normalizeUploadedImage(item.file, 1800, 0.88);
+        blob = dataUrlToBlob(normalized);
+    }
+    await HordeDB.set(`chatAsset:${id}`, blob);
+    return { id, kind: item.kind, name: String(item.file.name || item.kind).slice(0, 240),
+        mime: String(blob.type || item.file.type || '').slice(0, 120), size: blob.size };
+}
+
+async function deleteChatMessageAssets(message) {
+    for (const attachment of Array.isArray(message?.attachments) ? message.attachments : []) {
+        if (!attachment?.id) continue;
+        await HordeDB.delete(`chatAsset:${attachment.id}`).catch(() => {});
+        const url = chatAssetObjectUrls.get(attachment.id);
+        if (url) URL.revokeObjectURL(url);
+        chatAssetObjectUrls.delete(attachment.id);
+    }
+}
+
+async function chatAttachmentBlob(attachment) {
+    return attachment?.id ? HordeDB.get(`chatAsset:${attachment.id}`).catch(() => null) : null;
+}
+
+async function chatAttachmentObjectUrl(attachment) {
+    if (!attachment?.id) {
+        const remote = String(attachment?.url || '');
+        return /^(?:https:\/\/|data:image\/)/i.test(remote) ? remote : '';
+    }
+    if (chatAssetObjectUrls.has(attachment.id)) return chatAssetObjectUrls.get(attachment.id);
+    const blob = await chatAttachmentBlob(attachment);
+    if (!blob) return '';
+    const url = URL.createObjectURL(blob);
+    chatAssetObjectUrls.set(attachment.id, url);
+    return url;
+}
+
+function audioFormatFromMime(mime) {
+    if (/wav/i.test(mime)) return 'wav';
+    if (/webm/i.test(mime)) return 'webm';
+    if (/ogg/i.test(mime)) return 'ogg';
+    if (/mp4|m4a/i.test(mime)) return 'mp4';
+    return 'mp3';
+}
+
+async function chatProviderContent(message, text) {
+    const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+    if (!attachments.length || message.role !== 'user') return text;
+    const parts = [{ type: 'text', text: text || 'Please consider the attached media.' }];
+    for (const attachment of attachments) {
+        const blob = await chatAttachmentBlob(attachment);
+        if (!blob) continue;
+        const dataUrl = await blobToDataUrl(blob);
+        if (attachment.kind === 'image') parts.push({ type: 'image_url', image_url: { url: dataUrl } });
+        else if (attachment.kind === 'video') parts.push({ type: 'video_url', video_url: { url: dataUrl } });
+        else if (attachment.kind === 'pdf') parts.push({ type: 'file', file: { filename: attachment.name, file_data: dataUrl } });
+        else if (attachment.kind === 'audio') parts.push({ type: 'input_audio', input_audio: {
+            data: dataUrl.replace(/^data:[^,]+,/, ''), format: audioFormatFromMime(attachment.mime) } });
+    }
+    return parts;
+}
+
+function normalizeChatCitations(values) {
+    const list = Array.isArray(values) ? values : [];
+    const byUrl = new Map();
+    list.forEach(value => {
+        const citation = value?.url_citation || value;
+        const url = String(citation?.url || '').trim();
+        if (!/^https?:\/\//i.test(url)) return;
+        byUrl.set(url, { url, title: String(citation.title || new URL(url).hostname).slice(0, 240) });
+    });
+    return [...byUrl.values()].slice(0, 30);
+}
+
+async function handleChatImageGeneration(character, session) {
+    const input = document.getElementById('user-input');
+    const prompt = input.value.trim();
+    if (!prompt) return showToast('Describe the image you want to create.', 'info');
+    const runtime = chatRuntimeCapabilities(character);
+    if (!runtime.imageGeneration) return showToast('Image generation is not available for this character and provider.', 'error');
+    const pending = [...chatPendingForCurrentSession()];
+    if (pending.some(item => item.kind !== 'image')) {
+        return showToast('Create image mode can only use image attachments as references.', 'info');
+    }
+    const button = document.getElementById('send-btn');
+    const persisted = [];
+    try {
+        for (const item of pending) persisted.push(await persistChatAttachment(item));
+        const userMessage = { id: newChatMemoryId('message'), role: 'user', content: prompt,
+            attachments: persisted, imageGeneration: true };
+        session.messages.push(userMessage);
+        input.value = '';
+        input.style.height = 'auto';
+        chatPendingAttachments.set(chatInteractionKey(), []);
+        pending.forEach(item => item.previewUrl && URL.revokeObjectURL(item.previewUrl));
+        await saveState();
+        renderChat();
+
+        generationController = new AbortController();
+        button.innerHTML = '⏹';
+        button.classList.add('stop');
+        button.disabled = false;
+        const placeholder = appendMessageUI('ai', 'Creating image…');
+        const capability = normalizeChatCreatorCapabilities(character.chatCapabilities);
+        const provider = runtime.imageProvider;
+        const model = capability.imageModel || companionImageModelFallback(provider);
+        const body = { model, prompt: `Create an image for a roleplay conversation with ${character.name}. ${prompt}` };
+        const reference = persisted.find(item => item.kind === 'image');
+        if (reference) {
+            const blob = await chatAttachmentBlob(reference);
+            const dataUrl = blob ? await blobToDataUrl(blob) : '';
+            if (provider === 'fal') body.imageDataUrl = dataUrl;
+            else if (provider === 'openrouter') body.input_references = [{ type: 'image_url', image_url: { url: dataUrl } }];
+        }
+        let generated = await requestCompanionPhoto(body, provider);
+        generated = await stabilizeGeneratedImageSource(generated);
+        let generatedAttachment;
+        if (/^data:image\//i.test(generated)) {
+            const blob = dataUrlToBlob(generated);
+            const id = newChatMemoryId('asset');
+            await HordeDB.set(`chatAsset:${id}`, blob);
+            generatedAttachment = { id, kind: 'image', name: `Generated image · ${new Date().toLocaleTimeString()}`,
+                mime: blob.type, size: blob.size, generated: true };
+        } else {
+            generatedAttachment = { kind: 'image', name: 'Generated image', mime: 'image/png', size: 0,
+                url: generated, generated: true };
+        }
+        session.messages.push({ id: newChatMemoryId('message'), role: 'assistant', content: '',
+            charId: character.id, attachments: [generatedAttachment], generatedImage: true });
+        await saveState();
+        placeholder.closest('.message')?.remove();
+        chatImageModeBySession.set(chatInteractionKey(), false);
+        renderChat();
+    } catch (error) {
+        const last = session.messages[session.messages.length - 1];
+        if (last?.imageGeneration && last.role === 'user') {
+            session.messages.pop();
+            await deleteChatMessageAssets(last);
+        }
+        input.value = prompt;
+        await saveState();
+        renderChat();
+        showToast('Image generation failed: ' + humanizeApiError(error, runtime.imageProvider), 'error');
+    } finally {
+        generationController = null;
+        button.innerHTML = '➤';
+        button.classList.remove('stop');
+        updateChatSendButton();
+    }
+}
+
 // --- Chat View Logic ---
 function setupChatLogic() {
+    setupChatCapabilityControls();
     const sendBtn = document.getElementById('send-btn');
     const userInput = document.getElementById('user-input');
 
     userInput.oninput = () => {
         userInput.style.height = 'auto';
         userInput.style.height = userInput.scrollHeight + 'px';
-        sendBtn.disabled = !userInput.value.trim() || (!state.activeCharId && !state.activeRoomId);
+        updateChatSendButton();
     };
 
     sendBtn.onclick = () => {
@@ -6553,6 +7068,8 @@ function setupChatLogic() {
         showConfirmModal('Clear History', 'Are you sure you want to clear the chat history for this session?', async () => {
             const sessionId = state.activeRoomId || state.activeCharId;
             const currentSessId = state.activeSessionId[sessionId];
+            const removedSession = state.chats[sessionId].find(session => session.id === currentSessId);
+            for (const message of removedSession?.messages || []) await deleteChatMessageAssets(message);
             
             // Delete the current session
             state.chats[sessionId] = state.chats[sessionId].filter(s => s.id !== currentSessId);
@@ -6833,6 +7350,7 @@ function renderChat() {
     chatAvatar.style.display = 'grid';
     document.getElementById('chat-char-name').textContent = name;
     document.getElementById('chat-char-model').textContent = modelName;
+    renderChatCapabilityBar();
     
     document.getElementById('chat-view').style.backgroundImage = bg ? `linear-gradient(rgba(10,10,15,0.8), rgba(10,10,15,0.8)), url('${cssUrl(bg)}')` : 'none';
     document.getElementById('chat-view').style.backgroundSize = 'cover';
@@ -7121,6 +7639,54 @@ function formatMessageContent(content, role, isStreaming = false) {
     return out;
 }
 
+async function hydrateChatMessageMedia(container, message) {
+    if (!container || !message) return;
+    const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+    for (const attachment of attachments) {
+        const url = await chatAttachmentObjectUrl(attachment);
+        if (!url || !container.isConnected) continue;
+        let element;
+        if (attachment.kind === 'image') {
+            element = document.createElement('img');
+            element.src = url;
+            element.alt = attachment.name || 'Chat image';
+            element.loading = 'lazy';
+        } else if (attachment.kind === 'video') {
+            element = document.createElement('video');
+            element.src = url;
+            element.controls = true;
+            element.preload = 'metadata';
+        } else if (attachment.kind === 'audio') {
+            element = document.createElement('audio');
+            element.src = url;
+            element.controls = true;
+            element.preload = 'metadata';
+        } else {
+            element = document.createElement('a');
+            element.className = 'chat-file-card';
+            element.href = url;
+            element.download = attachment.name || 'attachment.pdf';
+            element.textContent = `📄 ${attachment.name || 'Attached PDF'}`;
+        }
+        container.appendChild(element);
+    }
+}
+
+function renderChatCitationLinks(container, citations) {
+    if (!container) return;
+    const normalized = normalizeChatCitations(citations);
+    if (!normalized.length) return;
+    normalized.forEach((citation, index) => {
+        const link = document.createElement('a');
+        link.className = 'chat-citation';
+        link.href = citation.url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = `${index + 1}. ${citation.title}`;
+        container.appendChild(link);
+    });
+}
+
 function appendMessageUI(role, content, index = null, charId = null, isStreaming = false) {
     const msgContainer = document.getElementById('messages-container');
     const div = document.createElement('div');
@@ -7149,6 +7715,8 @@ function appendMessageUI(role, content, index = null, charId = null, isStreaming
         <div class="message-avatar${avatarUrl ? ' has-image' : ''}" style="${avatarUrl ? `background-image:url('${cssUrl(avatarUrl)}')` : ''}" aria-hidden="true">${avatarUrl ? '' : escapeHTML(displayInitials(avatarName))}</div>
         <div class="message-body">
             <div class="message-content">${formatMessageContent(content, role, isStreaming)}</div>
+            <div class="chat-message-media"></div>
+            <div class="chat-citations"></div>
             <textarea class="message-edit-area hidden"></textarea>
             <div class="message-actions">
                 ${hasVersions ? `
@@ -7163,6 +7731,11 @@ function appendMessageUI(role, content, index = null, charId = null, isStreaming
             </div>
         </div>
     `;
+
+    if (msgRef) {
+        void hydrateChatMessageMedia(div.querySelector('.chat-message-media'), msgRef);
+        renderChatCitationLinks(div.querySelector('.chat-citations'), msgRef.citations);
+    }
 
     if (hasVersions) {
         const setVersion = async (i) => {
@@ -7201,6 +7774,7 @@ function appendMessageUI(role, content, index = null, charId = null, isStreaming
                 if (session) {
                     invalidateEpisodicFrom(session, index);
                     stripChatLedgerEntry(session, session.messages[index]);
+                    await deleteChatMessageAssets(session.messages[index]);
                     session.messages.splice(index, 1);
                     await saveState();
                     renderChat();
@@ -7580,7 +8154,7 @@ async function buildContext(config, targetChar, messages, userText) {
     if (targetChar.lorebook) combinedLore = combinedLore.concat(targetChar.lorebook);
 
     const scanDepth = state.globalSettings.loreScanDepth || 5;
-    const loreScanText = (messages.slice(-scanDepth).map(m => m.content).join('\n') + '\n' + userText).toLowerCase();
+    const loreScanText = (messages.slice(-scanDepth).map(m => canonicalMsgText(m)).join('\n') + '\n' + userText).toLowerCase();
     const relevantLore = combinedLore.filter(entry => {
         if (!entry || !entry.keyword) return entry && entry.constant; // keyless constant entries still allowed
         // Constant entries: always on (no keyword trigger needed)
@@ -7897,9 +8471,11 @@ Do not emit a memory line for ordinary dialogue, repeated information, mood, des
             content = redactPrivateWhispers(content, targetChar.name, otherNames);
         }
 
-        const msgTokens = Math.ceil(content.length / 3.5);
+        const msgTokens = Math.ceil(content.length / 3.5)
+            + (Array.isArray(m.attachments) ? m.attachments.reduce((sum, item) =>
+                sum + (item.kind === 'image' ? 900 : item.kind === 'video' ? 4000 : item.kind === 'audio' ? 2000 : 1200), 0) : 0);
         if (availableTokens - msgTokens > 0) {
-            messagesToSend.unshift({ role, content });
+            messagesToSend.unshift({ role, content: await chatProviderContent(m, content) });
             availableTokens -= msgTokens;
         } else {
             break;
@@ -7955,6 +8531,11 @@ async function handleChat(isReroll = false, specificCharId = null) {
     const session = getCurrentSession();
     if (!session.messages) session.messages = [];
 
+    if (!isReroll && !state.activeRoomId && chatImageModeBySession.get(chatInteractionKey()) === true) {
+        const character = state.characters.find(item => item.id === state.activeCharId);
+        if (character) return handleChatImageGeneration(character, session);
+    }
+
     const sendBtn = document.getElementById('send-btn');
     const userInput = document.getElementById('user-input');
 
@@ -7980,6 +8561,8 @@ async function handleChat(isReroll = false, specificCharId = null) {
     let rerollLedgerEntries = null; // per-take chronicle entries, parallel to versions
     let rerollHudBefore = null;
     let rerollHudAfter = null;
+    let draftAttachments = [];
+    let persistedUserAttachments = [];
 
     if (isReroll) {
         const lastMsg = session.messages[session.messages.length - 1];
@@ -8002,11 +8585,21 @@ async function handleChat(isReroll = false, specificCharId = null) {
         text = lastUser ? lastUser.content : '';
     } else {
         text = document.getElementById('user-input').value.trim();
-        if (text) {
+        draftAttachments = [...chatPendingForCurrentSession()];
+        if (text || draftAttachments.length) {
+            const runtime = !isRoom ? chatRuntimeCapabilities(state.characters.find(item => item.id === state.activeCharId)) : null;
+            const unsupported = draftAttachments.find(item => !runtime?.[item.kind]);
+            if (unsupported) return showToast(`${unsupported.kind} input is not enabled for this character and model.`, 'error');
+            try {
+                for (const item of draftAttachments) persistedUserAttachments.push(await persistChatAttachment(item));
+            } catch (error) {
+                for (const attachment of persistedUserAttachments) await deleteChatMessageAssets({ attachments: [attachment] });
+                return showToast('Could not store attachment: ' + error.message, 'error');
+            }
             document.getElementById('user-input').value = '';
             document.getElementById('user-input').style.height = 'auto';
             
-            let pushText = text;
+            let pushText = text || `Shared ${draftAttachments.length} attachment${draftAttachments.length === 1 ? '' : 's'}.`;
             if (isRoom) {
                 let prefix = '[User]: ';
                 const p = state.personas.find(x => x.id === state.activePersonaId);
@@ -8014,9 +8607,14 @@ async function handleChat(isReroll = false, specificCharId = null) {
                 pushText = prefix + text;
             }
             
-            session.messages.push({ id: newChatMemoryId('message'), role: 'user', content: pushText });
+            const webSearch = !isRoom && chatWebSearchBySession.get(chatInteractionKey()) === true;
+            session.messages.push({ id: newChatMemoryId('message'), role: 'user', content: pushText,
+                attachments: persistedUserAttachments, webSearch });
+            chatPendingAttachments.set(chatInteractionKey(), []);
+            draftAttachments.forEach(item => item.previewUrl && URL.revokeObjectURL(item.previewUrl));
+            if (webSearch) chatWebSearchBySession.set(chatInteractionKey(), false);
             await saveState();
-            appendMessageUI('user', pushText);
+            renderChat();
         }
     }
 
@@ -8068,6 +8666,13 @@ async function handleChat(isReroll = false, specificCharId = null) {
             messages: sanitizeMessagesForProvider(apiMessages),
             stream: true
         };
+
+        const latestUserMessage = [...session.messages].reverse().find(message => message.role === 'user');
+        if (latestUserMessage?.webSearch) {
+            if (normalizedProviderId() !== 'openrouter') throw new Error('Web search is only available through OpenRouter in Chat.');
+            requestBody.tools = [COMPANION_WEB_SEARCH_TOOL];
+            requestBody.max_tool_calls = 4;
+        }
 
         // Smart parameter filtering
         const supported = config.supportedParams || [];
@@ -8129,6 +8734,7 @@ async function handleChat(isReroll = false, specificCharId = null) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let responseCitations = [];
         
         aiMsgDiv.classList.add('is-generating');
         aiMsgDiv.textContent = '';
@@ -8160,6 +8766,11 @@ async function handleChat(isReroll = false, specificCharId = null) {
                         const delta = json.choices[0]?.delta || {};
                         const content = delta.content || '';
                         const reasoning = delta.reasoning || delta.thought || ''; // Support 'thought' fallback
+                        responseCitations = normalizeChatCitations([
+                            ...responseCitations,
+                            ...(Array.isArray(delta.annotations) ? delta.annotations : []),
+                            ...(Array.isArray(json.choices[0]?.message?.annotations) ? json.choices[0].message.annotations : [])
+                        ]);
                         
                         // Check for content filter
                         if (json.choices[0]?.finish_reason === 'content_filter') {
@@ -8243,7 +8854,8 @@ async function handleChat(isReroll = false, specificCharId = null) {
         const hudAfterTurn = !isRoom ? safeJsonClone(ensureChatHudState(targetChar, session).state) : null;
 
         const newAiMsg = { id: newChatMemoryId('message'), role: 'assistant', content: fullContent, charId: targetChar.id,
-            hudBefore: hudBeforeTurn || undefined, hudAfter: hudAfterTurn || undefined };
+            hudBefore: hudBeforeTurn || undefined, hudAfter: hudAfterTurn || undefined,
+            citations: responseCitations.length ? responseCitations : undefined };
         if (extractedChronicle) newAiMsg.ledgerEntry = extractedChronicle; // for ghost-cleanup on reroll/delete
         if (rerollVersions) {
             // Preserve prior takes: invariant is content === versions[currentVersion]
@@ -8329,13 +8941,21 @@ async function handleChat(isReroll = false, specificCharId = null) {
         }
 
         // If they just typed a message, give it back to them
-        if (!isReroll && text) {
+        if (!isReroll && (text || draftAttachments.length)) {
             const session = getCurrentSession();
             const lastMsg = session.messages[session.messages.length - 1];
             if (lastMsg && lastMsg.role === 'user') {
                 session.messages.pop(); // remove from transcript
                 document.getElementById('user-input').value = text; // restore raw text to box
                 document.getElementById('user-input').style.height = 'auto';
+                await deleteChatMessageAssets(lastMsg);
+                if (draftAttachments.length) {
+                    draftAttachments.forEach(item => {
+                        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+                        item.previewUrl = item.kind === 'image' ? URL.createObjectURL(item.file) : '';
+                    });
+                    chatPendingAttachments.set(chatInteractionKey(), draftAttachments);
+                }
             }
         }
         
@@ -8347,7 +8967,7 @@ async function handleChat(isReroll = false, specificCharId = null) {
         generationController = null;
         sendBtn.innerHTML = '➤';
         sendBtn.classList.remove('stop');
-        sendBtn.disabled = !userInput.value.trim() || (!state.activeCharId && !state.activeRoomId);
+        updateChatSendButton();
     }
 }
 
@@ -10186,6 +10806,8 @@ function refreshSettingsProviderCards(activeProvider = state.globalSettings.apiP
     const keys = {
         openrouter: document.getElementById('global-api-key')?.value || state.apiKey,
         gptproto: document.getElementById('global-gptproto-key')?.value || state.gptprotoApiKey,
+        fal: document.getElementById('global-fal-key')?.value || state.falApiKey,
+        hotapi: document.getElementById('global-hotapi-key')?.value || state.hotapiApiKey,
         nanogpt: document.getElementById('global-nanogpt-key')?.value || state.nanogptApiKey,
         nvidia: document.getElementById('global-nvidia-key')?.value || state.nvidiaApiKey,
         bedrock: document.getElementById('global-bedrock-key')?.value || state.bedrockApiKey,
@@ -10351,6 +10973,9 @@ function setupGlobalSettings() {
         state.falApiKey = document.getElementById('global-fal-key')?.value.trim() || '';
         if (state.falApiKey) sessionStorage.setItem('horde_fal_api_key', state.falApiKey);
         else sessionStorage.removeItem('horde_fal_api_key');
+        state.hotapiApiKey = document.getElementById('global-hotapi-key')?.value.trim() || '';
+        if (state.hotapiApiKey) sessionStorage.setItem('horde_hotapi_api_key', state.hotapiApiKey);
+        else sessionStorage.removeItem('horde_hotapi_api_key');
         applyNanoGPTApiKeyForSession(document.getElementById('global-nanogpt-key').value);
         state.nvidiaApiKey = document.getElementById('global-nvidia-key').value.trim();
         if (state.nvidiaApiKey) sessionStorage.setItem('horde_nvidia_api_key', state.nvidiaApiKey);
@@ -10464,7 +11089,7 @@ function setupGlobalSettings() {
         syncCompanionAlwaysOnRuntime({ announce: true }).catch(() => {});
         const enteredCloudKey = !!(state.apiKey || state.gptprotoApiKey || state.nanogptApiKey
             || state.nvidiaApiKey || state.bedrockApiKey || state.customApiKey
-            || state.evolinkApiKey || state.wavespeedApiKey || state.falApiKey);
+            || state.evolinkApiKey || state.wavespeedApiKey || state.falApiKey || state.hotapiApiKey);
         showToast(enteredCloudKey && !state.globalSettings.rememberApiKey
             ? 'Settings saved. API keys remain in this tab only; enable “Remember API keys” to keep them after closing the browser.'
             : 'Settings saved for future sessions.', 'success');
@@ -10535,7 +11160,7 @@ function setupGlobalSettings() {
             if (fpWarn) fpWarn.style.display = (local && location.protocol === 'file:') ? 'block' : 'none';
         };
     }
-    ['global-api-key', 'global-gptproto-key', 'global-fal-key', 'global-nanogpt-key', 'global-nvidia-key',
+    ['global-api-key', 'global-gptproto-key', 'global-fal-key', 'global-hotapi-key', 'global-nanogpt-key', 'global-nvidia-key',
         'global-bedrock-key', 'global-custom-api-key'].forEach(inputId => {
         document.getElementById(inputId)?.addEventListener('input', () => refreshSettingsProviderCards(providerSel?.value));
     });
@@ -10664,6 +11289,33 @@ function setupGlobalSettings() {
                 : `Fal connection failed: ${humanizeApiError(error)}`;
         } finally {
             testFalBtn.disabled = false;
+        }
+    };
+    const testHotApiBtn = document.getElementById('test-hotapi-conn-btn');
+    if (testHotApiBtn) testHotApiBtn.onclick = async () => {
+        const result = document.getElementById('hotapi-conn-result');
+        const key = document.getElementById('global-hotapi-key')?.value.trim() || '';
+        if (!key) {
+            if (result) result.textContent = 'Enter a HotAPI key first.';
+            return;
+        }
+        testHotApiBtn.disabled = true;
+        if (result) result.textContent = 'Checking HotAPI authentication without generating or charging…';
+        try {
+            const response = await mcpBridgeRequest('/hotapi/video/test', {
+                method: 'POST', body: { apiKey: key }, timeoutMs: 30000
+            });
+            state.hotapiApiKey = key;
+            sessionStorage.setItem('horde_hotapi_api_key', key);
+            refreshSettingsProviderCards(document.getElementById('global-api-provider')?.value);
+            if (result) result.textContent = `Connected to HotAPI${response.modelsVisible ? ` · ${response.modelsVisible} models visible` : ''}. The key is active for this browser session; Save changes to keep it.`;
+        } catch (error) {
+            const oldBridge = /Unknown MCP provider|Unknown bridge endpoint|request failed \(404\)/i.test(error.message || '');
+            if (result) result.textContent = oldBridge
+                ? 'HotAPI support needs the current local bridge. Restart Horde Studio once, reopen Settings, and test again.'
+                : `HotAPI connection failed: ${humanizeApiError(error)}`;
+        } finally {
+            testHotApiBtn.disabled = false;
         }
     };
     const setupOpenAICompatibleCloudTest = ({ buttonId, resultId, keyId, label, baseUrl }) => {
@@ -10940,6 +11592,16 @@ async function exportFullBackup() {
         const blob = await HordeDB.get(`companionVideoAsset:${assetId}`).catch(() => null);
         if (blob instanceof Blob) companionVideoAssets[assetId] = await blobAsDataUrl(blob);
     }
+    const chatAssets = {};
+    const chatAssetIds = new Set(Object.values(state.chats || {}).flatMap(sessions =>
+        (Array.isArray(sessions) ? sessions : []).flatMap(session =>
+            (Array.isArray(session?.messages) ? session.messages : []).flatMap(message =>
+                (Array.isArray(message?.attachments) ? message.attachments : [])
+                    .map(attachment => String(attachment?.id || '')).filter(Boolean)))));
+    for (const assetId of chatAssetIds) {
+        const blob = await HordeDB.get(`chatAsset:${assetId}`).catch(() => null);
+        if (blob instanceof Blob) chatAssets[assetId] = await blobAsDataUrl(blob);
+    }
     const payload = {
         _format: 'horde-studio-backup',
         _version: 1,
@@ -10967,7 +11629,8 @@ async function exportFullBackup() {
         companionThreads: state.companionThreads,
         companionTimelines: state.companionTimelines,
         activeCompanionId: state.activeCompanionId,
-        companionVideoAssets
+        companionVideoAssets,
+        chatAssets
     };
     const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -11012,6 +11675,11 @@ function importFullBackup(file) {
                         if (!/^data:video\/[a-z0-9.+-]+;base64,/i.test(source)) continue;
                         const blob = await fetch(source).then(response => response.blob());
                         await HordeDB.set(`companionVideoAsset:${assetId}`, blob);
+                    }
+                    for (const [assetId, source] of Object.entries(data.chatAssets || {})) {
+                        if (!/^data:(?:image|video|audio|application\/pdf)/i.test(source)) continue;
+                        const blob = await fetch(source).then(response => response.blob());
+                        await HordeDB.set(`chatAsset:${assetId}`, blob);
                     }
                     worldMediaDirty = true;
                     await saveState();
@@ -11058,6 +11726,7 @@ function showGlobalSettings() {
         document.getElementById('global-evolink-key').value = state.evolinkApiKey;
         document.getElementById('global-wavespeed-key').value = state.wavespeedApiKey;
         document.getElementById('global-fal-key').value = state.falApiKey;
+        document.getElementById('global-hotapi-key').value = state.hotapiApiKey;
         document.getElementById('global-fal-rate-480').value = String(state.globalSettings.falRate480 ?? 0.05);
         document.getElementById('global-fal-rate-768').value = String(state.globalSettings.falRate768 ?? 0.08);
         document.getElementById('global-fal-safety-checker').checked = state.globalSettings.falSafetyChecker !== false;
@@ -12590,14 +13259,27 @@ async function deleteWorld() {
     if (!state.editingWorld) return;
     if (!confirm(`Are you sure you want to delete "${state.editingWorld.name}"? This cannot be undone.`)) return;
 
-    state.worlds = state.worlds.filter(w => w.id !== state.editingWorld.id);
-    worldMediaDirty = true;
-    if (state.worldInstances[state.editingWorld.id]) {
-        delete state.worldInstances[state.editingWorld.id];
+    const deletedWorldId = state.editingWorld.id;
+    const deletedWorldName = state.editingWorld.name;
+    state.worlds = state.worlds.filter(w => w.id !== deletedWorldId);
+    // Recovery snapshots are for interrupted/corrupt saves, not an undo layer
+    // for an explicit deletion. Remove the previous manifest before saveState()
+    // too, otherwise persistStateSnapshot() correctly-but-unhelpfully sees the
+    // missing world and immediately creates the green "Safety copy" card.
+    lastPersistedWorldManifests = lastPersistedWorldManifests
+        .filter(world => world?.id !== deletedWorldId);
+    if (state.worldRecoverySnapshots?.[deletedWorldId]) {
+        delete state.worldRecoverySnapshots[deletedWorldId];
     }
+    worldMediaDirty = true;
+    if (state.worldInstances[deletedWorldId]) {
+        delete state.worldInstances[deletedWorldId];
+    }
+    if (state.activeWorldId === deletedWorldId) state.activeWorldId = null;
+    state.editingWorld = null;
     
     await saveState();
-    showToast('World Deleted', 'success');
+    showToast(`Deleted "${deletedWorldName}" and its safety copy.`, 'success');
     renderWorlds();
     switchView('worlds');
 }
@@ -17488,7 +18170,10 @@ function renderWorlds() {
             <div class="char-card-body">
                 <div class="char-card-name">${escapeHTML(world.name || 'Recovered World')}</div>
                 <div class="char-card-desc">Safety copy from ${escapeHTML(snapshot.capturedAt ? new Date(snapshot.capturedAt).toLocaleString() : 'an earlier save')}.</div>
-                <button class="btn btn-primary btn-full recover-world-card-btn">Restore World</button>
+                <div style="display:flex; gap:8px; margin-top:12px;">
+                    <button class="btn btn-primary btn-full recover-world-card-btn">Restore World</button>
+                    <button class="btn btn-ghost discard-world-recovery-btn" title="Permanently remove this safety copy">Delete copy</button>
+                </div>
             </div>`;
         card.querySelector('.recover-world-card-btn').onclick = async () => {
             if (state.worlds.some(item => item.id === world.id)) return;
@@ -17501,6 +18186,15 @@ function renderWorlds() {
             await saveState();
             renderWorlds();
             showToast(`Restored "${restored.name}" and reconnected its existing sessions.`, 'success');
+        };
+        card.querySelector('.discard-world-recovery-btn').onclick = async () => {
+            if (!confirm(`Permanently delete the safety copy of "${world.name || 'this world'}"?`)) return;
+            delete state.worldRecoverySnapshots[world.id];
+            if (state.worldInstances?.[world.id]) delete state.worldInstances[world.id];
+            worldMediaDirty = true;
+            await saveState();
+            renderWorlds();
+            showToast(`Deleted the safety copy of "${world.name || 'World'}".`, 'success');
         };
         grid.appendChild(card);
     });

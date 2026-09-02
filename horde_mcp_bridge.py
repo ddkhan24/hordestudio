@@ -64,12 +64,14 @@ HOST = os.environ.get("HORDE_SERVER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HORDE_SERVER_PORT", "43127"))
 CALLBACK_URL = f"http://{HOST}:{PORT}/oauth/callback"
 CLIENT_NAME = "Horde Studio Local MCP Bridge"
-BRIDGE_BUILD = "20260901-video-worlds-v1"
+BRIDGE_BUILD = "20260902-video-references-v2"
 APP_INSTANCE_ID = hashlib.sha256(str(APP_DIR).encode("utf-8")).hexdigest()[:16]
 MAX_RESPONSE_BYTES = 40 * 1024 * 1024
 MAX_VIDEO_BYTES = 160 * 1024 * 1024
 FAL_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 FAL_VIDEO_JOBS_LOCK = threading.Lock()
+HOTAPI_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
+HOTAPI_VIDEO_JOBS_LOCK = threading.Lock()
 
 def allowed_origins(port: int) -> set[str]:
     origins = {
@@ -1563,6 +1565,7 @@ FAL_IMAGE_MODELS = {
     "fal-ai/flux/dev",
     "fal-ai/flux/dev/image-to-image",
     "fal-ai/wan-25-preview/image-to-image",
+    "fal-ai/nano-banana-2/edit",
 }
 
 
@@ -1578,6 +1581,15 @@ def generate_fal_image(body: dict[str, Any]) -> dict[str, Any]:
     if requested_model not in FAL_IMAGE_MODELS:
         raise ValueError("That Fal image model is not supported by this Horde Studio build.")
     image_url = str(body.get("imageDataUrl") or "").strip()
+    image_urls = body.get("imageDataUrls") if isinstance(body.get("imageDataUrls"), list) else []
+    image_urls = [str(value or "").strip() for value in image_urls[:14] if str(value or "").strip()]
+    if image_url and not image_urls:
+        image_urls = [image_url]
+    if sum(len(value) for value in image_urls) > 24 * 1024 * 1024:
+        raise ValueError("The combined image references exceed the 24 MB request limit.")
+    for value in image_urls:
+        if not re.match(r"^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$", value, re.I):
+            raise ValueError("Each image reference must be a JPEG, PNG or WebP data URL.")
     if image_url:
         if not re.match(r"^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$", image_url, re.I):
             raise ValueError("The image reference must be a JPEG, PNG or WebP data URL.")
@@ -1597,7 +1609,15 @@ def generate_fal_image(body: dict[str, Any]) -> dict[str, Any]:
         "prompt": prompt, "num_images": 1, "output_format": "jpeg",
         "enable_safety_checker": body.get("enableSafetyChecker") is not False,
     }
-    if model == "fal-ai/wan-25-preview/image-to-image":
+    if model == "fal-ai/nano-banana-2/edit":
+        if not image_urls:
+            raise ValueError("Nano Banana reference composition requires at least one image.")
+        payload = {
+            "prompt": prompt, "image_urls": image_urls, "aspect_ratio": aspect,
+            "resolution": "1K", "num_images": 1, "output_format": "jpeg",
+            "safety_tolerance": "4" if body.get("enableSafetyChecker") is not False else "6",
+        }
+    elif model == "fal-ai/wan-25-preview/image-to-image":
         payload["image_urls"] = [image_url]
         payload["aspect_ratio"] = aspect if aspect in {"16:9", "9:16", "1:1"} else "auto"
     else:
@@ -1664,10 +1684,22 @@ FAL_VIDEO_RENDERERS = {
 
 
 def _fal_video_request(model: str, body: dict[str, Any], prompt: str, image_url: str,
+                       reference_image_urls: list[str],
                        duration: int, resolution: str, aspect_ratio: str,
                        seed: int) -> tuple[str, dict[str, Any], int, str]:
     """Translate Horde's stable video contract to one documented Fal model schema."""
     if model == "minimax/h3-max":
+        if reference_image_urls:
+            endpoint = f"{model}/reference-to-video"
+            h3_resolution = "768P" if resolution in {"768P", "1080P"} else "480P"
+            payload = {
+                "prompt": prompt, "reference_image_urls": reference_image_urls,
+                "duration": duration, "resolution": h3_resolution,
+                "aspect_ratio": aspect_ratio, "seed": seed,
+                "enable_safety_checker": body.get("enableSafetyChecker") is not False,
+                "prompt_expansion_mode": "disabled",
+            }
+            return endpoint, payload, duration, h3_resolution
         endpoint = f"{model}/{'image-to-video' if image_url else 'text-to-video'}"
         h3_resolution = "768P" if resolution in {"768P", "1080P"} else "480P"
         payload: dict[str, Any] = {
@@ -1680,6 +1712,17 @@ def _fal_video_request(model: str, body: dict[str, Any], prompt: str, image_url:
         else:
             payload["aspect_ratio"] = aspect_ratio
         return endpoint, payload, duration, h3_resolution
+
+    if model == "alibaba/wan-3.0" and reference_image_urls:
+        endpoint = f"{model}/reference-to-video"
+        wan_resolution = "1080p" if resolution == "1080P" else "720p" if resolution == "768P" else "480p"
+        payload = {
+            "prompt": prompt, "reference_image_urls": reference_image_urls,
+            "duration": duration, "resolution": wan_resolution, "aspect_ratio": aspect_ratio,
+            "audio": True, "enable_thinking": False, "enable_prompt_expansion": False,
+            "enable_safety_checker": body.get("enableSafetyChecker") is not False, "seed": seed,
+        }
+        return endpoint, payload, duration, wan_resolution
 
     if model.startswith("alibaba/wan-3.0"):
         endpoint = f"{model}/{'image-to-video' if image_url else 'text-to-video'}"
@@ -1735,6 +1778,13 @@ def generate_fal_video(body: dict[str, Any], on_model: Any = None) -> dict[str, 
             raise ValueError("The continuity frame must be a JPEG, PNG or WebP data URL.")
         if len(image_url) > 12 * 1024 * 1024:
             raise ValueError("The continuity frame exceeds the 12 MB safety limit.")
+    reference_image_urls = body.get("referenceImageDataUrls") if isinstance(body.get("referenceImageDataUrls"), list) else []
+    reference_image_urls = [str(value or "").strip() for value in reference_image_urls[:4] if str(value or "").strip()]
+    if sum(len(value) for value in reference_image_urls) > 24 * 1024 * 1024:
+        raise ValueError("The combined video references exceed the 24 MB request limit.")
+    for value in reference_image_urls:
+        if not re.match(r"^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$", value, re.I):
+            raise ValueError("Each video reference must be a JPEG, PNG or WebP data URL.")
 
     requested_models = body.get("models") if isinstance(body.get("models"), list) else []
     models = []
@@ -1757,7 +1807,7 @@ def generate_fal_video(body: dict[str, Any], on_model: Any = None) -> dict[str, 
             on_model(model)
         try:
             endpoint, payload, actual_duration, actual_resolution = _fal_video_request(
-                model, body, prompt, image_url, duration, resolution, aspect_ratio, seed)
+                model, body, prompt, image_url, reference_image_urls, duration, resolution, aspect_ratio, seed)
             if latency_mode != "queue":
                 result = fal_json_request(f"https://fal.run/{endpoint}", key,
                                           method="POST", payload=payload, timeout=240)
@@ -1925,6 +1975,363 @@ def delete_fal_videos(body: dict[str, Any]) -> dict[str, Any]:
         except FileNotFoundError:
             pass
     return {"ok": True, "removed": removed}
+
+
+HOTAPI_VIDEO_RENDERERS = {
+    "minimax-h3-spicy",
+    "seedance-2.0-fast-spicy",
+    "seedance-2.0-spicy",
+    "seedance-2.5-spicy",
+}
+
+
+def safe_hotapi_url(value: Any, *, api: bool = False) -> str:
+    """Validate HotAPI control URLs and provider-returned public media URLs."""
+    url = str(value or "").strip()
+    parsed = urllib.parse.urlparse(url)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme != "https" or not hostname or parsed.username or parsed.password or parsed.fragment:
+        raise ValueError("HotAPI URLs must be credential-free HTTPS URLs.")
+    if api and hostname != "api.hotapi.ai":
+        raise ValueError("HotAPI requests must use api.hotapi.ai.")
+    try:
+        addresses = {entry[4][0] for entry in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)}
+    except OSError as error:
+        raise ValueError("The HotAPI host could not be resolved.") from error
+    if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+        raise ValueError("HotAPI URLs may not resolve to a private or reserved address.")
+    return url
+
+
+def hotapi_key(value: Any) -> str:
+    key = str(value or os.environ.get("HOTAPI_KEY") or "").strip()
+    if not key:
+        raise ValueError("Add a HotAPI key in Horde Studio Settings first.")
+    if len(key) > 1000 or any(char in key for char in "\r\n"):
+        raise ValueError("The HotAPI key is invalid.")
+    return key
+
+
+def hotapi_json_request(url: str, key: str, *, method: str = "GET", payload: Any = None,
+                        timeout: int = 120) -> dict[str, Any]:
+    safe_hotapi_url(url, api=True)
+    status, _, data = json_request(url, method=method, headers={
+        "Authorization": f"Bearer {key}",
+        "User-Agent": "HordeStudio/17.0 VideoAdventures/2",
+    }, payload=payload, timeout=timeout)
+    if not 200 <= status < 300:
+        detail = data.get("error") or data.get("message") or data.get("raw") if isinstance(data, dict) else data
+        if isinstance(detail, dict):
+            detail = detail.get("message") or detail.get("code") or detail
+        safe_detail = str(detail or "unknown provider error")[:1200]
+        raise RuntimeError(f"HotAPI request failed ({status}): {safe_detail}")
+    if not isinstance(data, dict):
+        raise RuntimeError("HotAPI returned an invalid JSON response.")
+    return data
+
+
+def hotapi_upload_image(data_url: str, key: str) -> str:
+    match = re.fullmatch(r"data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)", data_url, re.I)
+    if not match:
+        raise ValueError("The HotAPI continuity frame must be a JPEG, PNG or WebP data URL.")
+    raw = base64.b64decode(match.group(2), validate=True)
+    if len(raw) > 10 * 1024 * 1024:
+        raise ValueError("The HotAPI continuity frame exceeds the 10 MB upload limit.")
+    subtype = match.group(1).lower()
+    extension = "jpg" if subtype == "jpeg" else subtype
+    boundary = "----HordeStudio" + secrets.token_hex(16)
+    prefix = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"continuity.{extension}\"\r\n"
+              f"Content-Type: image/{subtype}\r\n\r\n").encode()
+    body = prefix + raw + f"\r\n--{boundary}--\r\n".encode()
+    status, _, response = http_request("https://api.hotapi.ai/v1/uploads", method="POST", headers={
+        "Authorization": f"Bearer {key}",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Accept": "application/json",
+        "User-Agent": "HordeStudio/17.0 VideoAdventures/2",
+    }, body=body, timeout=90)
+    try:
+        data = json.loads(response.decode("utf-8")) if response else {}
+    except (UnicodeDecodeError, ValueError):
+        data = {}
+    if not 200 <= status < 300:
+        raise RuntimeError(f"HotAPI image upload failed ({status}): {str(data.get('error') or data.get('message') or 'unknown error')[:800]}")
+    url = str(data.get("url") or "")
+    safe_hotapi_url(url)
+    return url
+
+
+def hotapi_output_video_url(output: Any) -> str:
+    """Accept documented and model-specific HotAPI output envelopes."""
+    preferred = ("video_url", "videoUrl", "url", "mp4_url", "mp4Url")
+    if isinstance(output, dict):
+        for key in preferred:
+            value = output.get(key)
+            if isinstance(value, str) and value.startswith("https://"):
+                return value
+            if isinstance(value, dict):
+                nested = hotapi_output_video_url(value)
+                if nested:
+                    return nested
+        for value in output.values():
+            nested = hotapi_output_video_url(value)
+            if nested:
+                return nested
+    elif isinstance(output, list):
+        for value in output:
+            nested = hotapi_output_video_url(value)
+            if nested:
+                return nested
+    return ""
+
+
+def download_hotapi_video(url: str, media_id: str) -> tuple[Path, int]:
+    safe_hotapi_url(url)
+    VIDEO_WORLD_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    target = VIDEO_WORLD_MEDIA_DIR / f"{media_id}.mp4"
+    temporary = VIDEO_WORLD_MEDIA_DIR / f"{media_id}.partial"
+    request = urllib.request.Request(url, headers={
+        "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.1",
+        "User-Agent": "Mozilla/5.0 HordeStudio/17.0",
+    })
+    total = 0
+    try:
+        with urllib.request.urlopen(request, timeout=240) as response, temporary.open("wb") as output:
+            safe_hotapi_url(response.geturl())
+            content_type = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if content_type and not content_type.startswith("video/") and content_type != "application/octet-stream":
+                raise RuntimeError(f"HotAPI returned a non-video asset ({content_type}).")
+            declared = int(response.headers.get("Content-Length") or 0)
+            if declared > MAX_VIDEO_BYTES:
+                raise RuntimeError("Generated video exceeds Horde Studio's 160 MB safety limit.")
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_VIDEO_BYTES:
+                    raise RuntimeError("Generated video exceeds Horde Studio's 160 MB safety limit.")
+                output.write(chunk)
+        if total < 1024:
+            raise RuntimeError("HotAPI returned an empty or incomplete video.")
+        temporary.replace(target)
+        return target, total
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _hotapi_video_request(model: str, prompt: str, image_url: str, duration: int,
+                          resolution: str, aspect_ratio: str, seed: int,
+                          uploaded_image_url: str = "") -> tuple[str, dict[str, Any], int, str]:
+    if model == "minimax-h3-spicy":
+        compact_prompt = prompt if len(prompt) <= 2000 else prompt[:1400] + "\n\n" + prompt[-580:]
+        actual_resolution = "768p" if resolution in {"768P", "1080P"} else "480p"
+        payload: dict[str, Any] = {
+            "prompt": compact_prompt, "duration_seconds": max(5, min(15, duration)),
+            "resolution": actual_resolution,
+            "ratio": aspect_ratio if aspect_ratio in {"16:9", "9:16", "1:1"} else "16:9",
+            "seed": seed,
+        }
+        if image_url:
+            payload["image_url"] = image_url
+        return f"https://api.hotapi.ai/v1/{model}", payload, payload["duration_seconds"], actual_resolution
+
+    if model in {"seedance-2.0-fast-spicy", "seedance-2.0-spicy", "seedance-2.5-spicy"}:
+        maximum = 30 if model == "seedance-2.5-spicy" else 15
+        actual_duration = max(4, min(maximum, duration))
+        actual_resolution = "720p" if resolution in {"768P", "1080P"} else "480p"
+        mode = "image-to-video" if image_url else "text-to-video"
+        payload = {
+            "prompt": prompt[:12000], "duration_seconds": actual_duration,
+            "resolution": actual_resolution, "generate_audio": True, "seed": seed,
+        }
+        if image_url:
+            payload["image_url"] = uploaded_image_url
+        elif model == "seedance-2.5-spicy":
+            payload["ratio"] = aspect_ratio
+        return f"https://api.hotapi.ai/v1/{model}/{mode}", payload, actual_duration, actual_resolution
+    raise ValueError("That HotAPI spicy renderer is not supported by this Horde Studio build.")
+
+
+def generate_hotapi_video(body: dict[str, Any], on_model: Any = None, on_task: Any = None,
+                          is_cancelled: Any = None) -> dict[str, Any]:
+    key = hotapi_key(body.get("apiKey"))
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("A spicy shot prompt is required.")
+    duration = max(5, min(15, int(body.get("duration") or 5)))
+    resolution = str(body.get("resolution") or "480P").upper()
+    if resolution not in {"480P", "768P", "1080P"}:
+        raise ValueError("Video resolution must be 480P, 768P or 1080P.")
+    aspect_ratio = str(body.get("aspectRatio") or "16:9")
+    if aspect_ratio not in {"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"}:
+        raise ValueError("Unsupported Video Adventure aspect ratio.")
+    seed = int(body.get("seed") or secrets.randbelow(2_000_000_000))
+    image_data_url = str(body.get("imageDataUrl") or "").strip()
+    if image_data_url and (len(image_data_url) > 12 * 1024 * 1024 or not re.match(
+            r"^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$", image_data_url, re.I)):
+        raise ValueError("The HotAPI continuity frame is invalid or exceeds 12 MB.")
+    models: list[str] = []
+    requested = body.get("models") if isinstance(body.get("models"), list) else []
+    for raw in requested[:4] or ["minimax-h3-spicy"]:
+        model = str(raw or "").strip()
+        if model in HOTAPI_VIDEO_RENDERERS and model not in models:
+            models.append(model)
+    if not models:
+        raise ValueError("Choose at least one supported HotAPI spicy renderer.")
+    uploaded_image_url = ""
+    attempts: list[dict[str, str]] = []
+    last_error: Any = None
+    for model in models:
+        if callable(is_cancelled) and is_cancelled():
+            raise RuntimeError("HotAPI generation was cancelled.")
+        if callable(on_model):
+            on_model(model)
+        try:
+            if image_data_url and model != "minimax-h3-spicy" and not uploaded_image_url:
+                uploaded_image_url = hotapi_upload_image(image_data_url, key)
+            endpoint, payload, actual_duration, actual_resolution = _hotapi_video_request(
+                model, prompt, image_data_url, duration, resolution, aspect_ratio, seed, uploaded_image_url)
+            task = hotapi_json_request(endpoint, key, method="POST", payload=payload, timeout=90)
+            task_id = str(task.get("id") or "")
+            if not task_id:
+                raise RuntimeError("HotAPI did not return a task ID.")
+            if callable(on_task):
+                on_task(task_id)
+            deadline = time.monotonic() + 15 * 60
+            while time.monotonic() < deadline:
+                if callable(is_cancelled) and is_cancelled():
+                    try:
+                        hotapi_json_request(f"https://api.hotapi.ai/v1/tasks/{urllib.parse.quote(task_id)}", key,
+                                            method="DELETE", timeout=30)
+                    except Exception:
+                        pass
+                    raise RuntimeError("HotAPI generation was cancelled.")
+                task = hotapi_json_request(f"https://api.hotapi.ai/v1/tasks/{urllib.parse.quote(task_id)}",
+                                           key, timeout=45)
+                status = str(task.get("status") or "").lower()
+                if status == "succeeded":
+                    break
+                if status in {"failed", "cancelled"}:
+                    error = task.get("error") if isinstance(task.get("error"), dict) else {}
+                    raise RuntimeError(str(error.get("message") or error.get("code") or f"task {status}"))
+                time.sleep(1.2)
+            else:
+                raise RuntimeError("HotAPI video generation timed out after fifteen minutes.")
+            video_url = hotapi_output_video_url(task.get("output"))
+            if not video_url:
+                raise RuntimeError("HotAPI completed the request without a video URL.")
+            media_id = secrets.token_hex(16)
+            _, size = download_hotapi_video(video_url, media_id)
+            attempts.append({"model": model, "status": "completed"})
+            credits = int(task.get("actual_credits_cost") or task.get("estimated_credits_cost") or 0)
+            return {
+                "ok": True, "provider": "hotapi", "model": model, "requestId": task_id,
+                "mediaId": media_id, "mediaUrl": f"/video-world-media/{media_id}.mp4",
+                "bytes": size, "duration": actual_duration, "resolution": actual_resolution,
+                "seed": seed, "attempts": attempts, "actualCost": credits / 1000,
+                "inferenceSeconds": max(0, int(task.get("completed_at") or 0) - int(task.get("started_at") or 0)),
+            }
+        except Exception as error:
+            last_error = error
+            attempts.append({"model": model, "status": "failed", "error": str(error)[:300]})
+    raise RuntimeError("All configured HotAPI spicy renderers failed. " + " | ".join(
+        f"{attempt['model']}: {attempt.get('error', 'failed')}" for attempt in attempts)) from last_error
+
+
+def _hotapi_video_job_public(job: dict[str, Any]) -> dict[str, Any]:
+    return {key: job.get(key) for key in ("jobId", "status", "createdAt", "updatedAt", "result", "error",
+                                           "currentModel", "remoteTaskId")}
+
+
+def submit_hotapi_video_job(body: dict[str, Any]) -> dict[str, Any]:
+    key = hotapi_key(body.get("apiKey"))
+    job_id = secrets.token_hex(16)
+    now = int(time.time() * 1000)
+    job = {"jobId": job_id, "status": "queued", "createdAt": now, "updatedAt": now,
+           "result": None, "error": "", "currentModel": "", "remoteTaskId": "", "_apiKey": key}
+    with HOTAPI_VIDEO_JOBS_LOCK:
+        cutoff = now - (24 * 60 * 60 * 1000)
+        for stale_id in [key_id for key_id, value in HOTAPI_VIDEO_JOBS.items()
+                         if int(value.get("updatedAt") or 0) < cutoff]:
+            HOTAPI_VIDEO_JOBS.pop(stale_id, None)
+        HOTAPI_VIDEO_JOBS[job_id] = job
+
+    def cancelled() -> bool:
+        with HOTAPI_VIDEO_JOBS_LOCK:
+            return job["status"] == "cancelled"
+
+    def run() -> None:
+        with HOTAPI_VIDEO_JOBS_LOCK:
+            if job["status"] == "cancelled":
+                return
+            job.update(status="running", updatedAt=int(time.time() * 1000))
+        try:
+            result = generate_hotapi_video(
+                body,
+                on_model=lambda model: _update_hotapi_job(job, currentModel=model),
+                on_task=lambda task_id: _update_hotapi_job(job, remoteTaskId=task_id),
+                is_cancelled=cancelled,
+            )
+            with HOTAPI_VIDEO_JOBS_LOCK:
+                if job["status"] == "cancelled":
+                    media_id = str(result.get("mediaId") or "")
+                    if re.fullmatch(r"[a-f0-9]{32}", media_id):
+                        (VIDEO_WORLD_MEDIA_DIR / f"{media_id}.mp4").unlink(missing_ok=True)
+                    return
+                job.update(status="completed", result=result, updatedAt=int(time.time() * 1000))
+        except Exception as error:
+            with HOTAPI_VIDEO_JOBS_LOCK:
+                if job["status"] != "cancelled":
+                    job.update(status="failed", error=str(error), updatedAt=int(time.time() * 1000))
+
+    threading.Thread(target=run, name=f"hotapi-video-{job_id[:8]}", daemon=True).start()
+    return _hotapi_video_job_public(job)
+
+
+def _update_hotapi_job(job: dict[str, Any], **values: Any) -> None:
+    with HOTAPI_VIDEO_JOBS_LOCK:
+        job.update(**values, updatedAt=int(time.time() * 1000))
+
+
+def get_hotapi_video_job(job_id: str) -> dict[str, Any]:
+    with HOTAPI_VIDEO_JOBS_LOCK:
+        job = HOTAPI_VIDEO_JOBS.get(job_id)
+        if not job:
+            raise KeyError("Spicy video job was not found. The local bridge may have restarted.")
+        return _hotapi_video_job_public(job)
+
+
+def cancel_hotapi_video_job(job_id: str) -> dict[str, Any]:
+    remote_task_id = ""
+    key = ""
+    with HOTAPI_VIDEO_JOBS_LOCK:
+        job = HOTAPI_VIDEO_JOBS.get(job_id)
+        if not job:
+            raise KeyError("Spicy video job was not found.")
+        if job["status"] in {"queued", "running"}:
+            remote_task_id = str(job.get("remoteTaskId") or "")
+            key = str(job.get("_apiKey") or "")
+            job.update(status="cancelled", updatedAt=int(time.time() * 1000),
+                       error="Cancelled locally. HotAPI refunds only if upstream work has not started.")
+        result = _hotapi_video_job_public(job)
+    if remote_task_id and key:
+        try:
+            hotapi_json_request(f"https://api.hotapi.ai/v1/tasks/{urllib.parse.quote(remote_task_id)}",
+                                key, method="DELETE", timeout=30)
+        except Exception:
+            pass
+    return result
+
+
+def test_hotapi_connection(body: dict[str, Any]) -> dict[str, Any]:
+    key = hotapi_key(body.get("apiKey"))
+    data = hotapi_json_request("https://api.hotapi.ai/v1/models?limit=100", key, timeout=25)
+    models = data.get("data") if isinstance(data.get("data"), list) else data.get("models")
+    return {"ok": True, "provider": "hotapi", "modelsVisible": len(models) if isinstance(models, list) else 0}
 
 
 def loopback_base_url(value: Any, default_port: int) -> str:
@@ -2427,6 +2834,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if not self.client_is_loopback():
                     return self.respond(403, {"error": "Video Adventure generation is loopback-only."})
                 return self.respond(200, get_fal_video_job(job_match.group(1)))
+            hotapi_job_match = re.fullmatch(r"/hotapi/video/jobs/([a-f0-9]{32})", parsed.path)
+            if hotapi_job_match:
+                if not self.client_is_loopback():
+                    return self.respond(403, {"error": "Spicy Video Adventure generation is loopback-only."})
+                return self.respond(200, get_hotapi_video_job(hotapi_job_match.group(1)))
             if parsed.path == "/providers":
                 return self.respond(200, {"providers": [provider_status(key) for key in PROVIDERS]})
             if parsed.path == "/oauth/callback":
@@ -2548,6 +2960,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if not self.client_is_loopback():
                     return self.respond(403, {"error": "Video Adventure media deletion is loopback-only."})
                 return self.respond(200, delete_fal_videos(self.read_json()))
+            if parsed_path == "/hotapi/video/jobs":
+                if not self.client_is_loopback():
+                    return self.respond(403, {"error": "Spicy Video Adventure generation is loopback-only."})
+                return self.respond(202, submit_hotapi_video_job(self.read_json()))
+            hotapi_cancel_match = re.fullmatch(r"/hotapi/video/jobs/([a-f0-9]{32})/cancel", parsed_path)
+            if hotapi_cancel_match:
+                if not self.client_is_loopback():
+                    return self.respond(403, {"error": "Spicy Video Adventure generation is loopback-only."})
+                return self.respond(200, cancel_hotapi_video_job(hotapi_cancel_match.group(1)))
+            if parsed_path == "/hotapi/video/test":
+                if not self.client_is_loopback():
+                    return self.respond(403, {"error": "HotAPI connection testing is loopback-only."})
+                return self.respond(200, test_hotapi_connection(self.read_json()))
             if parsed_path == "/media/fetch":
                 body = self.read_json()
                 return self.respond(200, {"image": download_image(safe_remote_image_url(body.get("url")))})

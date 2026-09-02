@@ -51,6 +51,12 @@ class MultiplayerIsolationUiAudit(unittest.TestCase):
         self.assertIn("parseMultiplayerReceipt", self.app)
         self.assertIn("must never contain JSON or tool syntax", self.app)
 
+    def test_commit_is_isolated_from_background_polling(self) -> None:
+        self.assertIn("committing: false", self.multiplayer)
+        self.assertIn("party.busy || party.committing", self.multiplayer)
+        self.assertIn("Engine.migrateCampaign(Engine.clone(campaignForRender(current)))", self.multiplayer)
+        self.assertIn("party.campaign = campaign", self.multiplayer)
+
 
 if __name__ == "__main__":
     unittest.main()

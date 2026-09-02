@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=20260902-fal-media-alpha8">
+    <link rel="stylesheet" href="style.css?v=20260902-v171">
 </head>
 <body>
 <div id="app">
@@ -202,13 +202,13 @@
                     <div class="landing-hero-copy">
                         <span class="vh-eyebrow">Playable generated film</span>
                         <h1 class="page-title">Video Adventures</h1>
-                        <p class="page-subtitle">Create a cinematic setting, take an action, and let each generated shot become the starting frame for the next.</p>
+                        <p class="page-subtitle">Create a cinematic story, preplan its decision tree as text, then film only the path you choose.</p>
                     </div>
                     <div class="header-actions landing-actions">
                         <button id="create-video-world-btn" class="btn btn-primary">+ Create Video Adventure</button>
                     </div>
                 </header>
-                <div class="video-world-alpha-note"><strong>First draft</strong><span>Video Adventures have their own library and timelines. They do not read or modify regular World saves.</span></div>
+                <div class="video-world-alpha-note"><strong>Story-first play</strong><span>The Director preplans coherent choices as inexpensive text. The opening and each selected branch are rendered on demand; unused branches cost nothing. Video Adventures remain separate from regular World saves.</span></div>
                 <div id="video-world-grid" class="char-grid"></div>
             </div>
         </section>
@@ -258,19 +258,38 @@
                         <button id="video-world-test-director" class="btn btn-ghost" type="button">Test Director</button>
                         <div id="video-world-director-status" class="video-world-director-status" aria-live="polite">Not tested.</div>
                         <button id="video-world-open-ai-settings" class="btn btn-ghost btn-small" type="button">Configure text provider</button>
+                        <span class="vh-eyebrow video-world-section-label">STORY BLOCK</span>
+                        <label class="form-field"><span>Preplanned story size</span><select id="video-world-story-depth" class="form-select"><option value="1">Short · 4 planned beats</option><option value="2">Standard · 13 planned beats</option></select></label>
+                        <p class="video-world-helper">The Director writes this complete decision tree as inexpensive text before play. Horde renders only the opening and each branch you actually choose—unused branches never become paid videos.</p>
+                        <div id="video-world-block-cost-preview" class="video-world-cost-preview"></div>
                         <span class="vh-eyebrow video-world-section-label">PRODUCTION</span>
-                        <label class="form-field"><span>Primary video renderer</span><select id="video-world-renderer-primary" class="form-select"><option value="minimax/h3-max">MiniMax H3 Max · dialogue · fast</option><option value="alibaba/wan-3.0">Wan 3.0 · audio · resilient</option><option value="fal-ai/ltx-2.3/fast">LTX-2.3 Fast · native audio</option><option value="alibaba/wan-3.0-prime">Wan 3.0 Prime · higher fidelity</option></select></label>
-                        <label class="form-field"><span>Fallback renderer</span><select id="video-world-renderer-fallback" class="form-select"><option value="alibaba/wan-3.0">Wan 3.0 · recommended after H3</option><option value="fal-ai/ltx-2.3/fast">LTX-2.3 Fast</option><option value="alibaba/wan-3.0-prime">Wan 3.0 Prime</option><option value="minimax/h3-max">MiniMax H3 Max</option><option value="">No automatic fallback</option></select></label>
-                        <label class="form-field"><span>Second fallback <small>optional</small></span><select id="video-world-renderer-fallback-2" class="form-select"><option value="">None</option><option value="fal-ai/ltx-2.3/fast">LTX-2.3 Fast</option><option value="alibaba/wan-3.0">Wan 3.0</option><option value="alibaba/wan-3.0-prime">Wan 3.0 Prime</option><option value="minimax/h3-max">MiniMax H3 Max</option></select></label>
-                        <p class="video-world-helper">The fallback retries the same Director beat and continuity frame when the primary renderer rejects or fails. Fal may bill upstream work accepted before a fallback begins.</p>
+                        <label class="form-field"><span>Character reference handling</span><select id="video-world-reference-strategy" class="form-select"><option value="auto">Smart auto · recommended</option><option value="direct">Direct H3 / Wan references · fastest</option><option value="keyframe">Build identity anchor frame · most compatible</option></select></label>
+                        <p class="video-world-helper">Smart auto uses native multi-reference video for H3 or Wan, and creates one composed anchor image only when the selected route needs it. Anchor images are made for openings or new cast entrances—not every shot—and currently add about $0.08.</p>
+                        <label class="form-field"><span>Content route</span><select id="video-world-content-route" class="form-select"><option value="standard">Standard · Fal only</option><option value="standard_then_spicy">Smart spicy fallback · Fal, then HotAPI</option><option value="spicy_first">Spicy from the start · HotAPI only</option></select></label>
+                        <div id="video-world-content-route-note" class="video-world-helper video-world-route-note"></div>
+                        <div id="video-world-standard-renderers" class="video-world-renderer-group">
+                            <strong>Standard path · Fal</strong>
+                            <label class="form-field"><span>Primary renderer</span><select id="video-world-renderer-primary" class="form-select"><option value="minimax/h3-max">MiniMax H3 Max · dialogue · fast</option><option value="alibaba/wan-3.0">Wan 3.0 · audio · resilient</option><option value="fal-ai/ltx-2.3/fast">LTX-2.3 Fast · native audio</option><option value="alibaba/wan-3.0-prime">Wan 3.0 Prime · higher fidelity</option></select></label>
+                            <label class="form-field"><span>Fallback renderer</span><select id="video-world-renderer-fallback" class="form-select"><option value="alibaba/wan-3.0">Wan 3.0 · recommended after H3</option><option value="fal-ai/ltx-2.3/fast">LTX-2.3 Fast</option><option value="alibaba/wan-3.0-prime">Wan 3.0 Prime</option><option value="minimax/h3-max">MiniMax H3 Max</option><option value="">No automatic fallback</option></select></label>
+                            <label class="form-field"><span>Second fallback <small>optional</small></span><select id="video-world-renderer-fallback-2" class="form-select"><option value="">None</option><option value="fal-ai/ltx-2.3/fast">LTX-2.3 Fast</option><option value="alibaba/wan-3.0">Wan 3.0</option><option value="alibaba/wan-3.0-prime">Wan 3.0 Prime</option><option value="minimax/h3-max">MiniMax H3 Max</option></select></label>
+                        </div>
+                        <div id="video-world-spicy-renderers" class="video-world-renderer-group hidden">
+                            <strong>Spicy path · HotAPI</strong>
+                            <label class="form-field"><span>Primary spicy renderer</span><select id="video-world-spicy-primary" class="form-select"><option value="minimax-h3-spicy">MiniMax H3 Spicy · best value · $0.08/s</option><option value="seedance-2.0-fast-spicy">Seedance 2.0 Fast Spicy · slower · $0.112/s</option><option value="seedance-2.0-spicy">Seedance 2.0 Spicy · premium · $0.14/s</option><option value="seedance-2.5-spicy">Seedance 2.5 Spicy · slowest/premium · $0.206/s</option></select></label>
+                            <label class="form-field"><span>Spicy fallback</span><select id="video-world-spicy-fallback" class="form-select"><option value="seedance-2.0-fast-spicy">Seedance 2.0 Fast Spicy · $0.112/s</option><option value="minimax-h3-spicy">MiniMax H3 Spicy · $0.08/s</option><option value="seedance-2.0-spicy">Seedance 2.0 Spicy · $0.14/s</option><option value="seedance-2.5-spicy">Seedance 2.5 Spicy · $0.206/s</option><option value="">None</option></select></label>
+                            <label class="form-field"><span>Second spicy fallback</span><select id="video-world-spicy-fallback-2" class="form-select"><option value="">None</option><option value="minimax-h3-spicy">MiniMax H3 Spicy · $0.08/s</option><option value="seedance-2.0-fast-spicy">Seedance 2.0 Fast Spicy · $0.112/s</option><option value="seedance-2.0-spicy">Seedance 2.0 Spicy · $0.14/s</option><option value="seedance-2.5-spicy">Seedance 2.5 Spicy · $0.206/s</option></select></label>
+                            <p class="video-world-helper">HotAPI adds no platform refusal layer, but upstream behavior can still vary. Seedance 2.0 and 2.5 generate synchronized audio and preserve continuity; they cost more and commonly take longer. Spicy routes are for stories involving consenting adults.</p>
+                        </div>
                         <label class="form-field"><span>Resolution</span><select id="video-world-resolution" class="form-select"><option value="480P">480p · economical</option><option value="768P">768p / 720p · higher fidelity</option></select></label>
                         <label class="form-field"><span>Shot duration</span><select id="video-world-duration" class="form-select"><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="15">15 seconds</option></select></label>
                         <label class="form-field"><span>Aspect ratio</span><select id="video-world-aspect" class="form-select"><option value="16:9">16:9 · cinematic</option><option value="21:9">21:9 · ultrawide</option><option value="4:3">4:3 · classic</option><option value="1:1">1:1 · square</option><option value="9:16">9:16 · vertical</option></select></label>
-                        <label class="vh-test-check video-world-safety-toggle"><input id="video-world-safety-checker" type="checkbox" checked><span>Fal safety checker</span></label>
-                        <p class="video-world-helper">On by default. Both this adventure switch and the global Fal switch must be on to request optional checking. When either is off, Horde sends <code>enable_safety_checker: false</code> to supported endpoints. LTX Fast does not expose this option, and mandatory provider or model-level filters can still reject a request.</p>
+                        <div id="video-world-fal-safety-controls" class="video-world-fal-safety-controls">
+                            <label class="vh-test-check video-world-safety-toggle"><input id="video-world-safety-checker" type="checkbox" checked><span>Fal safety checker</span></label>
+                            <p class="video-world-helper">Applies only to the standard Fal path. When either this or the global switch is off, Horde sends <code>enable_safety_checker: false</code> where supported. Mandatory provider/model checks can still reject a request.</p>
+                        </div>
                         <label class="form-field"><span>Session spending limit</span><div class="video-world-money-input"><span>$</span><input id="video-world-budget" class="form-input" type="number" min="0.10" max="10000" step="0.25" value="5.00"></div></label>
                         <div id="video-world-cost-preview" class="video-world-cost-preview"></div>
-                        <div class="video-world-provider-note"><strong id="video-world-renderer-note">Renderers: Fal · H3 Max → Wan 3.0</strong><span>The Fal key stays in this browser session and is sent only to Horde's loopback bridge, which downloads completed clips locally.</span></div>
+                        <div class="video-world-provider-note"><strong id="video-world-renderer-note">Standard: Fal · H3 Max → Wan 3.0</strong><span>Fal and HotAPI keys stay in this browser session unless you opt into device storage. Horde sends them only through its loopback bridge and downloads completed clips locally.</span></div>
                     </aside>
                 </div>
             </div>
@@ -285,7 +304,7 @@
                 <div class="video-world-play-grid">
                     <main class="video-world-stage-panel">
                         <div id="video-world-stage" class="video-world-stage">
-                            <div id="video-world-stage-empty" class="video-world-stage-empty"><button id="video-world-stage-generate" type="button" aria-label="Film opening shot">▶</button><strong>Your opening shot is ready to film</strong><small>Select Film opening to generate picture and ambient sound.</small></div>
+                            <div id="video-world-stage-empty" class="video-world-stage-empty"><button id="video-world-stage-generate" type="button" aria-label="Plan story and film opening">▶</button><strong>Your adventure is ready to begin</strong><small>The Director will preplan the story tree, then Horde will film only the opening scene.</small></div>
                             <video id="video-world-player" class="hidden" controls playsinline preload="metadata"></video>
                             <video id="video-world-preloader" class="hidden" muted playsinline preload="auto" aria-hidden="true"></video>
                             <div id="video-world-generating" class="video-world-generating hidden"><span class="video-world-spinner"></span><strong id="video-world-generating-title">Filming shot…</strong><small id="video-world-generating-detail">Submitting to Fal</small><button id="video-world-cancel-generation" type="button">Cancel</button></div>
@@ -293,8 +312,8 @@
                         <div class="video-world-composer">
                             <label for="video-world-action" id="video-world-action-label">Opening shot</label>
                             <div id="video-world-choices" class="video-world-choices hidden" role="group" aria-label="Choose the next action"></div>
-                            <textarea id="video-world-action" class="form-textarea" rows="3" maxlength="3000" placeholder="Describe what you attempt or what should happen next..."></textarea>
-                            <div><span id="video-world-next-cost">Estimated shot: $0.00</span><button id="video-world-generate" class="btn btn-primary" type="button">Film opening</button></div>
+                            <textarea id="video-world-action" class="form-textarea" rows="3" maxlength="3000" placeholder="Describe the new direction for the next story block..."></textarea>
+                            <div><span id="video-world-next-cost">Estimated block: $0.00</span><button id="video-world-generate" class="btn btn-primary" type="button">Plan &amp; prepare</button></div>
                         </div>
                     </main>
                     <aside class="video-world-timeline-panel">
@@ -459,6 +478,24 @@
                     <div class="chat-routing-bar" id="chat-routing-bar" style="display:none; padding-bottom: 8px; gap: 8px; flex-wrap: wrap;">
                         <!-- Dynamic buttons injected here -->
                     </div>
+
+                    <div id="chat-attachment-tray" class="chat-attachment-tray hidden" aria-live="polite"></div>
+                    <div id="chat-capability-bar" class="chat-capability-bar hidden" aria-label="Chat capabilities">
+                        <button id="chat-attach-btn" class="chat-capability-btn hidden" type="button" aria-haspopup="menu" aria-expanded="false">＋ Attach</button>
+                        <div id="chat-attach-menu" class="chat-attach-menu hidden" role="menu">
+                            <button type="button" data-chat-attachment="image" role="menuitem">🖼️ Image</button>
+                            <button type="button" data-chat-attachment="pdf" role="menuitem">📄 PDF</button>
+                            <button type="button" data-chat-attachment="audio" role="menuitem">🎙️ Audio</button>
+                            <button type="button" data-chat-attachment="video" role="menuitem">🎬 Video</button>
+                        </div>
+                        <button id="chat-web-btn" class="chat-capability-btn hidden" type="button" aria-pressed="false">⌕ Web</button>
+                        <button id="chat-image-mode-btn" class="chat-capability-btn hidden" type="button" aria-pressed="false">✦ Create image</button>
+                        <span id="chat-capability-note" class="chat-capability-note"></span>
+                    </div>
+                    <input id="chat-image-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden>
+                    <input id="chat-pdf-input" type="file" accept="application/pdf" multiple hidden>
+                    <input id="chat-audio-input" type="file" accept="audio/mpeg,audio/mp4,audio/wav,audio/webm,audio/ogg" multiple hidden>
+                    <input id="chat-video-input" type="file" accept="video/mp4,video/mpeg,video/quicktime,video/webm" multiple hidden>
 
                     <div class="input-row">
                         <textarea id="user-input" class="msg-input" placeholder="Type your message..." rows="1"></textarea>
@@ -1751,6 +1788,42 @@
                                     <span class="model-info-params-label" style="font-size:0.75rem; color:var(--text-2); font-weight:500; display:block; margin-bottom:8px;">Supported Fine-Tuning Parameters:</span>
                                     <div class="model-info-params-list" id="model-info-params-list" style="display:flex; flex-wrap:wrap; gap:4px;"></div>
                                 </div>
+                            </div>
+
+                            <div class="form-section chat-creator-capabilities">
+                                <div class="chat-creator-capabilities-head">
+                                    <div>
+                                        <h3>Player capabilities</h3>
+                                        <p class="form-hint">Optional. Enable only the media and tools that belong in this character experience. Horde still checks the active provider and model before showing them to players.</p>
+                                    </div>
+                                    <span id="studio-chat-capability-status" class="mini-tag">Text only</span>
+                                </div>
+                                <div class="chat-creator-capability-grid">
+                                    <label class="vh-test-check"><input id="studio-chat-image-upload" type="checkbox"><span><strong>Image upload</strong><small>Let players show the character photos and images.</small></span></label>
+                                    <label class="vh-test-check"><input id="studio-chat-pdf-upload" type="checkbox"><span><strong>PDF upload</strong><small>Let players attach documents for the character to read.</small></span></label>
+                                    <label class="vh-test-check"><input id="studio-chat-audio-upload" type="checkbox"><span><strong>Audio upload</strong><small>Let compatible models hear a voice note or recording.</small></span></label>
+                                    <label class="vh-test-check"><input id="studio-chat-video-upload" type="checkbox"><span><strong>Video upload</strong><small>Let compatible models inspect a short video clip.</small></span></label>
+                                    <label class="vh-test-check"><input id="studio-chat-web-search" type="checkbox"><span><strong>Web search</strong><small>Allow optional live, cited search when the provider supports it.</small></span></label>
+                                    <label class="vh-test-check"><input id="studio-chat-image-generation" type="checkbox"><span><strong>Image generation</strong><small>Add an explicit Create image mode to the composer.</small></span></label>
+                                </div>
+                                <div id="studio-chat-image-generation-settings" class="chat-image-generation-settings hidden">
+                                    <div>
+                                        <label class="form-label" for="studio-chat-image-provider">Image provider</label>
+                                        <select id="studio-chat-image-provider" class="form-select">
+                                            <option value="inherit">Use text provider</option>
+                                            <option value="openrouter">OpenRouter</option>
+                                            <option value="gptproto">GPTProto</option>
+                                            <option value="nanogpt">NanoGPT</option>
+                                            <option value="fal">Fal</option>
+                                            <option value="local">Local / self-hosted</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="form-label" for="studio-chat-image-model">Image model</label>
+                                        <input id="studio-chat-image-model" class="form-input" type="text" placeholder="Blank uses the provider default">
+                                    </div>
+                                </div>
+                                <p id="studio-chat-capability-hint" class="form-hint">Fetch model data above to verify which uploads the selected model accepts.</p>
                             </div>
 
                             <!-- Reasoning Section -->
@@ -3631,6 +3704,15 @@
                 <p class="form-hint">Turning this off sends a model’s documented safety flag only where that endpoint supports one. Fal account authorization and mandatory provider/model checks still apply.</p>
                 <p class="form-hint">The rate fields estimate spending and enforce each Video Adventure's session limit; Fal remains the billing authority. Your key is sent only to Horde Studio's local bridge, never embedded in a Video Adventure or backup.</p>
             </details>
+            <details class="settings-provider-card settings-provider-card-wide" data-provider="hotapi">
+                <summary><span class="settings-provider-mark">HOT</span><span><strong>HotAPI</strong><small>Opt-in spicy video · Video Adventures</small></span><span class="settings-provider-state">Configure</span></summary>
+                <label class="form-label" for="global-hotapi-key">API key</label>
+                <input type="password" id="global-hotapi-key" class="form-input" placeholder="hk_live_..." autocomplete="off">
+                <button id="test-hotapi-conn-btn" class="btn btn-ghost" type="button">Test HotAPI connection</button>
+                <div id="hotapi-conn-result" class="form-hint" style="margin-top:8px;" aria-live="polite">Not tested yet.</div>
+                <p class="form-hint">Used only when a Video Adventure selects Smart spicy fallback or Spicy from the start. Horde sends the key through its local bridge, downloads finished clips locally, and never places it in an adventure or backup.</p>
+                <p class="form-hint">HotAPI is pay-as-you-go. MiniMax H3 Spicy starts at $0.08/second; Seedance 2.0 Fast at $0.112, Seedance 2.0 at $0.14, and Seedance 2.5 at $0.206 for 480p. Provider pricing remains authoritative.</p>
+            </details>
             <details id="nanogpt-key-block" class="settings-provider-card" data-provider="nanogpt">
                 <summary><span class="settings-provider-mark">NG</span><span><strong>NanoGPT</strong><small>Text · images · speech</small></span><span class="settings-provider-state">Configure</span></summary>
                 <label class="form-label">API key</label>
@@ -5002,12 +5084,12 @@
 <script src="labs-core.js?v=20260822-v161"></script>
 <script src="labs-tasks.js?v=20260822-v161"></script>
 <script src="labs-guide.js?v=20260822-v161"></script>
-<script src="help-system.js?v=20260902-fal-media-alpha8"></script>
+<script src="help-system.js?v=20260902-v171"></script>
 <script src="labs-ui.js?v=20260822-v161"></script>
 <script src="rpg-mechanics.js?v=20260823-v166-rpg-release"></script>
-<script src="multiplayer-engine.js?v=20260823-v166-rpg-release"></script>
-<script src="multiplayer.js?v=20260823-v166-rpg-release"></script>
-<script src="video-worlds.js?v=20260902-fal-media-alpha8"></script>
-    <script src="app.js?v=20260902-fal-media-alpha8"></script>
+<script src="multiplayer-engine.js?v=20260902-v171"></script>
+<script src="multiplayer.js?v=20260902-v171"></script>
+<script src="video-worlds.js?v=20260902-v171"></script>
+    <script src="app.js?v=20260902-v171"></script>
 </body>
 </html>

@@ -6,6 +6,7 @@
         mode: 'off', roomCode: '', inviteToken: '', inviteUrl: '', playerId: '',
         playerToken: '', state: null, pollTimer: null, busy: false, context: null,
         campaign: null, activePanel: 'scene', resumeCampaign: false,
+        committing: false,
         transport: 'lan', relayUrl: '', socket: null, socketReady: null,
         reconnectTimer: null, reconnectAttempt: 0, pending: new Map()
     };
@@ -381,7 +382,7 @@
     }
 
     async function poll() {
-        if (party.mode === 'off' || party.busy) return;
+        if (party.mode === 'off' || party.busy || party.committing) return;
         party.busy = true;
         try {
             party.state = await request('/multiplayer/state', auth());
@@ -645,6 +646,7 @@
         if (!actions.length) return;
         const button = byId('mp-session-commit');
         button.disabled = true;
+        party.committing = true;
         const type = current.experienceType || party.context?.type || 'world';
         button.textContent = type === 'chat' ? 'Chat is composing the shared reply…' : 'World is resolving the party turn…';
         const roster = (current.players || []).map(player => {
@@ -656,7 +658,11 @@
             ? `[MULTIPLAYER CHAT — ROUND ${current.round.number}. These are distinct participants. Never merge their identities, write one participant's action as another's, or ignore a message.\nPARTICIPANTS:\n${roster}]\n${actions.map(item => `${item.name}: ${item.text}`).join('\n')}`
             : `[WORLD PARTY — ROUND ${current.round.number}. Resolve every participant as a distinct party member. Never merge identities or silently discard an action. If actions conflict, narrate the conflict fairly. This release uses one shared canonical scene/location; do not teleport individual players elsewhere unless the whole party travels or the narration explicitly establishes a split.\nPARTICIPANTS:\n${roster}]\n${actions.map(item => `${item.name}: ${item.text}`).join('\n')}`;
         try {
-            const campaign = campaignForRender(current);
+            // Work on a detached transaction. Background room polling renders
+            // the last committed server snapshot; it must never overwrite the
+            // newly generated narration while TinyBrain/state validation runs.
+            // That race advanced the round but published a stale transcript.
+            const campaign = Engine.migrateCampaign(Engine.clone(campaignForRender(current)));
             campaign.gameState = current.snapshot?.gameState || campaign.gameState || Engine.createState(campaign.system, current.snapshot);
             campaign.players = (current.players || []).map(player => ({ ...player,
                 sheet: campaign.gameState.characters?.[player.id] || player.sheet || emptySheet(player.persona, player.name, campaign.system) }));
@@ -709,10 +715,20 @@
             }
             saveCampaign(campaign);
             await request('/multiplayer/commit', auth({ snapshot: campaign.snapshot }));
-            await poll();
+            // Publish the completed local transaction before rendering again,
+            // then fetch the canonical relay copy while normal polling remains
+            // paused. This makes a one-player test follow the same path as a
+            // full LAN/Internet party.
+            party.campaign = campaign;
+            party.state = await request('/multiplayer/state', auth());
+            campaign.snapshot = Engine.clone(party.state.snapshot || campaign.snapshot);
+            campaign.gameState = Engine.clone(campaign.snapshot.gameState || campaign.gameState);
+            campaign.lastRoomRevision = Number(party.state.revision || 0);
+            saveCampaign(campaign);
+            render();
             window.showToast?.(`Party ${type === 'chat' ? 'reply' : 'turn'} committed with one host model call.`, 'success');
         } catch (error) { window.showToast?.(error.message, 'error'); }
-        finally { button.disabled = false; button.textContent = 'Resolve round'; }
+        finally { party.committing = false; button.disabled = false; button.textContent = 'Resolve round'; }
     }
 
     async function propose(type, label) {
