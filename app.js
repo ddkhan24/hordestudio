@@ -676,6 +676,7 @@ function applyNanoGPTApiKeyForSession(value) {
     else sessionStorage.removeItem('horde_nanogpt_api_key');
     openRouterModels = [];
     modelCatalogSource = null;
+    openRouterPresetCache = null;
     return key;
 }
 
@@ -895,6 +896,10 @@ function videoOutputFromPayload(payload) {
 
 function companionTextProviderId(companion) {
     return normalizedProviderId(companion?.textProvider);
+}
+
+function companionTTSProviderId(companion) {
+    return normalizedProviderId(companion?.ttsProvider);
 }
 
 function companionImageProviderId(companion) {
@@ -1309,7 +1314,7 @@ function validateCompanionData(value, label = 'Virtual Human') {
     ['appearance', 'personality', 'backstory', 'occupation', 'socialWorld', 'textingStyle',
         'values', 'contradictions', 'vulnerabilities', 'relationshipStyle', 'habits',
         'routine', 'privateLife', 'relationshipContext', 'textProvider', 'model', 'imageSource', 'imageModel',
-        'mcpImageTool', 'ttsModel'].forEach(key =>
+        'mcpImageTool', 'ttsModel', 'ttsProvider'].forEach(key =>
             requireString(value[key], `${label} ${key}`, { optional: true, max: 100_000 }));
     if (value.mcpImageArguments !== undefined) {
         requirePlainObject(value.mcpImageArguments, `${label} MCP image arguments`);
@@ -3477,6 +3482,33 @@ let openRouterModels = [];
 
 let modelCatalogSource = null; // which base URL the cached catalog came from
 
+// OpenRouter presets (https://openrouter.ai/settings/presets) are addressable
+// as `@preset/<slug>` in the model field, so they ride along in the catalog
+// as ordinary models. Only the account's own presets are listed.
+let openRouterPresetCache = null;
+async function getOpenRouterPresetModels(force = false) {
+    if (!force && openRouterPresetCache) return openRouterPresetCache;
+    openRouterPresetCache = [];
+    if (!String(state.apiKey || '').trim()) return openRouterPresetCache;
+    try {
+        const response = await fetch('https://openrouter.ai/api/v1/presets', {
+            headers: { ...providerAuthHeaders('openrouter'), ...attributionHeaders() }
+        });
+        if (!response.ok) throw new Error(`Preset catalog request failed (${response.status})`);
+        const data = await response.json();
+        openRouterPresetCache = (Array.isArray(data?.data) ? data.data : [])
+            .filter(preset => isPlainObject(preset) && typeof preset.slug === 'string' && preset.slug)
+            .map(preset => ({
+                id: `@preset/${preset.slug}`,
+                name: `Preset · ${String(preset.name || preset.slug).slice(0, 120)}`,
+                description: String(preset.description || 'OpenRouter preset (model, routing and sampling stored on openrouter.ai).').slice(0, 2000),
+                architecture: { input_modalities: ['text'], output_modalities: ['text'] },
+                supported_parameters: [], pricing: {}, isPreset: true
+            }));
+    } catch (error) { console.warn('OpenRouter presets unavailable:', error); }
+    return openRouterPresetCache;
+}
+
 async function getOpenRouterModels() {
     if (openRouterModels.length > 0 && modelCatalogSource === apiBase()) return openRouterModels;
     openRouterModels = [];
@@ -3494,6 +3526,7 @@ async function getOpenRouterModels() {
             openRouterModels = catalog.filter(model => isPlainObject(model) && typeof model.id === 'string')
                 .map(model => ({ ...model, name: typeof model.name === 'string' ? model.name : model.id }));
         }
+        if (isOpenRouterProvider()) openRouterModels = [...await getOpenRouterPresetModels(), ...openRouterModels];
     } catch (e) {
         console.error(`Failed to fetch ${isLocalProvider() ? 'local' : cloudProviderName()} models:`, e);
     }
@@ -30842,7 +30875,7 @@ function wireCalibrationControls(world, calibration, container) {
         const refresh = container.querySelector('#structured-model-refresh');
         const fallbackLabel = world.model || state.globalSettings.defaultModel || 'unset';
         const populate = async (force) => {
-            if (force) { openRouterModels = []; modelCatalogSource = null; }
+            if (force) { openRouterModels = []; modelCatalogSource = null; openRouterPresetCache = null; }
             if (status) status.textContent = 'Checking which models can do this…';
             let ranked = [];
             try {
@@ -33668,6 +33701,7 @@ function normalizeCompanion(raw) {
         voiceGender: ['female', 'male', 'neutral'].includes(c.voiceGender) ? c.voiceGender : 'neutral',
         ttsVoiceURI: typeof c.ttsVoiceURI === 'string' ? c.ttsVoiceURI : '',
         ttsMode: ['openrouter', 'local', 'browser'].includes(c.ttsMode) ? c.ttsMode : 'browser',
+        ttsProvider: TEXT_PROVIDER_IDS.includes(c.ttsProvider) ? c.ttsProvider : 'provider',
         ttsModel: ttsModelMigrations[storedTtsModel] || storedTtsModel,
         ttsVoice: typeof c.ttsVoice === 'string' ? c.ttsVoice : 'alloy',
         ttsResponseFormat: ['auto', 'mp3', 'pcm', 'wav', 'ogg', 'opus', 'aac', 'flac'].includes(c.ttsResponseFormat)
@@ -38554,6 +38588,7 @@ async function getCompanionOutputModels(modality, force = false, providerId = st
         models = catalogEntries
             .filter(model => isPlainObject(model) && typeof model.id === 'string')
             .map(model => ({ ...model, name: typeof model.name === 'string' ? model.name : model.id }));
+        if (provider === 'openrouter' && modality === 'text') models = [...await getOpenRouterPresetModels(force), ...models];
         if (provider === 'gptproto' && modality === 'image') {
             const byId = new Map(models.map(model => [model.id, model]));
             GPTPROTO_IMAGE_MODELS.forEach(curated => {
@@ -39635,10 +39670,11 @@ const LOCAL_TTS_MODEL_FALLBACK = Object.freeze({
 });
 let localTTSModelCache = null;
 
-function companionTTSModelFallback(mode = '') {
+function companionTTSModelFallback(mode = '', provider = '') {
     if (mode === 'local') return LOCAL_TTS_MODEL_FALLBACK.id;
-    if (isGPTProtoProvider()) return GPTPROTO_TTS_MODEL_FALLBACK.id;
-    if (isNanoGPTProvider()) return NANOGPT_TTS_MODEL_FALLBACK.id;
+    provider = normalizedProviderId(provider);
+    if (provider === 'gptproto') return GPTPROTO_TTS_MODEL_FALLBACK.id;
+    if (provider === 'nanogpt') return NANOGPT_TTS_MODEL_FALLBACK.id;
     return COMPANION_TTS_MODEL_FALLBACK;
 }
 
@@ -39671,11 +39707,12 @@ function isTTSCapableModel(model) {
     return /(?:^|[/.-])tts(?:$|[/.-])|voxtral[^/]*tts|mai-voice/i.test(id);
 }
 
-function rankCompanionTTSModels(models) {
+function rankCompanionTTSModels(models, provider = '') {
     const list = (Array.isArray(models) ? models : []).filter(isTTSCapableModel);
     if (!list.length) {
-        const fallbacks = isGPTProtoProvider() ? [GPTPROTO_TTS_MODEL_FALLBACK]
-            : isNanoGPTProvider() ? [NANOGPT_TTS_MODEL_FALLBACK]
+        provider = normalizedProviderId(provider);
+        const fallbacks = provider === 'gptproto' ? [GPTPROTO_TTS_MODEL_FALLBACK]
+            : provider === 'nanogpt' ? [NANOGPT_TTS_MODEL_FALLBACK]
             : COMPANION_TTS_MODEL_FALLBACKS;
         fallbacks.forEach(fb =>
             list.push({ ...fb, architecture: fb.architecture || { output_modalities: ['speech'] } }));
@@ -39715,12 +39752,13 @@ function normalizeCompanionTTSProviderOptions(raw) {
     return out;
 }
 
-function companionTTSCapabilities(modelId, modelInfo = null, ttsMode = '') {
+function companionTTSCapabilities(modelId, modelInfo = null, ttsMode = '', provider = '') {
     const id = String(modelId || '').toLowerCase();
     const description = String(modelInfo?.description || '').toLowerCase();
     const supportedParameters = new Set(modelInfo?.supportedParameters || []);
-    const gptprotoSpeech = isGPTProtoProvider();
-    const nanoGPTSpeech = isNanoGPTProvider();
+    provider = normalizedProviderId(provider);
+    const gptprotoSpeech = ttsMode !== 'local' && provider === 'gptproto';
+    const nanoGPTSpeech = ttsMode !== 'local' && provider === 'nanogpt';
     const googlePCMOnly = id.startsWith('google/') && /tts|speech/.test(id);
     const localSpeech = ttsMode === 'local';
     const formats = localSpeech ? ['mp3', 'wav', 'pcm', 'ogg', 'opus', 'aac', 'flac']
@@ -39751,10 +39789,11 @@ function companionTTSCapabilities(modelId, modelInfo = null, ttsMode = '') {
     };
 }
 
-function fallbackTTSVoicesForModel(modelId) {
+function fallbackTTSVoicesForModel(modelId, provider = '') {
     const id = String(modelId || '').toLowerCase();
-    if (isNanoGPTProvider() && id === 'kokoro-82m') return ['af_bella'];
-    if (isNanoGPTProvider() && ['tts-1', 'tts-1-hd', 'gpt-4o-mini-tts'].includes(id)) {
+    const nanoGPT = normalizedProviderId(provider) === 'nanogpt';
+    if (nanoGPT && id === 'kokoro-82m') return ['af_bella'];
+    if (nanoGPT && ['tts-1', 'tts-1-hd', 'gpt-4o-mini-tts'].includes(id)) {
         return ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer'];
     }
     if (id.startsWith('x-ai/')) return ['eve', 'ara', 'rex', 'sal', 'leo'];
@@ -39777,10 +39816,10 @@ function fallbackTTSVoicesForModel(modelId) {
     return ['alloy'];
 }
 
-function normalizeTTSVoiceOptions(rawVoices, modelId) {
+function normalizeTTSVoiceOptions(rawVoices, modelId, provider = '') {
     const source = Array.isArray(rawVoices) && rawVoices.length
         ? rawVoices
-        : fallbackTTSVoicesForModel(modelId);
+        : fallbackTTSVoicesForModel(modelId, provider);
     const seen = new Set();
     return source.map(raw => {
         const value = typeof raw === 'string'
@@ -39799,7 +39838,7 @@ function populateCompanionTTSVoicePicker(companion, modelId, resetVoice = false)
     const status = document.getElementById('cs-tts-voice-status');
     if (!select) return;
     const model = companionTTSModelCatalog.find(item => item.id === modelId);
-    const voices = normalizeTTSVoiceOptions(model?.supportedVoices, modelId);
+    const voices = normalizeTTSVoiceOptions(model?.supportedVoices, modelId, companionTTSProviderId(companion));
     const current = resetVoice ? '' : String(companion?.ttsVoice || '');
     const selected = voices.some(voice => voice.value === current) ? current : (voices[0]?.value || '');
     select.innerHTML = voices.map(voice =>
@@ -39812,7 +39851,7 @@ function populateCompanionTTSVoicePicker(companion, modelId, resetVoice = false)
         const voiceSummary = model?.supportedVoices?.length
             ? `${voices.length} voices advertised by ${modelName}.`
             : `${modelName} does not advertise a voice catalog; using the portable default. You can enter a provider voice ID below.`;
-        const capabilities = companionTTSCapabilities(modelId, model, companion?.ttsMode);
+        const capabilities = companionTTSCapabilities(modelId, model, companion?.ttsMode, companionTTSProviderId(companion));
         const format = companion.ttsResponseFormat === 'auto'
             ? capabilities.preferredFormat : companion.ttsResponseFormat;
         status.textContent = `${voiceSummary} Preferred audio: ${format === 'pcm' ? `PCM ${capabilities.sampleRate / 1000} kHz → WAV` : 'MP3'}.`;
@@ -39832,8 +39871,8 @@ function ttsResponseFormatForModel(modelId) {
 }
 
 function buildCompanionTTSRequest(companion, text, modelInfo = null, formatOverride = '') {
-    const model = companion.ttsModel || companionTTSModelFallback(companion.ttsMode);
-    const capabilities = companionTTSCapabilities(model, modelInfo, companion.ttsMode);
+    const model = companion.ttsModel || companionTTSModelFallback(companion.ttsMode, companionTTSProviderId(companion));
+    const capabilities = companionTTSCapabilities(model, modelInfo, companion.ttsMode, companionTTSProviderId(companion));
     const requested = formatOverride
         || (companion.ttsResponseFormat && companion.ttsResponseFormat !== 'auto'
             ? companion.ttsResponseFormat : capabilities.preferredFormat);
@@ -39877,7 +39916,7 @@ function renderCompanionTTSAudioControls(companion, modelId) {
     const providerOptions = document.getElementById('cs-tts-provider-options');
     if (!formatSelect || !speedInput || !speedWrap || !providerOptions) return;
     const model = companionTTSModelCatalog.find(item => item.id === modelId) || null;
-    const capabilities = companionTTSCapabilities(modelId, model, companion?.ttsMode);
+    const capabilities = companionTTSCapabilities(modelId, model, companion?.ttsMode, companionTTSProviderId(companion));
     const selectedFormat = capabilities.formats.includes(companion.ttsResponseFormat)
         ? companion.ttsResponseFormat : 'auto';
     formatSelect.innerHTML = [
@@ -40072,10 +40111,11 @@ function requiredTTSFormatFromError(message) {
  */
 async function generateOpenRouterSpeech(companion, text, options = {}) {
     const useLocalTTS = companion.ttsMode === 'local';
-    if (!useLocalTTS && !hasApiCredentials()) {
-        throw new Error(`${cloudProviderName()} API Key is missing. Please enter it in Settings.`);
+    const ttsProvider = companionTTSProviderId(companion);
+    if (!useLocalTTS && !providerHasCredentials(ttsProvider)) {
+        throw new Error(`${providerDisplayName(ttsProvider)} API Key is missing. Please enter it in Settings.`);
     }
-    const model = companion.ttsModel || companionTTSModelFallback(companion.ttsMode);
+    const model = companion.ttsModel || companionTTSModelFallback(companion.ttsMode, ttsProvider);
     const voice = String(companion.ttsVoice || '').trim();
     if (!voice) throw new Error('Choose a neural voice before generating a preview.');
     const modelInfo = companionTTSModelCatalog.find(item => item.id === model) || null;
@@ -40088,12 +40128,12 @@ async function generateOpenRouterSpeech(companion, text, options = {}) {
         if (attempted.has(responseFormat)) continue;
         attempted.add(responseFormat);
         const request = buildCompanionTTSRequest(companion, text, modelInfo, responseFormat);
-        const response = await fetch((useLocalTTS ? localTTSApiBase() : apiBase()) + '/audio/speech', {
+        const response = await fetch((useLocalTTS ? localTTSApiBase() : providerApiBase(ttsProvider)) + '/audio/speech', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                ...(useLocalTTS ? localTTSAuthHeaders() : authHeaders()),
-                ...(useLocalTTS ? {} : providerAttributionHeaders(state.globalSettings.apiProvider))
+                ...(useLocalTTS ? localTTSAuthHeaders() : providerAuthHeaders(ttsProvider)),
+                ...(useLocalTTS ? {} : providerAttributionHeaders(ttsProvider))
             },
             body: JSON.stringify(request.body)
         });
@@ -40106,7 +40146,7 @@ async function generateOpenRouterSpeech(companion, text, options = {}) {
                 lastError = new Error(message);
                 continue;
             }
-            throw new Error(humanizeApiError(new Error(message), useLocalTTS ? 'local' : state.globalSettings.apiProvider));
+            throw new Error(humanizeApiError(new Error(message), useLocalTTS ? 'local' : ttsProvider));
         }
         const contentType = String(response.headers.get('content-type') || '');
         const audioBytes = await response.arrayBuffer();
@@ -40186,6 +40226,7 @@ let companionActiveAudio = null;
 function speakCompanionLine(companion, text, onEnd) {
     // Read live UI settings directly when previewing in Virtual Human Studio
     const modeEl = document.getElementById('cs-tts-mode');
+    const providerEl = document.getElementById('cs-tts-provider');
     const modelEl = document.getElementById('cs-tts-model');
     const customModelEl = document.getElementById('cs-tts-model-custom');
     const voiceEl = document.getElementById('cs-tts-voice');
@@ -40193,9 +40234,10 @@ function speakCompanionLine(companion, text, onEnd) {
 
     const studioVisible = !!(modeEl && modeEl.offsetParent !== null);
     const effectiveMode = studioVisible ? modeEl.value : (companion?.ttsMode || 'browser');
+    const effectiveProvider = studioVisible && providerEl ? providerEl.value : (companion?.ttsProvider || 'provider');
     const effectiveModel = (studioVisible && customModelEl && customModelEl.value.trim())
         ? customModelEl.value.trim()
-        : ((studioVisible && modelEl?.value) ? modelEl.value : (companion?.ttsModel || companionTTSModelFallback(effectiveMode)));
+        : ((studioVisible && modelEl?.value) ? modelEl.value : (companion?.ttsModel || companionTTSModelFallback(effectiveMode, effectiveProvider)));
     const effectiveVoice = (studioVisible && customVoiceEl?.value.trim())
         ? customVoiceEl.value.trim()
         : ((studioVisible && voiceEl?.value) ? voiceEl.value : (companion?.ttsVoice || 'alloy'));
@@ -40203,17 +40245,18 @@ function speakCompanionLine(companion, text, onEnd) {
     const activeCompanion = {
         ...companion,
         ttsMode: effectiveMode,
+        ttsProvider: effectiveProvider,
         ttsModel: effectiveModel,
         ttsVoice: effectiveVoice
     };
 
     if (effectiveMode === 'openrouter' || effectiveMode === 'local') {
         const useLocalTTS = effectiveMode === 'local';
-        const speechProvider = useLocalTTS ? 'Local TTS' : cloudProviderName();
-        if (!useLocalTTS && !hasApiCredentials()) {
-            showToast(`API Key missing in Settings. ${cloudProviderName()} neural speech requires an API Key.`, 'error');
+        const speechProvider = useLocalTTS ? 'Local TTS' : providerDisplayName(effectiveProvider);
+        if (!useLocalTTS && !providerHasCredentials(effectiveProvider)) {
+            showToast(`API Key missing in Settings. ${speechProvider} neural speech requires an API Key.`, 'error');
             const status = document.getElementById('cs-voice-preview-status');
-            if (studioVisible && status) status.textContent = `${cloudProviderName()} API key missing. Add it in Settings.`;
+            if (studioVisible && status) status.textContent = `${speechProvider} API key missing. Add it in Settings.`;
             if (onEnd) onEnd();
             return null;
         }
@@ -40297,7 +40340,7 @@ async function playCompanionVoiceMessage(companion, message) {
         return;
     }
     try {
-        const speechProvider = companion.ttsMode === 'local' ? 'Local TTS' : cloudProviderName();
+        const speechProvider = companion.ttsMode === 'local' ? 'Local TTS' : providerDisplayName(companionTTSProviderId(companion));
         showToast(`Generating ${speechProvider} voice note once…`, 'info');
         const result = await generateOpenRouterSpeech(companion, message.text, { persist: true });
         if (result.persistentDataUrl) {
@@ -40313,7 +40356,7 @@ async function playCompanionVoiceMessage(companion, message) {
         };
         await audio.play();
     } catch (error) {
-        showToast(`${companion.ttsMode === 'local' ? 'Local TTS' : cloudProviderName()} Error: ${error.message}`, 'error');
+        showToast(`${companion.ttsMode === 'local' ? 'Local TTS' : providerDisplayName(companionTTSProviderId(companion))} Error: ${error.message}`, 'error');
     }
 }
 
@@ -42024,9 +42067,11 @@ function renderCompanionStudioForm() {
 
     const ttsModeEl = document.getElementById('cs-tts-mode');
     if (ttsModeEl) ttsModeEl.value = companion.ttsMode || 'browser';
+    const ttsProviderEl = document.getElementById('cs-tts-provider');
+    if (ttsProviderEl) ttsProviderEl.value = companion.ttsProvider || 'provider';
 
     const ttsModelEl = document.getElementById('cs-tts-model');
-    if (ttsModelEl) ttsModelEl.value = companion.ttsModel || companionTTSModelFallback(companion.ttsMode);
+    if (ttsModelEl) ttsModelEl.value = companion.ttsModel || companionTTSModelFallback(companion.ttsMode, companionTTSProviderId(companion));
 
     updateTTSControlsVisibility(companion.ttsMode || 'browser');
 
@@ -42096,6 +42141,8 @@ function updateTTSControlsVisibility(mode) {
     const ttsCol = document.getElementById('cs-openrouter-tts-col');
     const voiceCol = document.getElementById('cs-openrouter-voice-col');
     const genderCol = document.getElementById('cs-browser-gender-col');
+    const providerWrap = document.getElementById('cs-tts-provider-wrap');
+    if (providerWrap) providerWrap.style.display = mode === 'openrouter' ? 'block' : 'none';
     if (ttsCol) ttsCol.style.display = isNeural ? 'block' : 'none';
     if (voiceCol) voiceCol.style.display = isNeural ? 'block' : 'none';
     if (genderCol) genderCol.style.display = isNeural ? 'none' : 'block';
@@ -42931,22 +42978,24 @@ async function populateCompanionTTSModelPicker(companion, force) {
     const select = document.getElementById('cs-tts-model');
     if (!select) return;
     let ranked = [];
+    const ttsProvider = companionTTSProviderId(companion);
     try {
         ranked = rankCompanionTTSModels(companion.ttsMode === 'local'
             ? await getLocalTTSModels(force)
-            : await getCompanionOutputModels('audio', force));
+            : await getCompanionOutputModels('audio', force, ttsProvider), ttsProvider);
     }
     catch (error) { console.error('Could not read TTS models from catalog', error); }
     companionTTSModelCatalog = ranked;
-    let chosen = companion.ttsModel || companionTTSModelFallback(companion.ttsMode);
-    if ((companion.ttsMode === 'local' || isGPTProtoProvider() || isNanoGPTProvider()) && !ranked.some(model => model.id === chosen)) {
-        chosen = ranked[0]?.id || companionTTSModelFallback(companion.ttsMode);
+    const fallbackModel = companionTTSModelFallback(companion.ttsMode, ttsProvider);
+    let chosen = companion.ttsModel || fallbackModel;
+    if ((companion.ttsMode === 'local' || ['gptproto', 'nanogpt'].includes(ttsProvider)) && !ranked.some(model => model.id === chosen)) {
+        chosen = ranked[0]?.id || fallbackModel;
         companion.ttsModel = chosen;
-        companion.ttsVoice = fallbackTTSVoicesForModel(chosen)[0] || 'alloy';
+        companion.ttsVoice = fallbackTTSVoicesForModel(chosen, ttsProvider)[0] || 'alloy';
     }
     select.innerHTML = ranked.map(model =>
         `<option value="${escapeHTML(model.id)}" ${chosen === model.id ? 'selected' : ''}>${escapeHTML(model.name)}</option>`).join('')
-        || `<option value="${escapeHTML(companionTTSModelFallback(companion.ttsMode))}">${escapeHTML(companionTTSModelFallback(companion.ttsMode))} (default)</option>`;
+        || `<option value="${escapeHTML(fallbackModel)}">${escapeHTML(fallbackModel)} (default)</option>`;
     const custom = document.getElementById('cs-tts-model-custom');
     const isCatalogChoice = ranked.some(model => model.id === chosen);
     if (custom) custom.value = isCatalogChoice ? '' : (companion.ttsModel || '');
@@ -43609,7 +43658,7 @@ function setupCompanionsLogic() {
     };
     document.getElementById('cs-tts-model-custom').oninput = (e) => {
         const companion = getCompanion(state.editingCompanionId);
-        const selected = document.getElementById('cs-tts-model')?.value || companionTTSModelFallback(companion?.ttsMode);
+        const selected = document.getElementById('cs-tts-model')?.value || companionTTSModelFallback(companion?.ttsMode, companionTTSProviderId(companion));
         if (companion) {
             companion.ttsModel = e.target.value.trim() || selected;
             populateCompanionTTSVoicePicker(companion, companion.ttsModel, true);
@@ -43957,6 +44006,14 @@ function setupCompanionsLogic() {
                 populateCompanionTTSModelPicker(companion, true);
             }
         }
+    };
+    document.getElementById('cs-tts-provider').onchange = (e) => {
+        const companion = getCompanion(state.editingCompanionId);
+        if (!companion) return;
+        companion.ttsProvider = TEXT_PROVIDER_IDS.includes(e.target.value) ? e.target.value : 'provider';
+        companion.ttsModel = '';
+        companion.ttsVoice = '';
+        populateCompanionTTSModelPicker(companion, true);
     };
     document.getElementById('cs-tts-model').onchange = (e) => {
         const companion = getCompanion(state.editingCompanionId);

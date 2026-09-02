@@ -2970,7 +2970,7 @@
                     <div id="tab-cs-voice" class="studio-panel hidden">
                         <div class="panel-header">
                             <h2>Photos &amp; Voice</h2>
-                            <p>Which model generates their photos, and which voice engine (your selected cloud provider or Browser Speech) speaks their voice notes and calls.</p>
+                            <p>Which model generates their photos, and which voice engine (any connected cloud provider, a local TTS server, or Browser Speech) speaks their voice notes and calls.</p>
                         </div>
                         <div class="form-body">
                             <div class="form-section">
@@ -3116,6 +3116,19 @@
                                         </select>
                                     </div>
                                     <div class="form-col" id="cs-openrouter-tts-col" style="display:none;">
+                                        <div id="cs-tts-provider-wrap" style="display:none; margin-bottom:8px;">
+                                            <label class="form-label" for="cs-tts-provider">Voice provider</label>
+                                            <select id="cs-tts-provider" class="form-select">
+                                                <option value="provider">Same as conversation provider (Settings)</option>
+                                                <option value="openrouter">OpenRouter</option>
+                                                <option value="gptproto">GPTProto</option>
+                                                <option value="nanogpt">NanoGPT</option>
+                                                <option value="nvidia">NVIDIA NIM</option>
+                                                <option value="bedrock">AWS Bedrock</option>
+                                                <option value="custom">Custom API</option>
+                                                <option value="local">Local / self-hosted (text endpoint)</option>
+                                            </select>
+                                        </div>
                                         <div style="display:flex; justify-content:space-between; align-items:center;">
                                             <label class="form-label" style="margin:0;">Neural TTS Model</label>
                                             <button id="cs-refresh-tts-models" class="btn btn-ghost" style="font-size:0.68rem; padding:2px 7px;">↻ Refresh</button>
@@ -3171,7 +3184,7 @@
                                         <audio id="cs-voice-preview-player" class="hidden" controls preload="none" style="width:100%; margin-top:8px;"></audio>
                                     </div>
                                 </div>
-                                <p class="form-hint" style="margin-top:8px;">Neural speech uses the active cloud provider in Settings for voice notes and live phone calls.</p>
+                                <p class="form-hint" style="margin-top:8px;">Neural speech uses the voice provider chosen above (or the Settings default) for voice notes and live phone calls. Credentials come from Settings.</p>
                             </div>
                         </div>
                     </div>
