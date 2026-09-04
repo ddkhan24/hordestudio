@@ -7194,6 +7194,14 @@ input[type=number].form-input::-webkit-inner-spin-button {
     background: #26282f; color: #f1f1f4; border: 0;
     border-bottom-left-radius: 5px;
 }
+.companion-bubble-recovery {
+    display: grid; gap: 7px; max-width: 390px;
+    border: 1px solid rgba(255, 69, 88, .42) !important;
+    background: rgba(74, 24, 32, .72) !important;
+}
+.companion-bubble-recovery strong { color: #ffb0b9; font-size: .78rem; }
+.companion-bubble-recovery span { color: #d9c6ca; font-size: .72rem; line-height: 1.45; }
+.companion-bubble-recovery .tool-btn { justify-self: start; color: #fff; border-color: rgba(255,255,255,.2); }
 .companion-bubble-photo img {
     width: min(340px, 60vw); max-height: 460px; object-fit: cover;
     border-radius: 13px; display: block;

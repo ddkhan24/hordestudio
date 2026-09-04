@@ -7,8 +7,8 @@ const STORE_NAME = 'state';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
-const HORDE_STUDIO_VERSION = '17.1.0';
-const HORDE_STUDIO_RELEASED_AT = '2026-09-02T22:43:54+05:00';
+const HORDE_STUDIO_VERSION = '17.2.0';
+const HORDE_STUDIO_RELEASED_AT = '2026-09-04T14:05:54+05:00';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
 let worldMediaDirty = false;
@@ -34707,6 +34707,7 @@ function normalizeCompanionMessage(raw) {
         turnSnapshot: isPlainObject(m.turnSnapshot) ? safeJsonClone(m.turnSnapshot) : null,
         turnAudit: isPlainObject(m.turnAudit) ? safeJsonClone(m.turnAudit) : null,
         generationError: String(m.generationError || '').slice(0, 1000),
+        protocolLeak: m.protocolLeak === true,
         invalidated: m.invalidated === true,
         autonomous: m.autonomous === true,
         returnGapMs: Number.isFinite(m.returnGapMs)
@@ -37252,7 +37253,21 @@ function extractCompanionEmbeddedToolCalls(rawText) {
     visibleText += source.slice(cursor);
     const danglingProtocol = visibleText.search(/<\/?(?:uncensored[_-]?)?tool[_-]?call>|<\/?arg[_-]?(?:key|value)>/i);
     if (danglingProtocol >= 0) visibleText = visibleText.slice(0, danglingProtocol);
-    return { visibleText: visibleText.trim(), toolCalls: calls };
+    return { visibleText: quarantineCompanionProtocolText(visibleText), toolCalls: calls };
+}
+
+/**
+ * Private VH receipts contain distinctive engine keys. Keep the test narrow
+ * enough that ordinary discussion of "memory" or "relationships" is safe,
+ * while recognizing the XML dialect emitted by some llama.cpp/Hermes chat
+ * templates and incomplete/truncated receipts from any provider.
+ */
+function companionProtocolLeakDetected(rawText) {
+    const source = String(rawText || '');
+    if (!source) return false;
+    return /<\/?(?:uncensored[_-]?)?tool[_-]?call\b|<\/?arg[_-]?(?:key|value)\b|<\/?(?:invoke|function_call)\b|<\/?parameter\s+name\s*=|&lt;\/?(?:invoke|function_call|parameter)\b/i.test(source)
+        || /\b(?:commit_?human_?turn|commithumanturn|companion_?state)\s*\(/i.test(source)
+        || /\b(?:episode_updates|truth_updates|intention_updates|boundary_updates|player_model_updates|emotion_appraisal|valence_change|relationship_change|memory_write|life_state)\b\s*(?:=|:)/i.test(source);
 }
 
 /**
@@ -37271,6 +37286,14 @@ function quarantineCompanionProtocolText(rawText) {
             || objectPayload.memory_write || objectPayload.relationship_event)) {
         source = String(objectPayload.visible_reply || objectPayload.reply || objectPayload.message || '');
     }
+    // Some local chat templates serialize tool calls as
+    // <invoke><parameter name="…"> rather than OpenAI tool_calls. Complete
+    // envelopes can be removed without losing prose that follows them.
+    source = source
+        .replace(/<(?:invoke|function_call)\b[^>]*>[\s\S]*?<\/(?:invoke|function_call)>/gi, ' ')
+        .replace(/&lt;(?:invoke|function_call)\b[\s\S]*?&lt;\/(?:invoke|function_call)&gt;/gi, ' ');
+    const bareEnvelope = source.search(/<\/?(?:invoke|function_call)\b|&lt;\/?(?:invoke|function_call)\b/i);
+    if (bareEnvelope >= 0) source = source.slice(0, bareEnvelope);
     const marker = /\b(?:commit_?human_?turn|commithumanturn|companion_?state|send_?photo|send_?voice_?note|publish_?social_?post)\s*\(/ig;
     let match;
     let guard = 0;
@@ -37297,7 +37320,11 @@ function quarantineCompanionProtocolText(rawText) {
         source = `${source.slice(0, match.index)} ${end < 0 ? '' : source.slice(end)}`;
         marker.lastIndex = 0;
     }
-    const dangling = source.search(/\b(?:valence_?change|relationship_?change|memory_?write|life_?state|emotion_?appraisal)\s*=/i);
+    // A bare parameter means the provider omitted or truncated the enclosing
+    // invocation. Nothing from that marker onward is player-visible content.
+    const bareParameter = source.search(/<\/?parameter\s+name\s*=|&lt;\/?parameter\s+name\s*=/i);
+    if (bareParameter >= 0) source = source.slice(0, bareParameter);
+    const dangling = source.search(/\b(?:episode_?updates|truth_?updates|intention_?updates|boundary_?updates|player_?model_?updates|valence_?change|relationship_?change|memory_?write|life_?state|emotion_?appraisal)\s*(?:=|:)/i);
     if (dangling >= 0) source = source.slice(0, dangling);
     return source.replace(/\s{2,}/g, ' ').trim();
 }
@@ -38175,7 +38202,6 @@ function sanitizeCompanionTextReply(text, companionName = '') {
 
 function repairCompanionProtocolLeaks(messages, companionName = '') {
     const source = Array.isArray(messages) ? messages : [];
-    const protocolPattern = /uncensored[_-]?tool[_-]?call|<\/?tool[_-]?call|<\/?arg[_-]?(?:key|value)>|\b(?:commit_?human_?turn|commithumanturn|companion_?state)\s*\(|\b(?:valence_?change|relationship_?change|memory_?write|life_?state)\s*=/i;
     const groups = new Map();
     source.forEach((message, index) => {
         if (message?.role !== 'companion' || message.type !== 'text') return;
@@ -38186,20 +38212,31 @@ function repairCompanionProtocolLeaks(messages, companionName = '') {
     const replacements = new Map();
     groups.forEach(entries => {
         const combined = entries.map(entry => String(entry.message.text || '')).join('\n');
-        if (!protocolPattern.test(combined)) return;
+        if (!companionProtocolLeakDetected(combined)) return;
         const embedded = extractCompanionEmbeddedToolCalls(combined);
         const cleaned = sanitizeCompanionTextReply(quarantineCompanionProtocolText(embedded.visibleText), companionName);
         const bubbles = splitCompanionReplyIntoBubbles(cleaned);
         const base = entries[0].message;
-        replacements.set(entries[0].index, bubbles.map((text, bubbleIndex) => normalizeCompanionMessage({
+        const repaired = bubbles.map((text, bubbleIndex) => normalizeCompanionMessage({
             ...base,
             id: bubbleIndex ? livingId('vh_message', `${base.id}|protocol-repair|${bubbleIndex}`) : base.id,
             text,
+            generationError: '',
+            protocolLeak: false,
             timestamp: base.timestamp + bubbleIndex * 400,
             links: bubbleIndex ? [] : base.links,
             turnSnapshot: bubbleIndex ? null : base.turnSnapshot,
             turnAudit: bubbleIndex ? null : base.turnAudit
-        })));
+        }));
+        // Retain the pre-turn snapshot when the response was private protocol
+        // only. That makes the failed turn directly regenerable from the UI.
+        if (!repaired.length) repaired.push(normalizeCompanionMessage({
+            ...base,
+            text: '', links: [], pending: false,
+            generationError: 'Private model protocol was blocked before it reached the conversation.',
+            protocolLeak: true
+        }));
+        replacements.set(entries[0].index, repaired);
         entries.slice(1).forEach(entry => replacements.set(entry.index, []));
     });
     return source.flatMap((message, index) => replacements.has(index) ? replacements.get(index) : [message]);
@@ -38854,7 +38891,9 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
         throw new Error(humanizeApiError(new Error(errText || `Request failed (${response.status})`)));
     }
     const choice = (await response.json())?.choices?.[0] || {};
-    const embeddedTools = extractCompanionEmbeddedToolCalls(choice.message?.content);
+    const rawReplyContent = String(choice.message?.content || '');
+    const protocolLeakBlocked = companionProtocolLeakDetected(rawReplyContent);
+    const embeddedTools = extractCompanionEmbeddedToolCalls(rawReplyContent);
     let replyText = companionVisibleReplyLimit(sanitizeCompanionTextReply(
         quarantineCompanionProtocolText(embeddedTools.visibleText), companion.name), companion);
     let actions = extractCompanionToolCalls([
@@ -39033,6 +39072,7 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
     companion.memory.longTerm = companion.memory.longTerm.slice(-200);
     const turnAudit = {
         source: commitSource,
+        protocolLeakBlocked,
         photoDecision: actions.commit?.photo?.decision || (actions.photo ? 'send' : 'none'),
         photoReason: String(actions.commit?.photo?.reason || '').slice(0, 240),
         voiceDecision: actions.commit?.voice_note?.decision || (actions.voice ? 'send' : 'none'),
@@ -45552,6 +45592,13 @@ function companionLinksHTML(links) {
 
 function companionBubbleHTML(companion, message) {
     const links = companionLinksHTML(message.links);
+    if (message.protocolLeak) {
+        return `<div class="companion-bubble companion-bubble-recovery" role="alert">
+            <strong>Broken model output blocked</strong>
+            <span>${escapeHTML(message.generationError || 'A private engine receipt was kept out of the conversation.')}</span>
+            <button class="tool-btn" type="button" data-repair-companion-reply="${escapeHTML(message.id)}">Regenerate reply</button>
+        </div>`;
+    }
     if (message.type === 'photo') {
         return `<div class="companion-bubble companion-bubble-photo">
             ${message.pending ? `<div class="form-hint">📷 sending a photo…</div>`
@@ -46417,6 +46464,9 @@ function renderCompanionThread() {
             renderCompanionThread();
             resolveCompanionPendingPhoto(companion, message);
         };
+    });
+    container.querySelectorAll('[data-repair-companion-reply]').forEach(button => {
+        button.onclick = () => rerollCompanionReplyFromMessage(button.dataset.repairCompanionReply);
     });
     container.querySelectorAll('[data-companion-photo]').forEach(image => {
         image.onerror = async () => {
@@ -47619,6 +47669,21 @@ async function rerollLastCompanionReply() {
     } finally {
         setCompanionTyping(false);
     }
+}
+
+async function rerollCompanionReplyFromMessage(messageId) {
+    const companion = getCompanion(state.activeCompanionId);
+    const messages = companion && getCompanionThread(companion.id);
+    const target = messages?.find(message => message.id === messageId && message.protocolLeak);
+    if (!target) return showToast('That broken reply is no longer present.', 'info');
+    const latestReply = [...messages].reverse().find(message => message.role === 'companion' && !message.pending);
+    if (latestReply !== target) {
+        return showToast('Only the latest reply can be regenerated safely; later turns depend on older state.', 'info');
+    }
+    if (!target.turnSnapshot) {
+        return showToast('This older broken reply predates reversible Virtual Human turns. Start a new timeline or remove the conversation.', 'info');
+    }
+    await rerollLastCompanionReply();
 }
 
 async function queueCompanionUserMessage(payload) {

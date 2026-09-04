@@ -79,7 +79,7 @@ buildContext(vm, [
     'formatCompanionUtcOffset', 'companionLocalDateInfo',
     'buildCompanionSystemPrompt', 'buildCompanionMessages',
     'splitCompanionReplyIntoBubbles', 'sanitizeCompanionTextReply',
-    'quarantineCompanionProtocolText', 'companionVisibleReplyLimit',
+    'companionProtocolLeakDetected', 'quarantineCompanionProtocolText', 'companionVisibleReplyLimit',
     'repairCompanionProtocolLeaks', 'normalizeCompanionPhotoStyle',
     'normalizeCompanionPhotoCapturePolicy', 'companionPhotoCapturePlan',
     'applyCompanionGenerationConfig',
@@ -2362,6 +2362,35 @@ test('python-style private turn receipts are quarantined while visible prose sur
     assert.equal(cleaned, 'hey man im done with my chores');
     assert(!cleaned.includes('commithumanturn'));
     assert(!cleaned.includes('memorywrite'));
+});
+
+test('llama.cpp parameter-style private receipts are blocked from visible chat', () => {
+    const raw = `<invoke name="commit_human_turn"><parameter name="episode_updates"><parameter name="operation">remember</parameter></parameter><parameter name="truth_updates">private state</parameter></invoke>hey, sorry i got distracted`;
+    assert.equal(context.companionProtocolLeakDetected(raw), true);
+    assert.equal(context.quarantineCompanionProtocolText(raw), 'hey, sorry i got distracted');
+    assert.equal(context.extractCompanionEmbeddedToolCalls(raw).visibleText, 'hey, sorry i got distracted');
+    const truncated = `normal reply\n<parameter name="boundary_updates"><parameter name="operation">create</parameter>`;
+    assert.equal(context.quarantineCompanionProtocolText(truncated), 'normal reply');
+    assert.equal(context.extractCompanionEmbeddedToolCalls('hello<invoke name="commit_human_turn">private').visibleText, 'hello');
+});
+
+test('saved parameter-only leaks become a reversible recovery card', () => {
+    const repaired = context.repairCompanionProtocolLeaks([
+        context.normalizeCompanionMessage({
+            id: 'leak-a', role: 'companion', type: 'text', responseGroupId: 'leaked-turn',
+            text: '<parameter name="episode_updates"><parameter name="operation">remember</parameter>',
+            timestamp: 1000, turnSnapshot: { runtime: { mood: {} }, initiative: false }
+        }),
+        context.normalizeCompanionMessage({
+            id: 'leak-b', role: 'companion', type: 'text', responseGroupId: 'leaked-turn',
+            text: '</parameter><parameter name="truth_updates">private</parameter>', timestamp: 1400
+        })
+    ], 'Ash');
+    assert.equal(repaired.length, 1);
+    assert.equal(repaired[0].text, '');
+    assert.equal(repaired[0].protocolLeak, true);
+    assert(repaired[0].turnSnapshot);
+    assert.match(repaired[0].generationError, /blocked/i);
 });
 
 test('visible reply ceiling catches providers that ignore max_tokens', () => {
