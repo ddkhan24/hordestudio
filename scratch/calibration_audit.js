@@ -548,7 +548,9 @@ test('only models that can actually do the job are offered', () => {
           supported_parameters: ['response_format'], pricing: { prompt: '0.0000001', completion: '0.0000004' } },
         { id: 'good/pricey', name: 'Pricey', context_length: 200000,
           supported_parameters: ['structured_outputs'], pricing: { prompt: '0.00001', completion: '0.00003' } },
-        { id: 'bad/reasoner', name: 'Reasoner', context_length: 200000,
+        { id: 'bad/batch:batch', name: 'Batch only', context_length: 200000,
+          supported_parameters: ['structured_outputs'], pricing: { prompt: '0.000001', completion: '0.000002' } },
+        { id: 'good/reasoning-capable', name: 'Reasoner', context_length: 200000,
           supported_parameters: ['response_format', 'reasoning'], pricing: { prompt: '0.0000001', completion: '0.0000002' } },
         { id: 'bad/no-json', name: 'No JSON', context_length: 200000,
           supported_parameters: ['temperature'], pricing: { prompt: '0.0000001', completion: '0.0000002' } },
@@ -564,8 +566,8 @@ test('only models that can actually do the job are offered', () => {
     ];
     const ranked = context.rankStructuredModels(catalog);
     const ids = ranked.map(model => model.id);
-    assert.deepEqual(ids.sort(), ['good/cheap', 'good/pricey'],
-        'the picker offered a reasoning model, one that cannot emit JSON, one too small for a world digest, one with no price, or one that answers in audio');
+    assert.deepEqual(ids.sort(), ['good/cheap', 'good/pricey', 'good/reasoning-capable'],
+        'the picker hid a modern reasoning-capable JSON model, or offered a model that cannot do the job');
     assert(/\$/.test(ranked[0].note) && /ctx/.test(ranked[0].note),
         'the author cannot see what a choice costs or whether the world fits');
 });

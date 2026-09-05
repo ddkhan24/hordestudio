@@ -65,14 +65,17 @@ buildContext(vm, [
     'companionSetDecisionEvidence', 'companionRecordResponsePlan', 'companionContinuityPrompt',
     'companionConnectionPrompt', 'companionConsumeStartingScenario',
     'buildProceduralCompanionLifeProfile', 'companionScheduleBlockAt',
-    'companionSituationAt', 'advanceCompanionLife', 'companionWeatherLabel',
-    'companionResponsePlan', 'companionInitiativeDelayMs', 'companionUnansweredState',
+    'companionSituationAt', 'companionPlanLifeDay', 'advanceCompanionLifePlan', 'advanceCompanionLife', 'companionWeatherLabel',
+    'companionResponsePlan', 'companionInitiativeDelayMs', 'companionUnansweredState', 'companionCommunicationCadence',
     'companionElapsedLabel', 'companionTimestampLabel', 'companionSilenceSensitivity',
     'companionSilenceInterpretation', 'companionCurrentSilence', 'applyCompanionSilenceProgress',
     'companionNextInitiativeAt', 'companionNextSocialPostAt', 'reconcileCompanionSocialSchedule',
     'companionSocialRetryAt', 'companionSocialPostArgsFromMessage',
     'companionExperiencePreset', 'reconcileCompanionExperienceMessages',
-    'consolidateCompanionMemory',
+    'consolidateCompanionMemory', 'normalizeCompanionMemoryEntry', 'upsertCompanionMemory',
+    'companionRelevantMemories', 'companionBehaviorSignature', 'buildCompanionContextPacket',
+    'companionInputSupports', 'companionObserverInputSupports', 'companionObserverPrompt',
+    'sanitizeCompanionObserverCommit', 'applyCompanionTurnCommit',
     'companionMoodDescription', 'companionRelationshipDescription',
     'companionLocationOptions', 'companionTimeZoneOptions', 'isValidCompanionTimeZone',
     'companionUsesFixedTimezoneOffset', 'companionFixedOffsetDate',
@@ -98,7 +101,7 @@ buildContext(vm, [
     'generatedImageMimeFromBase64', 'isRecognizableImageBase64',
     'normalizeGeneratedImageSource', 'gptProtoImageFromResponse',
     'rankCompanionImageModels', 'modelSupportsImageReferences', 'rankCompanionTTSModels', 'isTTSCapableModel',
-    'rankCompanionTextModels', 'isCompanionTextCapableModel',
+    'rankCompanionTextModels', 'rankCompanionObserverModels', 'isCompanionTextCapableModel',
     'companionEffectiveLifeBuilderModel',
     'companionBalancedJSONObjectBlocks', 'parseCompanionLifeJSONCandidate',
     'unwrapCompanionLifeObject', 'parseCompanionLifeResponsePayload',
@@ -163,7 +166,10 @@ test('a blank companion gets every field a downstream function assumes', () => {
     assert.equal(c.desirePattern, 'mixed');
     assert.equal(c.sexualInitiative, false);
     assert(c.lifeProfile && c.lifeRuntime && Array.isArray(c.lifeProfile.weeklySchedule));
-    assert(c.continuityRuntime && c.continuityRuntime.version === 5);
+    assert(c.continuityRuntime && c.continuityRuntime.version === 6);
+    assert.equal(c.separatedCognition, true);
+    assert.equal(c.observerModel, '');
+    assert.deepEqual(Array.from(c.observerInputModalities), ['text']);
     assert(Array.isArray(c.continuityRuntime.eventLedger));
     assert(Array.isArray(c.continuityRuntime.beliefs));
     assert(Array.isArray(c.continuityRuntime.intentions));
@@ -1506,12 +1512,15 @@ test('nothing is consolidated until the buffer would actually overflow', () => {
     assert.equal(c.memory.longTerm.length, 0);
 });
 
-test('overflowing the buffer folds the oldest messages into memory', () => {
+test('overflowing the buffer advances safely and retains only explicit player claims', () => {
     const c = freshCompanion();
-    const messages = Array.from({ length: 60 }, (_, i) => textMessage(`message number ${i} has plenty of content in it`, i));
+    const messages = Array.from({ length: 60 }, (_, i) => textMessage(
+        i === 3 ? 'I live in Lahore and I prefer late night conversations' : `message number ${i} has plenty of content in it`, i));
     const added = context.consolidateCompanionMemory(c, messages);
-    assert(added > 0, 'nothing was consolidated despite a full buffer');
-    assert(c.memory.longTerm.length > 0);
+    assert.equal(added, 1);
+    assert.equal(c.memory.longTerm.length, 1);
+    assert.equal(c.memory.longTerm[0].kind, 'claim');
+    assert.equal(c.memory.longTerm[0].source, 'player_statement');
     assert(c.memory.consolidatedThroughIndex > 0);
 });
 
@@ -1529,6 +1538,100 @@ test('consolidating twice on the same messages does nothing the second time', ()
     const countAfterFirst = c.memory.longTerm.length;
     context.consolidateCompanionMemory(c, messages);
     assert.equal(c.memory.longTerm.length, countAfterFirst, 'the same messages were consolidated twice');
+});
+
+test('memory correction supersedes the old belief while preserving provenance', () => {
+    const c = freshCompanion();
+    const original = context.upsertCompanionMemory(c, {
+        text: 'The player lives in London.', kind: 'claim', source: 'player_statement',
+        sourceMessageIds: ['source-1'], certainty: 80
+    });
+    const corrected = context.upsertCompanionMemory(c, {
+        text: 'The player lives in Lahore.', kind: 'claim', source: 'author_correction',
+        sourceMessageIds: ['source-1'], certainty: 100, supersedes: original.id
+    });
+    assert.equal(original.status, 'superseded');
+    assert.equal(corrected.status, 'active');
+    assert.equal(corrected.source, 'author_correction');
+    assert.deepEqual(corrected.sourceMessageIds, ['source-1']);
+});
+
+test('forgotten memory keeps a tombstone and never returns to active recall', () => {
+    const c = freshCompanion();
+    const forgotten = context.upsertCompanionMemory(c, {
+        text: 'The player once claimed to live in Rome.', kind: 'claim', source: 'player_statement'
+    });
+    forgotten.status = 'forgotten';
+    context.upsertCompanionMemory(c, {
+        text: 'The player likes late-night walks.', kind: 'preference', source: 'player_statement'
+    });
+    assert(c.memory.longTerm.some(item => item.id === forgotten.id && item.status === 'forgotten'));
+    assert(!context.companionRelevantMemories(c, 'Where does the player live?')
+        .some(item => item.id === forgotten.id));
+});
+
+test('separated cognition removes the private state tool from the speaking model', () => {
+    const c = freshCompanion({ allowPhotos: true, allowVoiceNotes: true });
+    const speakingTools = context.companionToolsFor(c, false, true);
+    assert(!speakingTools.some(tool => tool.function?.name === 'commit_human_turn'));
+    assert(speakingTools.some(tool => tool.function?.name === 'send_photo'));
+    const legacyTools = context.companionToolsFor(c, false, false);
+    assert(legacyTools.some(tool => tool.function?.name === 'commit_human_turn'));
+});
+
+test('state observer rejects media actions and unsupported intoxication', () => {
+    const c = freshCompanion({ alcoholPattern: 'never', separatedCognition: true });
+    const cleaned = context.sanitizeCompanionObserverCommit(c, {
+        photo: { decision: 'send', scene: 'anything' },
+        voice_note: { decision: 'send', text: 'anything' },
+        social_post: { decision: 'post', text: 'anything' },
+        state: { intoxication_change: 80, relationship_change: 2 }
+    }, Date.UTC(2026, 8, 5, 12));
+    assert.equal(cleaned.photo.decision, 'none');
+    assert.equal(cleaned.voice_note.decision, 'none');
+    assert.equal(cleaned.social_post.decision, 'none');
+    assert.equal(cleaned.state.intoxication_change, 0);
+});
+
+test('multimodal evidence is attached only when the private observer supports it', () => {
+    const c = freshCompanion({
+        id: 'observer-vision', observerModel: 'small-vision-observer',
+        observerInputModalities: ['text', 'image']
+    });
+    context.state.companions = [c];
+    context.state.activeCompanionId = c.id;
+    const photo = context.normalizeCompanionMessage({
+        id: 'photo-1', role: 'user', type: 'photo', text: 'look at this',
+        photo: 'data:image/jpeg;base64,AAAA', timestamp: 1
+    });
+    const prompt = context.companionObserverPrompt(c, [photo], 2, ['photo-1'], 'group-1', []);
+    assert(Array.isArray(prompt[1].content));
+    assert(prompt[1].content.some(part => part.type === 'image_url'));
+    c.observerInputModalities = ['text'];
+    const textOnly = context.companionObserverPrompt(c, [photo], 2, ['photo-1'], 'group-2', []);
+    assert(!textOnly[1].content.some(part => part.type === 'image_url'));
+});
+
+test('observer model ranking favors structured output before cheap unstructured chat', () => {
+    const ranked = context.rankCompanionObserverModels([
+        { id: 'cheap-chat', name: 'Cheap chat', supportsTools: false, supportsJSON: false, promptPrice: 0, inputModalities: ['text'] },
+        { id: 'observer-8b', name: 'Observer 8B', supportsTools: false, supportsJSON: true, promptPrice: 0.000001, inputModalities: ['text'] },
+        { id: 'observer-70b', name: 'Observer 70B', supportsTools: true, supportsJSON: true, promptPrice: 0.000002, inputModalities: ['text'] }
+    ]);
+    assert.deepEqual(Array.from(ranked, model => model.id), ['observer-70b', 'observer-8b', 'cheap-chat']);
+});
+
+test('learned cadence adapts only after repeated real exchanges', () => {
+    const hour = 60 * 60 * 1000;
+    const messages = [];
+    for (let index = 0; index < 4; index += 1) {
+        const start = index * 48 * hour;
+        messages.push({ role: 'companion', type: 'text', timestamp: start, text: 'hi' });
+        messages.push({ role: 'user', type: 'text', timestamp: start + 36 * hour, text: 'hey' });
+    }
+    const cadence = context.companionCommunicationCadence(messages);
+    assert(cadence.returnSamples >= 3);
+    assert(cadence.silencePaceFactor > 1);
 });
 
 test('companion replies are never mistaken for the player\'s own memories', () => {
@@ -2728,6 +2831,23 @@ test('Autonomy Health is advisory and does not mutate the human', () => {
     assert(report.score < 100);
     assert(report.findings.some(item => /overlap|spammy|repeat/i.test(item.text)));
     assert.equal(JSON.stringify(c), before);
+});
+
+test('Life Architect plans authored routines and due promises with explicit causes', () => {
+    const now = Date.UTC(2026, 8, 7, 12, 0); // Monday UTC
+    const c = freshCompanion({
+        id: 'causal-life-plan', timezone: 'UTC',
+        lifeProfile: {
+            initializedAt: now - HOUR, seed: 'causal', socialCircle: [], places: [], wardrobe: [], wildcardDeck: [],
+            weeklySchedule: [{ id: 'work-block', days: [1], startMinute: 540, endMinute: 1020,
+                activity: 'working at the library', placeLabel: 'Central Library', withIds: [] }]
+        },
+        commitments: [{ id: 'call-player', text: 'Call the player after work', dueAt: now + HOUR, status: 'pending' }]
+    });
+    const plan = context.companionPlanLifeDay(c, now);
+    assert(plan.some(item => item.kind === 'schedule' && /Authored Monday routine/.test(item.cause)));
+    assert(plan.some(item => item.kind === 'obligation' && item.summary === 'Call the player after work'));
+    assert.equal(c.lifeRuntime.plannedDateKey, '2026-09-07');
 });
 
 (async () => {

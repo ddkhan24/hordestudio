@@ -64,7 +64,7 @@ HOST = os.environ.get("HORDE_SERVER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HORDE_SERVER_PORT", "43127"))
 CALLBACK_URL = f"http://{HOST}:{PORT}/oauth/callback"
 CLIENT_NAME = "Horde Studio Local MCP Bridge"
-BRIDGE_BUILD = "20260902-video-references-v2"
+BRIDGE_BUILD = "20260905-v173"
 APP_INSTANCE_ID = hashlib.sha256(str(APP_DIR).encode("utf-8")).hexdigest()[:16]
 MAX_RESPONSE_BYTES = 40 * 1024 * 1024
 MAX_VIDEO_BYTES = 160 * 1024 * 1024
@@ -269,7 +269,9 @@ class AlwaysOnRuntime:
                 "messageDueAt": max(0, int(raw.get("messageDueAt") or 0)),
                 "socialDueAt": max(0, int(raw.get("socialDueAt") or 0)),
                 "hasSpoken": raw.get("hasSpoken") is True,
-                "context": str(raw.get("context") or "")[:16000],
+                "stateRevision": max(0, int(raw.get("stateRevision") or 0)),
+                "initiativeReason": str(raw.get("initiativeReason") or "")[:1000],
+                "context": str(raw.get("context") or "")[:18000],
                 "recentMessages": raw.get("recentMessages") if isinstance(raw.get("recentMessages"), list) else [],
                 "provider": {
                     "baseUrl": base_url,
@@ -395,7 +397,8 @@ class AlwaysOnRuntime:
                     self.events[event_id] = {
                         "id": event_id, "kind": kind, "humanId": human_id,
                         "timelineId": human.get("timelineId", ""), "text": text,
-                        "createdAt": now_ms, "reason": str(result.get("reason") or "")[:500]
+                        "createdAt": now_ms, "reason": str(result.get("reason") or "")[:500],
+                        "stateRevision": human.get("stateRevision", 0)
                     }
                 self._persist_queue()
         except Exception as error:
@@ -424,12 +427,13 @@ class AlwaysOnRuntime:
         system = (
             "You are Horde Studio's bounded background agency worker. " + purpose +
             " Stay fully in character and grounded in the supplied facts. Do not invent a major event. "
+            " The only valid reason for acting now is: " + str(human.get("initiativeReason") or "none supplied") + ". "
             "Return JSON only: {\"decision\":\"" + kind + "|none\",\"text\":\"...\","
             "\"reason\":\"brief private reason\",\"next_check_minutes\":120}. "
             "Choosing none is correct when contact would feel forced.\n\n" + human.get("context", "")
         )
         recent = []
-        for item in human.get("recentMessages", [])[-12:]:
+        for item in human.get("recentMessages", [])[-24:]:
             if not isinstance(item, dict):
                 continue
             role = "assistant" if item.get("role") == "companion" else "user"
@@ -3037,36 +3041,51 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     configured_port = PORT
-    server = None
-    for candidate in range(configured_port, configured_port + 20):
-        select_runtime_port(candidate)
-        app_url = f"http://{HOST}:{PORT}/"
+    select_runtime_port(configured_port)
+    app_url = f"http://{HOST}:{PORT}/"
+    try:
+        server = ThreadingHTTPServer((LISTEN_HOST, PORT), BridgeHandler)
+    except OSError as error:
+        if error.errno not in {errno.EADDRINUSE, 48, 98, 10048}:
+            raise
         try:
-            server = ThreadingHTTPServer((LISTEN_HOST, PORT), BridgeHandler)
-            break
-        except OSError as error:
-            if error.errno not in {errno.EADDRINUSE, 48, 98, 10048}:
-                raise
+            status, _, raw = http_request(app_url + "health", timeout=3)
+            health = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            health, status = {}, 0
+        is_horde_bridge = status == 200 and health.get("service") == "Horde Studio MCP Bridge"
+        same_release = is_horde_bridge \
+            and health.get("appInstance") == APP_INSTANCE_ID \
+            and health.get("build") == BRIDGE_BUILD
+        if same_release:
+            print(f"This Horde Studio release is already running on {app_url}")
+            if "--open" in sys.argv:
+                import webbrowser
+                webbrowser.open(app_url)
+            return
+        if not is_horde_bridge:
+            raise RuntimeError(
+                f"Horde Studio must use its stable storage address {app_url}, but another application owns that port. "
+                "Close that application or set HORDE_SERVER_PORT to one fixed alternative port."
+            ) from error
+        # Portable releases used to move to the next free port when an older
+        # copy was running. Browser databases are origin-scoped, so that looked
+        # exactly like every World had reset. Replace the old local bridge and
+        # keep the stable origin instead.
+        status, _, _ = http_request(app_url + "shutdown", method="POST", body=b"{}", timeout=3)
+        if status != 200:
+            raise RuntimeError(f"Could not stop the older Horde Studio process on {app_url}.") from error
+        deadline = time.time() + 5
+        while True:
             try:
-                status, _, raw = http_request(app_url + "health", timeout=3)
-                health = json.loads(raw.decode("utf-8")) if raw else {}
-            except Exception:
-                health, status = {}, 0
-            same_release = status == 200 \
-                and health.get("service") == "Horde Studio MCP Bridge" \
-                and health.get("appInstance") == APP_INSTANCE_ID \
-                and health.get("build") == BRIDGE_BUILD
-            if same_release:
-                print(f"This Horde Studio release is already running on {app_url}")
-                if "--open" in sys.argv:
-                    import webbrowser
-                    webbrowser.open(app_url)
-                return
-            # An older release, a different extracted copy, or another app owns
-            # this port. Never open it and pretend it is the current build.
-            continue
-    if server is None:
-        raise RuntimeError("Horde Studio could not find a free local port between 43127 and 43146.")
+                server = ThreadingHTTPServer((LISTEN_HOST, PORT), BridgeHandler)
+                break
+            except OSError as retry_error:
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"The older Horde Studio process did not release {app_url}. Close it and launch again."
+                    ) from retry_error
+                time.sleep(0.1)
     app_url = f"http://{HOST}:{PORT}/"
     listen_info = f"{LISTEN_HOST}:{PORT}" if LISTEN_HOST != HOST else str(PORT)
     print(f"Horde Studio bridge listening on {listen_info}")

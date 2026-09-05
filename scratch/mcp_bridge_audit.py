@@ -289,6 +289,31 @@ class McpBridgeAudit(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 bridge.main()
 
+    @mock.patch.object(bridge, "http_request")
+    @mock.patch.object(bridge, "ThreadingHTTPServer")
+    def test_relaunch_replaces_an_old_horde_bridge_on_the_same_storage_origin(self, server, request):
+        replacement = mock.Mock()
+        server.side_effect = [OSError(errno.EADDRINUSE, "busy"), replacement]
+        request.side_effect = [
+            (
+                200,
+                {"Content-Type": "application/json"},
+                json.dumps({
+                    "service": "Horde Studio MCP Bridge",
+                    "build": "older-build",
+                    "appInstance": "older-copy",
+                }).encode(),
+            ),
+            (200, {"Content-Type": "application/json"}, b'{"ok":true}'),
+        ]
+        with mock.patch.object(sys, "argv", ["horde_mcp_bridge.py"]):
+            bridge.main()
+        self.assertEqual(server.call_count, 2)
+        shutdown = request.call_args_list[1]
+        self.assertTrue(shutdown.args[0].endswith('/shutdown'))
+        self.assertEqual(shutdown.kwargs.get('method'), 'POST')
+        replacement.serve_forever.assert_called_once()
+
     def test_local_image_urls_are_restricted_to_the_local_network(self):
         self.assertEqual(
             bridge.loopback_base_url("http://localhost:8188/", 8188),

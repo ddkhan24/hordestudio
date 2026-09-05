@@ -7,7 +7,7 @@ const STORE_NAME = 'state';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
-const HORDE_STUDIO_VERSION = '17.2.0';
+const HORDE_STUDIO_VERSION = '17.3.0';
 const HORDE_STUDIO_RELEASED_AT = '2026-09-04T14:05:54+05:00';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
@@ -1259,6 +1259,20 @@ function safeJsonClone(value) {
     }));
 }
 
+function worldPersistenceManifest(world) {
+    return { ...safeJsonClone(world), mediaAssets: [] };
+}
+
+async function verifyWorldPersisted(world) {
+    const storedWorlds = await HordeDB.get('worlds');
+    const stored = Array.isArray(storedWorlds)
+        ? storedWorlds.find(candidate => candidate?.id === world?.id)
+        : null;
+    if (!stored || JSON.stringify(stored) !== JSON.stringify(worldPersistenceManifest(world))) {
+        throw new Error('The saved World could not be read back from device storage. Export it now and check browser storage permissions.');
+    }
+}
+
 function requirePlainObject(value, label) {
     if (!isPlainObject(value)) throw new Error(`${label} must be an object`);
 }
@@ -1981,7 +1995,24 @@ async function loadState() {
         try { state.chats = JSON.parse(localStorage.getItem('horde_chats')) || {}; }
         catch (err) { console.warn('Ignoring corrupt legacy chats:', err); state.chats = {}; }
         
-        await saveState();
+        // Never run a full-state save from the legacy migration path. At this
+        // point Worlds and the other modern IndexedDB records have not been
+        // loaded yet, so saveState() would replace them with the empty startup
+        // defaults. Only migrate records that do not already exist, then enter
+        // the normal loader after removing the legacy marker.
+        const migratedRecords = {};
+        const storedCharacters = await HordeDB.get('characters');
+        const storedChats = await HordeDB.get('chats');
+        const storedGlobalSettings = await HordeDB.get('globalSettings');
+        const storedPersonas = await HordeDB.get('personas');
+        if (!Array.isArray(storedCharacters) || storedCharacters.length === 0) migratedRecords.characters = state.characters;
+        if (!storedChats || Object.keys(storedChats).length === 0) migratedRecords.chats = state.chats;
+        if (!isPlainObject(storedGlobalSettings)) migratedRecords.globalSettings = state.globalSettings;
+        if ((!Array.isArray(storedPersonas) || storedPersonas.length === 0) && state.personas.length) {
+            migratedRecords.personas = state.personas;
+            migratedRecords.activePersonaId = state.activePersonaId;
+        }
+        if (Object.keys(migratedRecords).length) await HordeDB.setMultiple(migratedRecords);
         
         // Clean up localStorage to free quota
         localStorage.removeItem('horde_api_key');
@@ -1989,6 +2020,10 @@ async function loadState() {
         localStorage.removeItem('horde_characters');
         localStorage.removeItem('horde_chats');
         console.log('Migration complete.');
+        // Re-enter through the normal IndexedDB path. This is intentionally a
+        // return: continuing with the startup defaults would make this tab look
+        // reset until its next refresh even though the records survived.
+        return loadState();
     } else {
         const legacyStoredApiKey = await HordeDB.get('apiKey') || '';
         const storedGPTProtoApiKey = await HordeDB.get('gptprotoApiKey') || '';
@@ -2558,10 +2593,7 @@ async function persistStateSnapshot() {
         // Keep heavy image payloads out of the world manifest that is rewritten
         // on virtually every turn. The separate payload is only rewritten when
         // an asset changes, then reattached on load and embedded on export.
-        const storedWorlds = (state.worlds || []).map(world => ({
-            ...world,
-            mediaAssets: []
-        }));
+        const storedWorlds = (state.worlds || []).map(worldPersistenceManifest);
         const visibleWorldIds = new Set(storedWorlds.map(world => world.id));
         const recovery = isPlainObject(state.worldRecoverySnapshots)
             ? state.worldRecoverySnapshots : {};
@@ -3592,6 +3624,7 @@ document.addEventListener('click', (e) => {
 let openRouterModels = [];
 
 let modelCatalogSource = null; // which base URL the cached catalog came from
+let modelCatalogFetchedAt = 0;
 
 async function getOpenRouterModels() {
     if (openRouterModels.length > 0 && modelCatalogSource === apiBase()) return openRouterModels;
@@ -3609,6 +3642,7 @@ async function getOpenRouterModels() {
         if (catalog.length) {
             openRouterModels = catalog.filter(model => isPlainObject(model) && typeof model.id === 'string')
                 .map(model => ({ ...model, name: typeof model.name === 'string' ? model.name : model.id }));
+            modelCatalogFetchedAt = Date.now();
         }
     } catch (e) {
         console.error(`Failed to fetch ${isLocalProvider() ? 'local' : cloudProviderName()} models:`, e);
@@ -12700,12 +12734,15 @@ function renderWorldStudioPanel(target) {
         'w-factions': renderWorldFactions,
         'w-sandbox': renderWorldSandboxStudio,
         'w-lore': renderWorldLore,
-        'w-visual-map': renderWorldArchitectMap
+        'w-visual-map': renderWorldArchitectMap,
+        'w-architect-agent': renderWorldArchitectAgent
     };
     if (renderers[target]) renderers[target]();
 }
 
 function setupWorldStudioLogic() {
+
+    setupWorldArchitectLogic();
 
     const recordOverlay = document.getElementById('world-record-overlay');
     document.getElementById('world-record-close').onclick = closeWorldRecordInspector;
@@ -13250,7 +13287,13 @@ async function saveWorld() {
     }
 
     worldMediaDirty = true;
-    await saveState();
+    try {
+        await saveState();
+        await verifyWorldPersisted(w);
+    } catch (error) {
+        showToast(`World was not saved: ${error.message || error}`, 'error');
+        throw error;
+    }
     showToast('World Saved!', 'success');
     renderWorlds();
 }
@@ -14751,6 +14794,39 @@ function removeWorldLocationRecord(world, locationId) {
         faction.territory = (faction.territory || []).filter(id => id !== locationId);
     });
     if (world.startLocationId === locationId) world.startLocationId = world.locations[0]?.id || '';
+}
+
+function removeWorldGroupRecord(world, groupId) {
+    if (!world || !groupId || !(world.groups || []).some(group => group.id === groupId)) return false;
+    world.groups = world.groups.filter(group => group.id !== groupId);
+    (world.entities || []).forEach(entity => {
+        entity.groupIds = (entity.groupIds || []).filter(id => id !== groupId);
+        if (entity.householdId === groupId) {
+            entity.householdId = entity.groupIds.find(id => world.groups.some(group => group.id === id && group.type === 'household')) || '';
+        }
+    });
+    return true;
+}
+
+function mergeWorldGroupRecords(world, sourceId, targetId) {
+    if (!world || !sourceId || !targetId || sourceId === targetId) return false;
+    const source = (world.groups || []).find(group => group.id === sourceId);
+    const target = (world.groups || []).find(group => group.id === targetId);
+    if (!source || !target) return false;
+    if (!target.description && source.description) target.description = source.description;
+    if (!target.homeLocationId && source.homeLocationId) target.homeLocationId = source.homeLocationId;
+    target.tags = [...new Set([...(target.tags || []), ...(source.tags || [])])].slice(0, 30);
+    (world.entities || []).forEach(entity => {
+        const memberships = (entity.groupIds || []).map(id => id === sourceId ? targetId : id);
+        entity.groupIds = [...new Set(memberships)];
+        if (entity.householdId === sourceId) {
+            entity.householdId = target.type === 'household'
+                ? targetId
+                : entity.groupIds.find(id => world.groups.some(group => group.id === id && group.type === 'household' && id !== sourceId)) || '';
+        }
+    });
+    world.groups = world.groups.filter(group => group.id !== sourceId);
+    return true;
 }
 
 function worldRegionTravelLinks(world, regionId) {
@@ -16841,12 +16917,98 @@ function worldEntityDirectoryGroups(world, entities, groupBy, mode = 'people') {
             else add('Unaffiliated', entity);
             return;
         }
-        const household = world.groups.find(group => group.id === entity.householdId && group.type === 'household');
+        const household = world.groups.find(group => group.id === entity.householdId && group.type === 'household')
+            || (entity.groupIds || []).map(id => world.groups.find(group => group.id === id))
+                .find(group => group && ['household', 'family'].includes(group.type));
         if (household) return add(household.name, entity);
         const home = getLocationRef(world, entity.homeLocation);
         add(home ? `${home.name} household` : 'No household', entity);
     });
     return groups;
+}
+
+function renderWorldGroupManager(world, container) {
+    const people = (world.entities || []).filter(entity => entity.type === 'npc');
+    const wrapper = document.createElement('section');
+    wrapper.className = 'world-group-manager';
+    wrapper.innerHTML = `<details class="world-group-manager-shell" ${(world.groups || []).length <= 6 ? 'open' : ''}>
+        <summary><span><strong>Households, families &amp; groups</strong><small>${(world.groups || []).length} group${(world.groups || []).length === 1 ? '' : 's'} · edit, merge or safely remove them</small></span></summary>
+        <div class="world-group-create"><input class="form-input world-group-new-name" placeholder="New household, family or organization"><select class="form-select world-group-new-type"><option value="household">Household</option><option value="family">Family</option><option value="organization">Organization</option><option value="crew">Crew / team</option><option value="other">Other</option></select><button class="btn btn-primary world-group-create-btn" type="button">Create</button></div>
+        <div class="world-group-card-list"></div>
+    </details>`;
+    const list = wrapper.querySelector('.world-group-card-list');
+    (world.groups || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name))).forEach(group => {
+        const members = people.filter(person => (person.groupIds || []).includes(group.id));
+        const card = document.createElement('details');
+        card.className = 'world-group-card';
+        card.innerHTML = `<summary><span><strong>${escapeHTML(group.name || 'Unnamed group')}</strong><small>${escapeHTML(group.type)} · ${members.length} member${members.length === 1 ? '' : 's'}</small></span></summary>
+            <div class="world-group-fields">
+                <label><span>Name</span><input class="form-input group-name" value="${escapeHTML(group.name || '')}"></label>
+                <label><span>Type</span><select class="form-select group-type"><option value="household" ${group.type === 'household' ? 'selected' : ''}>Household</option><option value="family" ${group.type === 'family' ? 'selected' : ''}>Family</option><option value="organization" ${group.type === 'organization' ? 'selected' : ''}>Organization</option><option value="crew" ${group.type === 'crew' ? 'selected' : ''}>Crew / team</option><option value="other" ${group.type === 'other' ? 'selected' : ''}>Other</option></select></label>
+                <label><span>Home</span><select class="form-select group-home"><option value="">No shared home</option>${world.locations.map(location => `<option value="${escapeHTML(location.id)}" ${group.homeLocationId === location.id ? 'selected' : ''}>${escapeHTML(location.name || location.id)}</option>`).join('')}</select></label>
+                <label class="is-wide"><span>Description</span><textarea class="form-textarea group-description" rows="2">${escapeHTML(group.description || '')}</textarea></label>
+                <label class="is-wide"><span>Tags</span><input class="form-input group-tags" value="${escapeHTML((group.tags || []).join(', '))}" placeholder="wealthy, estranged, political…"></label>
+            </div>
+            <div class="world-group-members"><strong>Members</strong><div>${members.length ? members.map(person => `<span>${escapeHTML(person.name)}<button type="button" data-group-remove-member="${escapeHTML(person.id)}" aria-label="Remove ${escapeHTML(person.name)} from ${escapeHTML(group.name)}">×</button></span>`).join('') : '<small>No members yet.</small>'}</div>
+                <div class="world-group-add-member"><select class="form-select"><option value="">Add a person…</option>${people.filter(person => !(person.groupIds || []).includes(group.id)).map(person => `<option value="${escapeHTML(person.id)}">${escapeHTML(person.name)}</option>`).join('')}</select><button class="btn btn-ghost" type="button">Add</button></div>
+            </div>
+            <div class="world-group-card-actions"><select class="form-select group-merge-target"><option value="">Merge into…</option>${world.groups.filter(other => other.id !== group.id).map(other => `<option value="${escapeHTML(other.id)}">${escapeHTML(other.name)} · ${escapeHTML(other.type)}</option>`).join('')}</select><button class="btn btn-ghost group-merge" type="button">Merge</button><button class="btn btn-danger group-delete" type="button">Delete group</button></div>`;
+        card.querySelector('.group-name').oninput = event => { group.name = event.target.value.slice(0, 120); updateWorldTokenCount(); };
+        card.querySelector('.group-type').onchange = event => {
+            group.type = event.target.value;
+            people.forEach(person => {
+                if (!(person.groupIds || []).includes(group.id)) return;
+                if (group.type === 'household' && !person.householdId) person.householdId = group.id;
+                else if (person.householdId === group.id && group.type !== 'household') person.householdId = person.groupIds.find(id => world.groups.some(candidate => candidate.id === id && candidate.type === 'household')) || '';
+            });
+            renderWorldEntities();
+        };
+        card.querySelector('.group-home').onchange = event => { group.homeLocationId = event.target.value; };
+        card.querySelector('.group-description').oninput = event => { group.description = event.target.value.slice(0, 1200); updateWorldTokenCount(); };
+        card.querySelector('.group-tags').onchange = event => { group.tags = [...new Set(event.target.value.split(',').map(tag => tag.trim()).filter(Boolean))].slice(0, 30); updateWorldTokenCount(); };
+        card.querySelectorAll('[data-group-remove-member]').forEach(button => button.onclick = () => {
+            const person = people.find(item => item.id === button.dataset.groupRemoveMember);
+            if (!person) return;
+            person.groupIds = (person.groupIds || []).filter(id => id !== group.id);
+            if (person.householdId === group.id) person.householdId = person.groupIds.find(id => world.groups.some(candidate => candidate.id === id && candidate.type === 'household')) || '';
+            renderWorldEntities(); updateWorldTokenCount();
+        });
+        const addSelect = card.querySelector('.world-group-add-member select');
+        card.querySelector('.world-group-add-member button').onclick = () => {
+            const person = people.find(item => item.id === addSelect.value);
+            if (!person) return;
+            person.groupIds = [...new Set([...(person.groupIds || []), group.id])];
+            if (group.type === 'household' && !person.householdId) person.householdId = group.id;
+            renderWorldEntities(); updateWorldTokenCount();
+        };
+        card.querySelector('.group-merge').onclick = () => {
+            const targetId = card.querySelector('.group-merge-target').value;
+            const target = world.groups.find(item => item.id === targetId);
+            if (!target) return showToast('Choose the group that should survive the merge.', 'info');
+            if (!confirm(`Merge “${group.name}” into “${target.name}”? Members, tags and missing details will move to the surviving group.`)) return;
+            mergeWorldGroupRecords(world, group.id, target.id);
+            renderWorldEntities(); updateWorldTokenCount();
+            showToast(`Merged into ${target.name}. Save World to keep the change.`, 'success');
+        };
+        card.querySelector('.group-delete').onclick = () => {
+            if (!confirm(`Delete “${group.name}”? Its ${members.length} member${members.length === 1 ? '' : 's'} will remain as characters and only lose this membership.`)) return;
+            removeWorldGroupRecord(world, group.id);
+            renderWorldEntities(); updateWorldTokenCount();
+            showToast('Group deleted; its characters were kept.', 'success');
+        };
+        list.appendChild(card);
+    });
+    if (!(world.groups || []).length) list.innerHTML = '<div class="world-directory-empty">No authored households, families or organizations yet.</div>';
+    wrapper.querySelector('.world-group-create-btn').onclick = () => {
+        const name = wrapper.querySelector('.world-group-new-name').value.trim();
+        if (!name) return showToast('Name the household or group first.', 'info');
+        const type = wrapper.querySelector('.world-group-new-type').value;
+        const used = new Set(world.groups.map(group => group.id));
+        const id = uniqueWorldRecordId(world.groups, '', 'grp', name, used);
+        world.groups.push({ id, name: name.slice(0, 120), type, description: '', homeLocationId: '', tags: [] });
+        renderWorldEntities(); updateWorldTokenCount();
+    };
+    container.appendChild(wrapper);
 }
 
 function renderWorldEntityDirectory(world, container, mode = 'people') {
@@ -16924,6 +17086,7 @@ function renderWorldEntities(mode = 'people') {
     const container = inspecting ? document.getElementById('world-record-body') : document.getElementById(activeMode === 'items' ? 'w-items-list' : 'w-entities-list');
     container.innerHTML = '';
     if (!inspecting) {
+        if (activeMode === 'people') renderWorldGroupManager(world, container);
         renderWorldEntityDirectory(world, container, activeMode);
         return;
     }
@@ -17084,14 +17247,17 @@ function renderWorldEntities(mode = 'people') {
             <div class="secret-group world-inspector-section" data-inspector-section="relationships" style="border-color:var(--border);">
                 <div class="secret-header">
                     <div class="secret-title" style="color:var(--text-2);">🫱 Standing with others</div>
-                    <select class="form-select ent-add-relation" style="max-width:200px; font-size:11px; padding:3px 6px;">
-                        <option value="">+ Add someone…</option>
-                        ${(state.editingWorld.entities || [])
-                            .filter(other => other.type === 'npc' && other.id !== ent.id
-                                && !(state.editingWorld.relationships || []).some(rel =>
-                                    relationshipKey(rel.a, rel.b) === relationshipKey(ent.id, other.id)))
-                            .map(other => `<option value="${escapeHTML(other.id)}">${escapeHTML(other.name || other.id)}</option>`).join('')}
-                    </select>
+                    <div class="relationship-person-picker">
+                        <input class="form-input ent-add-relation-search" list="ent-relation-options-${idx}" placeholder="Search people…" autocomplete="off">
+                        <datalist id="ent-relation-options-${idx}">
+                            ${(state.editingWorld.entities || [])
+                                .filter(other => other.type === 'npc' && other.id !== ent.id
+                                    && !(state.editingWorld.relationships || []).some(rel =>
+                                        relationshipKey(rel.a, rel.b) === relationshipKey(ent.id, other.id)))
+                                .map(other => `<option value="${escapeHTML(other.name || other.id)} — ${escapeHTML(other.id)}"></option>`).join('')}
+                        </datalist>
+                        <button class="tool-btn ent-add-relation-btn" type="button">Add</button>
+                    </div>
                 </div>
                 ${(() => {
                     const mine = (state.editingWorld.relationships || [])
@@ -17244,13 +17410,28 @@ function renderWorldEntities(mode = 'people') {
                 renderWorldEntities();
                 updateWorldTokenCount();
             };
-            div.querySelector('.ent-add-relation').onchange = (e) => {
-                const otherId = e.target.value;
-                if (!otherId) return;
+            const relationSearch = div.querySelector('.ent-add-relation-search');
+            const addSearchedRelationship = () => {
+                const query = relationSearch.value.trim();
+                if (!query) return;
+                const displayedId = query.includes(' — ') ? query.slice(query.lastIndexOf(' — ') + 3).trim() : '';
+                const other = (state.editingWorld.entities || []).find(candidate => candidate.type === 'npc'
+                    && candidate.id !== ent.id
+                    && (candidate.id === displayedId || candidate.id === query || String(candidate.name || '').trim().toLowerCase() === query.toLowerCase()));
+                if (!other) return showToast('Choose a person from the search results.', 'info');
+                if ((state.editingWorld.relationships || []).some(rel => relationshipKey(rel.a, rel.b) === relationshipKey(ent.id, other.id))) {
+                    return showToast(`A relationship with ${other.name || other.id} already exists.`, 'info');
+                }
                 if (!Array.isArray(state.editingWorld.relationships)) state.editingWorld.relationships = [];
-                state.editingWorld.relationships.push({ a: ent.id, b: otherId, label: '', score: 0, reason: '' });
+                state.editingWorld.relationships.push({ a: ent.id, b: other.id, label: '', score: 0, reason: '' });
                 renderWorldEntities();   // the pair now shows on both cards
                 updateWorldTokenCount();
+            };
+            div.querySelector('.ent-add-relation-btn').onclick = addSearchedRelationship;
+            relationSearch.onkeydown = event => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                addSearchedRelationship();
             };
             const relationAt = event => (state.editingWorld.relationships || [])[Number(event.target.dataset.rel)];
             div.querySelectorAll('.rel-label').forEach(input => {
@@ -29712,6 +29893,933 @@ function buildWorldLintReport(world) {
     return findings;
 }
 
+// --- World Architect Agent ------------------------------------------------
+// Expands an existing world as a resumable, reviewable migration. The model is
+// never handed the whole world to rewrite: it may only propose these typed
+// operations, which are replayed against a clone and validated before apply.
+const WORLD_ARCHITECT_OPERATION_TYPES = new Set([
+    'add_region', 'update_region', 'add_location', 'update_location', 'connect_locations',
+    'add_character', 'update_character', 'add_item', 'update_item', 'add_group',
+    'update_group', 'merge_groups', 'delete_group', 'add_faction', 'add_relationship',
+    'add_lore', 'update_lore'
+]);
+const WORLD_ARCHITECT_POLICIES = new Set(['add_only', 'fill_gaps', 'allow_edits']);
+const WORLD_ARCHITECT_MAP_TYPES = new Set(['region', 'transit', 'route', 'building', 'outdoor', 'room', 'area']);
+
+function worldArchitectSnapshot(world) {
+    const copy = safeJsonClone(world || {});
+    delete copy.architectJob;
+    delete copy.architectUndo;
+    return copy;
+}
+
+function worldArchitectFingerprint(world) {
+    const text = JSON.stringify(worldArchitectSnapshot(world));
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) {
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+}
+
+function worldArchitectRequestedCounts(request) {
+    const out = { regions: 0, locations: 0, rooms: 0, people: 0, items: 0, groups: 0, factions: 0, lore: 0 };
+    const aliases = [
+        ['rooms', /(?:add|create|make|build|include|generate)?\s*(\d{1,4})\s+(?:new\s+)?rooms?\b/gi],
+        ['locations', /(?:add|create|make|build|include|generate)?\s*(\d{1,4})\s+(?:new\s+)?(?:locations?|places?)\b/gi],
+        ['people', /(?:add|create|make|include|generate)?\s*(\d{1,4})\s+(?:new\s+)?(?:characters?|npcs?|people|persons?)\b/gi],
+        ['items', /(?:add|create|make|include|generate)?\s*(\d{1,4})\s+(?:new\s+)?(?:items?|objects?)\b/gi],
+        ['regions', /(?:add|create|make|include|generate)?\s*(\d{1,4})\s+(?:new\s+)?regions?\b/gi],
+        ['groups', /(?:add|create|make|include|generate)?\s*(\d{1,4})\s+(?:new\s+)?(?:groups?|households?|organizations?)\b/gi],
+        ['factions', /(?:add|create|make|include|generate)?\s*(\d{1,4})\s+(?:new\s+)?factions?\b/gi],
+        ['lore', /(?:add|create|make|include|generate)?\s*(\d{1,4})\s+(?:new\s+)?(?:lore entries|lorebooks?|lore)\b/gi]
+    ];
+    aliases.forEach(([key, pattern]) => {
+        for (const match of String(request || '').matchAll(pattern)) out[key] += Math.min(2000, Number(match[1]) || 0);
+    });
+    return out;
+}
+
+function worldArchitectCountRecords(world) {
+    const locations = Array.isArray(world?.locations) ? world.locations : [];
+    const entities = Array.isArray(world?.entities) ? world.entities : [];
+    return {
+        regions: (world?.regions || []).length,
+        // Rooms are tracked separately so “10 locations and 100 rooms” has a
+        // meaningful, satisfiable exact-count contract rather than counting
+        // every room twice.
+        locations: locations.filter(item => item.mapType !== 'room').length,
+        rooms: locations.filter(item => item.mapType === 'room').length,
+        people: entities.filter(item => item.type === 'npc').length,
+        items: entities.filter(item => item.type === 'item').length,
+        groups: (world?.groups || []).length,
+        factions: (world?.factions || []).length,
+        lore: (world?.lorebook || []).length
+    };
+}
+
+function defaultWorldArchitectPlan(world, request, options = {}) {
+    const counts = worldArchitectRequestedCounts(request);
+    const batchSize = Math.max(4, Math.min(25, Number(options.batchSize) || 12));
+    const units = [];
+    Object.entries(counts).forEach(([kind, count]) => {
+        for (let offset = 0; offset < count; offset += batchSize) {
+            const amount = Math.min(batchSize, count - offset);
+            units.push({ kind, amount, offset });
+        }
+    });
+    if (!units.length) units.push({ kind: options.scope || 'whole', amount: 0, offset: 0 });
+    const batches = units.map((unit, index) => ({
+        id: `batch_${index + 1}`,
+        label: unit.amount ? `${unit.amount} ${unit.kind} (${unit.offset + 1}–${unit.offset + unit.amount})` : 'Requested world changes',
+        instruction: unit.amount
+            ? `Create exactly ${unit.amount} new ${unit.kind}. This batch covers requested records ${unit.offset + 1} through ${unit.offset + unit.amount}.`
+            : String(request || '').trim(),
+        expectedCounts: { regions: 0, locations: 0, rooms: 0, people: 0, items: 0, groups: 0, factions: 0, lore: 0, ...(unit.amount ? { [unit.kind]: unit.amount } : {}) }
+    }));
+    return {
+        title: 'World expansion plan',
+        summary: String(request || '').trim(),
+        assumptions: ['Existing authored canon is preserved.', 'Every proposed change is staged and validated before apply.'],
+        requestedCounts: counts,
+        batches,
+        estimatedCalls: batches.length
+    };
+}
+
+function normalizeWorldArchitectPlan(raw, fallback) {
+    const source = isPlainObject(raw) ? raw : {};
+    const batches = Array.isArray(source.batches) ? source.batches.slice(0, 200).map((batch, index) => ({
+        id: `batch_${index + 1}`,
+        label: String(batch?.label || fallback.batches[index]?.label || `Batch ${index + 1}`).slice(0, 160),
+        instruction: String(batch?.instruction || fallback.batches[index]?.instruction || fallback.summary).slice(0, 2000),
+        expectedCounts: { ...(fallback.batches[index]?.expectedCounts || {}), ...(isPlainObject(batch?.expectedCounts) ? batch.expectedCounts : {}) }
+    })) : [];
+    // The deterministic plan owns explicit numeric promises. A planner may add
+    // useful sequencing, but it may not silently shrink “100 rooms” to 12.
+    const hasExactCounts = Object.values(fallback.requestedCounts).some(Boolean);
+    // Exact-count work keeps deterministic, type-specific batches. Previously
+    // an LLM could rename the “7 people” batch to “establish family structure”
+    // while inheriting expectedCounts.people=7 by array position. It then quite
+    // reasonably emitted groups and relationships, and our validator blamed
+    // the model for producing zero characters. The planner may describe the
+    // overall approach, but numeric batching is engine-owned.
+    const planned = hasExactCounts ? fallback.batches : (batches.length ? batches : fallback.batches);
+    return {
+        title: String(source.title || fallback.title).slice(0, 160),
+        summary: String(source.summary || fallback.summary).slice(0, 2000),
+        assumptions: (Array.isArray(source.assumptions) ? source.assumptions : fallback.assumptions).map(item => String(item).slice(0, 300)).slice(0, 12),
+        requestedCounts: fallback.requestedCounts,
+        batches: planned,
+        estimatedCalls: planned.length
+    };
+}
+
+function normalizeWorldArchitectOperation(raw, index = 0) {
+    if (!isPlainObject(raw)) return null;
+    const token = value => String(value || '').trim().toLowerCase().replace(/[\s.-]+/g, '_');
+    const aliases = {
+        create_region: 'add_region', edit_region: 'update_region', modify_region: 'update_region',
+        create_location: 'add_location', create_place: 'add_location', add_place: 'add_location',
+        create_room: 'add_location', add_room: 'add_location', edit_location: 'update_location',
+        update_place: 'update_location', edit_place: 'update_location', modify_location: 'update_location',
+        link_locations: 'connect_locations', connect_location: 'connect_locations', add_connection: 'connect_locations',
+        create_character: 'add_character', create_person: 'add_character', create_npc: 'add_character',
+        add_npc: 'add_character', add_person: 'add_character', update_npc: 'update_character',
+        update_person: 'update_character', edit_npc: 'update_character', edit_character: 'update_character',
+        create_item: 'add_item', create_object: 'add_item', add_object: 'add_item', edit_item: 'update_item',
+        create_group: 'add_group', create_household: 'add_group', create_family: 'add_group',
+        add_household: 'add_group', add_family: 'add_group', add_organization: 'add_group',
+        update_household: 'update_group', update_family: 'update_group', update_organization: 'update_group',
+        edit_group: 'update_group', edit_household: 'update_group', edit_family: 'update_group',
+        merge_households: 'merge_groups', merge_families: 'merge_groups',
+        delete_household: 'delete_group', delete_family: 'delete_group',
+        create_faction: 'add_faction', create_relationship: 'add_relationship', link_characters: 'add_relationship',
+        create_lore: 'add_lore', add_lore_entry: 'add_lore', create_lore_entry: 'add_lore', edit_lore: 'update_lore'
+    };
+    const suppliedType = token(raw.type || raw.operation || raw.operationType || raw.op);
+    let inferredSubject = token(raw.entityType || raw.entity_type || raw.resource || raw.kind || raw.subject || suppliedType);
+    let type = aliases[suppliedType] || suppliedType;
+    if (!WORLD_ARCHITECT_OPERATION_TYPES.has(type)) {
+        const actionAliases = { create: 'add', insert: 'add', new: 'add', edit: 'update', modify: 'update', set: 'update', remove: 'delete', link: 'add' };
+        const subjectAliases = {
+            npc: 'character', person: 'character', people: 'character', characters: 'character',
+            place: 'location', room: 'room', object: 'item', household: 'group', family: 'group',
+            organization: 'group', lore_entry: 'lore', connection: 'connection'
+        };
+        const action = actionAliases[token(raw.action || raw.verb)] || token(raw.action || raw.verb);
+        const subject = subjectAliases[inferredSubject] || inferredSubject;
+        const combined = subject === 'connection' && ['add', 'create', 'link'].includes(action)
+            ? 'connect_locations'
+            : `${action}_${subject}`;
+        type = aliases[combined] || combined;
+    }
+    if (!WORLD_ARCHITECT_OPERATION_TYPES.has(type)) return null;
+    const nestedRecord = [raw.record, raw.character, raw.person, raw.npc, raw.entity, raw.location, raw.place,
+        raw.room, raw.item, raw.group, raw.household, raw.family, raw.faction, raw.relationship, raw.lore,
+        raw.data, raw.payload, raw.value, raw.details].find(isPlainObject);
+    const flattened = safeJsonClone(raw);
+    ['type', 'operation', 'operationType', 'op', 'action', 'verb', 'entityType', 'entity_type', 'resource', 'kind', 'subject',
+        'operationId', 'targetId', 'target', 'fields', 'changes', 'updates', 'reason'].forEach(key => delete flattened[key]);
+    const nestedFields = [raw.fields, raw.changes, raw.updates].find(isPlainObject);
+    const recordFields = nestedRecord && [nestedRecord.fields, nestedRecord.changes, nestedRecord.updates].find(isPlainObject);
+    // Models commonly split an add operation into {record:{id},fields:{name}}
+    // or wrap it as {character:{...}}. Merge those equivalent shapes here so
+    // a valid record is not shown in review and then rejected during staging.
+    const record = {
+        ...flattened,
+        ...(nestedFields ? safeJsonClone(nestedFields) : {}),
+        ...(nestedRecord ? safeJsonClone(nestedRecord) : {}),
+        ...(recordFields ? safeJsonClone(recordFields) : {})
+    };
+    ['fields', 'changes', 'updates'].forEach(key => delete record[key]);
+    if (!record.name) record.name = String(record.displayName || record.display_name || record.title || '').trim();
+    const addTypesNeedingName = new Set(['add_region', 'add_location', 'add_character', 'add_item', 'add_group', 'add_faction']);
+    if (addTypesNeedingName.has(type) && !record.name) {
+        const meaningfulId = String(record.id || raw.id || '').trim()
+            .replace(/^(?:ent|npc|char|person|item|loc|location|reg|region|grp|group|fac|faction)_+/i, '')
+            .replace(/[_-]+/g, ' ').trim();
+        if (meaningfulId && !/^\d+$/.test(meaningfulId)) {
+            record.name = meaningfulId.replace(/\b\p{L}/gu, letter => letter.toUpperCase());
+        }
+    }
+    if ([suppliedType, inferredSubject].some(value => value === 'room' || value === 'add_room' || value === 'create_room') && !record.mapType) record.mapType = 'room';
+    if (type === 'add_group' && !record.type) {
+        if ([suppliedType, inferredSubject].some(value => value.includes('household'))) record.type = 'household';
+        else if ([suppliedType, inferredSubject].some(value => value.includes('family'))) record.type = 'family';
+        else if ([suppliedType, inferredSubject].some(value => value.includes('organization'))) record.type = 'organization';
+    }
+    const clean = {
+        type, operationId: String(raw.operationId || `op_${index + 1}`).slice(0, 100),
+        id: String(raw.id || record.id || '').trim().slice(0, 100),
+        targetId: String(raw.targetId || raw.target || '').trim().slice(0, 100),
+        record,
+        fields: nestedFields ? safeJsonClone(nestedFields) : (type.startsWith('update_') ? safeJsonClone(record) : {}),
+        from: String(raw.from || '').trim().slice(0, 100), to: String(raw.to || '').trim().slice(0, 100),
+        a: String(raw.a || '').trim().slice(0, 100), b: String(raw.b || '').trim().slice(0, 100),
+        mode: String(raw.mode || '').trim().slice(0, 80), minutes: Number(raw.minutes ?? raw.travelTime) || 0,
+        oneWay: raw.oneWay === true || raw.isOneWay === true,
+        label: String(raw.label || '').trim().slice(0, 100), reason: String(raw.reason || '').trim().slice(0, 300),
+        score: Number(raw.score) || 0, keyword: String(raw.keyword || '').trim().slice(0, 160),
+        text: String(raw.text || '').trim().slice(0, 10000)
+    };
+    return clean;
+}
+
+function worldArchitectOperationCounts(operations) {
+    const counts = { regions: 0, locations: 0, rooms: 0, people: 0, items: 0, groups: 0, factions: 0, lore: 0 };
+    (operations || []).forEach(operation => {
+        const op = normalizeWorldArchitectOperation(operation);
+        if (!op) return;
+        if (op.type === 'add_region') counts.regions++;
+        if (op.type === 'add_location') counts[op.record.mapType === 'room' ? 'rooms' : 'locations']++;
+        if (op.type === 'add_character') counts.people++;
+        if (op.type === 'add_item') counts.items++;
+        if (op.type === 'add_group') counts.groups++;
+        if (op.type === 'add_faction') counts.factions++;
+        if (op.type === 'add_lore') counts.lore++;
+    });
+    return counts;
+}
+
+function worldArchitectFind(records, ref) {
+    const key = String(ref || '').trim().toLowerCase();
+    return (records || []).find(record => String(record.id || '').toLowerCase() === key || String(record.name || '').trim().toLowerCase() === key);
+}
+
+function worldArchitectApplyFields(target, fields, allowed, policy) {
+    if (policy === 'add_only') return 0;
+    let changed = 0;
+    allowed.forEach(key => {
+        if (!(key in fields)) return;
+        const old = target[key];
+        const blank = old == null || old === '' || (Array.isArray(old) && !old.length);
+        if (policy === 'fill_gaps' && !blank) return;
+        target[key] = safeJsonClone(fields[key]);
+        changed++;
+    });
+    return changed;
+}
+
+function applyWorldArchitectOperation(world, input, policy = 'fill_gaps') {
+    const op = normalizeWorldArchitectOperation(input);
+    if (!op) return { applied: false, reason: 'Unsupported or malformed operation.' };
+    const records = op.record;
+    const strings = value => (Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',') : []))
+        .map(item => String(item || '').trim()).filter(Boolean);
+    const idFor = (list, prefix, name) => op.id || records.id || `${prefix}_${worldDirectorySlug(name, prefix)}`;
+    const addRecord = (list, record, prefix) => {
+        const existing = worldArchitectFind(list, record.id) || worldArchitectFind(list, record.name);
+        if (existing) return { applied: true, idempotent: true, summary: `${record.name || record.id} already exists.` };
+        if (!record.name) return { applied: false, reason: `${op.type} needs a name.` };
+        list.push(record);
+        return { applied: true, summary: `Added ${record.name}.` };
+    };
+    world.locations ||= []; world.entities ||= []; world.regions ||= []; world.groups ||= []; world.factions ||= []; world.lorebook ||= [];
+    if (op.type === 'add_region') {
+        const name = String(records.name || '').trim().slice(0, 300);
+        return addRecord(world.regions, { id: idFor(world.regions, 'reg', name), name, description: String(records.description || '').slice(0, 4000), tags: strings(records.tags).slice(0, 30) }, 'reg');
+    }
+    if (op.type === 'add_location') {
+        const name = String(records.name || '').trim().slice(0, 300);
+        const region = worldArchitectFind(world.regions, records.regionId || records.region);
+        const parent = worldArchitectFind(world.locations, records.parentLocationId || records.parent);
+        if ((records.regionId || records.region) && !region) return { applied: false, reason: `Missing region: ${records.regionId || records.region}` };
+        if ((records.parentLocationId || records.parent) && !parent) return { applied: false, reason: `Missing parent location: ${records.parentLocationId || records.parent}` };
+        const mapType = WORLD_ARCHITECT_MAP_TYPES.has(records.mapType) ? records.mapType : (parent ? 'room' : 'area');
+        return addRecord(world.locations, {
+            id: idFor(world.locations, 'loc', name), name, description: String(records.description || '').slice(0, 6000),
+            regionId: region?.id || parent?.regionId || '', region: region?.name || '', parentLocationId: parent?.id || '', mapType,
+            tags: strings(records.tags).slice(0, 30), exits: []
+        }, 'loc');
+    }
+    if (op.type === 'connect_locations') {
+        const from = worldArchitectFind(world.locations, op.from || records.from);
+        const to = worldArchitectFind(world.locations, op.to || records.to);
+        if (!from || !to || from.id === to.id) return { applied: false, reason: 'Connection needs two existing, different locations.' };
+        upsertWorldTravelConnection(world, from, to, { mode: op.mode || records.mode || 'walk', travelTime: op.minutes || records.minutes || 1, isOneWay: op.oneWay || records.oneWay, routeName: records.routeName || '' });
+        return { applied: true, summary: `Connected ${from.name} and ${to.name}.` };
+    }
+    if (op.type === 'add_character' || op.type === 'add_item') {
+        const isItem = op.type === 'add_item';
+        const name = String(records.name || '').trim().slice(0, 300);
+        const place = worldArchitectFind(world.locations, records.startLocation || records.locationId);
+        const home = worldArchitectFind(world.locations, records.homeLocation || records.homeLocationId) || place;
+        if ((records.startLocation || records.locationId) && !place) return { applied: false, reason: `Missing location: ${records.startLocation || records.locationId}` };
+        const record = {
+            id: idFor(world.entities, isItem ? 'item' : 'npc', name), type: isItem ? 'item' : 'npc', name,
+            description: String(records.description || '').slice(0, 6000), startLocation: place?.id || world.startLocationId || world.locations[0]?.id || '',
+            tags: strings(records.tags).slice(0, 30)
+        };
+        if (!isItem) Object.assign(record, {
+            persona: String(records.persona || '').slice(0, 6000), homeLocation: home?.id || record.startLocation,
+            goal: String(records.goal || '').slice(0, 1000), goalSteps: strings(records.goalSteps).slice(0, 20),
+            groupIds: strings(records.groupIds || records.groups).map(ref => worldArchitectFind(world.groups, ref)?.id).filter(Boolean).slice(0, 20),
+            schedule: (Array.isArray(records.schedule) ? records.schedule : []).map(block => {
+                const location = worldArchitectFind(world.locations, block?.locationId || block?.location);
+                return location ? { ...safeJsonClone(block), locationId: location.id } : null;
+            }).filter(Boolean).slice(0, 30),
+            simulationDepth: ['background', 'recurring', 'core'].includes(records.simulationDepth) ? records.simulationDepth : 'recurring'
+        });
+        if (!isItem) {
+            const household = worldArchitectFind(world.groups, records.householdId || records.household);
+            record.householdId = household?.id || record.groupIds.find(id => world.groups.some(group => group.id === id && group.type === 'household')) || '';
+            if (record.householdId && !record.groupIds.includes(record.householdId)) record.groupIds.unshift(record.householdId);
+        }
+        return addRecord(world.entities, record, isItem ? 'item' : 'npc');
+    }
+    if (op.type === 'add_group' || op.type === 'add_faction') {
+        const list = op.type === 'add_group' ? world.groups : world.factions;
+        const prefix = op.type === 'add_group' ? 'grp' : 'fac';
+        const name = String(records.name || '').trim().slice(0, 300);
+        const home = op.type === 'add_group' && records.homeLocationId
+            ? worldArchitectFind(world.locations, records.homeLocationId) : null;
+        if (op.type === 'add_group' && records.homeLocationId && !home) return { applied: false, reason: `Missing group home location: ${records.homeLocationId}` };
+        return addRecord(list, {
+            id: idFor(list, prefix, name), name,
+            type: String(records.type || (op.type === 'add_group' ? 'organization' : '')).slice(0, 80),
+            description: String(records.description || '').slice(0, 5000), goal: String(records.goal || '').slice(0, 1000),
+            tags: strings(records.tags).slice(0, 30), ...(op.type === 'add_group' ? { homeLocationId: home?.id || '' } : {})
+        }, prefix);
+    }
+    if (op.type === 'update_group') {
+        const target = worldArchitectFind(world.groups, op.targetId || op.id || records.id || records.name);
+        if (!target) return { applied: false, reason: `Group update target not found: ${op.targetId || op.id || records.name}` };
+        const fields = { ...records, ...op.fields };
+        if ('homeLocationId' in fields && fields.homeLocationId && !worldArchitectFind(world.locations, fields.homeLocationId)) {
+            return { applied: false, reason: `Missing group home location: ${fields.homeLocationId}` };
+        }
+        if ('type' in fields && !['household', 'family', 'organization', 'crew', 'other'].includes(fields.type)) fields.type = 'other';
+        const changed = worldArchitectApplyFields(target, fields, ['name', 'type', 'description', 'homeLocationId', 'tags'], policy);
+        if (changed && target.type !== 'household') {
+            (world.entities || []).forEach(person => {
+                if (person.householdId === target.id) person.householdId = (person.groupIds || []).find(id => world.groups.some(group => group.id === id && group.type === 'household')) || '';
+            });
+        }
+        return changed ? { applied: true, summary: `Updated ${target.name}.` } : { applied: true, idempotent: true, summary: `No permitted gaps in ${target.name}.` };
+    }
+    if (op.type === 'merge_groups') {
+        if (policy !== 'allow_edits') return { applied: false, reason: 'Merging groups requires the Allow safe edits policy.' };
+        const source = worldArchitectFind(world.groups, op.from || records.from || records.sourceId);
+        const target = worldArchitectFind(world.groups, op.to || records.to || records.targetId);
+        if (!source || !target || source.id === target.id) return { applied: false, reason: 'Group merge needs two existing, different groups.' };
+        const sourceName = source.name;
+        mergeWorldGroupRecords(world, source.id, target.id);
+        return { applied: true, summary: `Merged ${sourceName} into ${target.name}.` };
+    }
+    if (op.type === 'delete_group') {
+        if (policy !== 'allow_edits') return { applied: false, reason: 'Deleting a group requires the Allow safe edits policy.' };
+        const target = worldArchitectFind(world.groups, op.targetId || op.id || records.id || records.name);
+        if (!target) return { applied: false, reason: 'Group delete target not found.' };
+        const name = target.name;
+        removeWorldGroupRecord(world, target.id);
+        return { applied: true, summary: `Deleted ${name}; its characters were kept.` };
+    }
+    if (op.type === 'add_relationship') {
+        const a = worldArchitectFind(world.entities, op.a || records.a);
+        const b = worldArchitectFind(world.entities, op.b || records.b);
+        if (!a || !b || a.id === b.id || a.type !== 'npc' || b.type !== 'npc') return { applied: false, reason: 'Relationship needs two existing characters.' };
+        world.relationships ||= [];
+        const existing = world.relationships.find(item => new Set([item.a, item.b]).has(a.id) && new Set([item.a, item.b]).has(b.id));
+        if (existing) return { applied: true, idempotent: true, summary: 'Relationship already exists.' };
+        world.relationships.push({ a: a.id, b: b.id, label: op.label || records.label || '', score: livingClamp(op.score || records.score || 0, -100, 100), reason: op.reason || records.reason || '' });
+        return { applied: true, summary: `Linked ${a.name} and ${b.name}.` };
+    }
+    if (op.type === 'add_lore') {
+        const keyword = op.keyword || records.keyword;
+        const text = op.text || records.text;
+        const existing = world.lorebook.find(item => String(item.keyword || '').trim().toLowerCase() === String(keyword || '').trim().toLowerCase());
+        if (existing) return { applied: true, idempotent: true, summary: `Lore “${keyword}” already exists.` };
+        if (!keyword || !text) return { applied: false, reason: 'Lore needs a keyword and text.' };
+        world.lorebook.push({ keyword, text });
+        return { applied: true, summary: `Added lore: ${keyword}.` };
+    }
+    const updateLists = {
+        update_region: [world.regions, ['name', 'description', 'tags']],
+        update_location: [world.locations, ['name', 'description', 'tags', 'mapType', 'parentLocationId', 'regionId']],
+        update_character: [world.entities, ['name', 'description', 'persona', 'startLocation', 'homeLocation', 'goal', 'goalSteps', 'groupIds', 'schedule', 'simulationDepth', 'tags']],
+        update_item: [world.entities, ['name', 'description', 'startLocation', 'tags']]
+    };
+    if (updateLists[op.type]) {
+        const [list, allowed] = updateLists[op.type];
+        const target = worldArchitectFind(list, op.targetId || op.id || records.id || records.name);
+        if (!target) return { applied: false, reason: `Update target not found: ${op.targetId || op.id || records.name}` };
+        if (op.type === 'update_character' && target.type !== 'npc') return { applied: false, reason: 'Character update target is not a character.' };
+        if (op.type === 'update_item' && target.type !== 'item') return { applied: false, reason: 'Item update target is not an item.' };
+        const changed = worldArchitectApplyFields(target, { ...records, ...op.fields }, allowed, policy);
+        return changed ? { applied: true, summary: `Updated ${target.name}.` } : { applied: true, idempotent: true, summary: `No permitted gaps in ${target.name}.` };
+    }
+    if (op.type === 'update_lore') {
+        const target = world.lorebook.find(item => String(item.keyword || '').toLowerCase() === String(op.keyword || op.targetId || records.keyword || '').toLowerCase());
+        if (!target) return { applied: false, reason: 'Lore update target not found.' };
+        const changed = worldArchitectApplyFields(target, { keyword: records.keyword, text: op.text || records.text }, ['keyword', 'text'], policy);
+        return changed ? { applied: true, summary: `Updated lore: ${target.keyword}.` } : { applied: true, idempotent: true, summary: 'No permitted lore gaps.' };
+    }
+    return { applied: false, reason: 'Operation was not handled.' };
+}
+
+function stageWorldArchitectJob(world, job) {
+    const staged = worldArchitectSnapshot(world);
+    const before = worldArchitectCountRecords(staged);
+    const dismissed = new Set((job?.dismissed || []).map(Number));
+    const results = [];
+    const priority = operation => ({
+        add_region: 10, add_location: 20, add_group: 30, add_faction: 30,
+        add_character: 40, add_item: 40, update_region: 50, update_location: 50,
+        update_group: 50, update_character: 50, update_item: 50, update_lore: 50,
+        connect_locations: 60, add_relationship: 70, merge_groups: 80, delete_group: 80
+    })[normalizeWorldArchitectOperation(operation)?.type] ?? 55;
+    let pending = (job?.operations || []).map((operation, index) => ({ operation, index }))
+        .filter(item => !dismissed.has(item.index))
+        .sort((left, right) => priority(left.operation) - priority(right.operation) || left.index - right.index);
+    // References may point to records created later in the same batch (a room
+    // to its new parent, a relationship to its new characters). Retry only
+    // failed atomic operations after each successful pass; successful ones are
+    // never replayed.
+    while (pending.length) {
+        const retry = [];
+        let progress = false;
+        pending.forEach(item => {
+            let outcome;
+            try { outcome = applyWorldArchitectOperation(staged, item.operation, job?.options?.policy || 'fill_gaps'); }
+            catch (error) { outcome = { applied: false, reason: error.message || String(error) }; }
+            if (outcome.applied) {
+                results.push({ index: item.index, ...outcome });
+                progress = true;
+            } else retry.push({ ...item, outcome });
+        });
+        if (!progress) {
+            retry.forEach(item => results.push({ index: item.index, ...item.outcome }));
+            break;
+        }
+        pending = retry;
+    }
+    results.sort((left, right) => left.index - right.index);
+    normalizeAuthoredWorld(staged);
+    const after = worldArchitectCountRecords(staged);
+    const deltas = Object.fromEntries(Object.keys(after).map(key => [key, after[key] - (before[key] || 0)]));
+    const blockers = results.filter(result => !result.applied).map(result => `Operation ${result.index + 1}: ${result.reason}`);
+    // A migration must be judged by what it introduces, not by unrelated
+    // damage that was already present in an imported or hand-authored world.
+    // The old implementation reran a whole-world audit and disabled Apply for
+    // defects such as a pre-existing missing exit—even when the staged batch
+    // only added characters.
+    const validationFor = candidate => {
+        const blocking = [];
+        const warnings = [];
+        try { validateWorldData(candidate); }
+        catch (error) {
+            const text = String(error.message || error).trim();
+            if (text) blocking.push({ key: `schema:${text.toLowerCase()}`, text });
+        }
+        validateWorldReferences(candidate).broken.forEach(item => {
+            const source = String(item.source || 'World reference').trim();
+            const ref = String(item.ref || '').trim();
+            blocking.push({ key: `reference:${source.toLowerCase()}|${ref.toLowerCase()}`, text: `${source}: missing “${ref}”.` });
+        });
+        buildWorldLintReport(candidate).forEach(item => {
+            // buildWorldLintReport uses sev/area/msg. Reading the unrelated
+            // severity/detail property names previously produced the empty
+            // yellow bullet visible in the broken review UI.
+            const text = [item.area, item.msg].filter(Boolean).join(': ').trim();
+            if (!text) return;
+            const entry = { key: `lint:${String(item.area || '').toLowerCase()}|${String(item.msg || '').toLowerCase()}`, text };
+            if (item.sev === 'critical') blocking.push(entry);
+            else warnings.push(entry);
+        });
+        return { blocking, warnings };
+    };
+    const baselineValidation = validationFor(worldArchitectSnapshot(world));
+    const stagedValidation = validationFor(staged);
+    const baselineBlockers = new Set(baselineValidation.blocking.map(item => item.key));
+    const baselineWarnings = new Set(baselineValidation.warnings.map(item => item.key));
+    const existingIssues = stagedValidation.blocking
+        .filter(item => baselineBlockers.has(item.key)).map(item => item.text);
+    stagedValidation.blocking
+        .filter(item => !baselineBlockers.has(item.key)).forEach(item => blockers.push(item.text));
+    Object.entries(job?.plan?.requestedCounts || {}).forEach(([key, expected]) => {
+        if (expected && deltas[key] !== expected) blockers.push(`Requested exactly ${expected} ${key}; selected operations produce ${deltas[key] || 0}.`);
+    });
+    const warnings = stagedValidation.warnings
+        .filter(item => !baselineWarnings.has(item.key)).map(item => item.text);
+    return {
+        world: staged, results,
+        blockers: [...new Set(blockers.filter(Boolean))],
+        warnings: [...new Set(warnings.filter(Boolean))],
+        existingIssues: [...new Set(existingIssues.filter(Boolean))],
+        deltas, health: worldDirectoryHealth(staged)
+    };
+}
+
+function worldArchitectIndex(world) {
+    const compact = {
+        name: world?.name, premise: world?.description, startLocationId: world?.startLocationId,
+        regions: (world?.regions || []).map(item => ({ id: item.id, name: item.name })),
+        locations: (world?.locations || []).map(item => ({ id: item.id, name: item.name, regionId: item.regionId, parentLocationId: item.parentLocationId, mapType: item.mapType })),
+        people: (world?.entities || []).filter(item => item.type === 'npc').map(item => ({ id: item.id, name: item.name, homeLocation: item.homeLocation, groupIds: item.groupIds })),
+        items: (world?.entities || []).filter(item => item.type === 'item').map(item => ({ id: item.id, name: item.name, startLocation: item.startLocation })),
+        groups: (world?.groups || []).map(item => ({ id: item.id, name: item.name, type: item.type })),
+        factions: (world?.factions || []).map(item => ({ id: item.id, name: item.name }))
+    };
+    const text = JSON.stringify(compact);
+    return text.length > 90000 ? text.slice(0, 90000) + '…' : text;
+}
+
+function worldArchitectOperationArray(raw) {
+    if (Array.isArray(raw)) return raw;
+    if (!isPlainObject(raw)) return [];
+    for (const key of ['operations', 'changes', 'actions', 'edits', 'proposals']) {
+        if (Array.isArray(raw[key])) return raw[key];
+    }
+    const domainTypes = {
+        regions: 'add_region', locations: 'add_location', places: 'add_location', rooms: 'add_room',
+        characters: 'add_character', people: 'add_character', npcs: 'add_character', items: 'add_item',
+        groups: 'add_group', households: 'add_household', families: 'add_family', factions: 'add_faction',
+        relationships: 'add_relationship', lore: 'add_lore', lorebook: 'add_lore'
+    };
+    return Object.entries(domainTypes).flatMap(([key, type]) =>
+        Array.isArray(raw[key]) ? raw[key].filter(isPlainObject).map(record => ({ type, record })) : []);
+}
+
+function parseWorldArchitectJSON(raw, expectedKey = '') {
+    if (isPlainObject(raw)) {
+        if (!expectedKey || Array.isArray(raw[expectedKey])) return raw;
+        if (expectedKey === 'operations') {
+            const operations = worldArchitectOperationArray(raw);
+            if (operations.length) return { ...raw, operations };
+        }
+        for (const key of ['result', 'output', 'data', 'response', 'arguments']) {
+            if (raw[key] != null) {
+                const nested = parseWorldArchitectJSON(raw[key], expectedKey);
+                if (nested) return nested;
+            }
+        }
+    }
+    if (Array.isArray(raw)) return expectedKey ? { [expectedKey]: raw } : null;
+    const source = String(raw || '').trim();
+    if (!source) return null;
+    const candidates = [source];
+    for (const match of source.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) candidates.push(match[1]);
+    const anchor = expectedKey ? source.indexOf(`"${expectedKey}"`) : -1;
+    if (anchor >= 0) candidates.push(source.slice(Math.max(0, source.lastIndexOf('{', anchor)), source.length));
+
+    // Models often surround the payload with reasoning or emit several JSON
+    // objects. Scan balanced blocks instead of taking the first and last brace,
+    // which accidentally joins unrelated objects into invalid JSON.
+    const balancedBlocks = (text, open, close) => {
+        const blocks = [];
+        for (let start = text.indexOf(open); start >= 0; start = text.indexOf(open, start + 1)) {
+            let depth = 0, quote = '', escaped = false;
+            for (let index = start; index < text.length; index++) {
+                const char = text[index];
+                if (quote) {
+                    if (escaped) escaped = false;
+                    else if (char === '\\') escaped = true;
+                    else if (char === quote) quote = '';
+                    continue;
+                }
+                if (char === '"' || char === "'") { quote = char; continue; }
+                if (char === open) depth++;
+                else if (char === close && --depth === 0) { blocks.push(text.slice(start, index + 1)); break; }
+            }
+        }
+        return blocks;
+    };
+    candidates.push(...balancedBlocks(source, '{', '}'));
+    if (expectedKey) candidates.push(...balancedBlocks(source, '[', ']'));
+    for (const candidate of candidates) {
+        let parsed = null;
+        try { parsed = JSON.parse(String(candidate).trim()); }
+        catch (_) { parsed = safeParseJSONRepair(candidate); }
+        if (isPlainObject(parsed)) {
+            if (!expectedKey || Array.isArray(parsed[expectedKey])) return parsed;
+            if (expectedKey === 'operations') {
+                const operations = worldArchitectOperationArray(parsed);
+                if (operations.length) return { ...parsed, operations };
+            }
+            for (const key of ['result', 'output', 'data', 'response', 'arguments']) {
+                if (parsed[key] != null) {
+                    const nested = parseWorldArchitectJSON(parsed[key], expectedKey);
+                    if (nested) return nested;
+                }
+            }
+        }
+        if (Array.isArray(parsed) && expectedKey) return { [expectedKey]: parsed };
+    }
+    return null;
+}
+
+function worldArchitectResponseCandidates(payload) {
+    const message = payload?.choices?.[0]?.message || {};
+    const content = Array.isArray(message.content)
+        ? message.content.map(part => typeof part === 'string' ? part : part?.text || part?.content || '').join('')
+        : message.content;
+    return [
+        content, payload?.choices?.[0]?.text, payload?.output_text,
+        ...(message.tool_calls || []).map(call => call?.function?.arguments),
+        message.function_call?.arguments, message.reasoning_content, message.reasoning
+    ].filter(value => value != null && String(value).trim());
+}
+
+async function worldArchitectJSON(world, model, messages, maxTokens = 8000, expectedKey = '') {
+    let lastError = null;
+    let previousRaw = '';
+    let useResponseFormat = true;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const retryMessages = attempt === 0 ? messages : [
+            ...messages,
+            ...(previousRaw ? [{ role: 'assistant', content: previousRaw.slice(-6000) }] : []),
+            { role: 'user', content: `Your previous reply was not valid structured output. Return ONLY one JSON object with a top-level "${expectedKey || 'result'}" field. No reasoning, prose or markdown fences.` }
+        ];
+        const requestBody = {
+            model, max_tokens: maxTokens, temperature: attempt ? 0 : 0.2,
+            messages: sanitizeMessagesForProvider(retryMessages, model)
+        };
+        if (useResponseFormat) requestBody.response_format = { type: 'json_object' };
+        const response = await fetch(apiBase() + '/chat/completions', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() },
+            body: JSON.stringify(requestBody)
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            lastError = new Error(payload?.error?.message || `Director request failed (${response.status}).`);
+            // Some otherwise capable OpenAI-compatible servers reject the
+            // response_format parameter itself. Retry once with prompt-only JSON.
+            if (attempt === 0 && [400, 404, 422].includes(response.status)
+                && /response.?format|json.?object|unsupported|unknown/i.test(lastError.message)) {
+                useResponseFormat = false;
+                continue;
+            }
+            throw lastError;
+        }
+        const candidates = worldArchitectResponseCandidates(payload);
+        previousRaw = candidates.map(String).join('\n');
+        for (const candidate of candidates) {
+            const parsed = parseWorldArchitectJSON(candidate, expectedKey);
+            if (parsed) return parsed;
+        }
+        lastError = new Error(`The model returned no usable ${expectedKey || 'JSON'} object.`);
+    }
+    throw new Error(`${lastError?.message || 'Invalid structured response'} A strict repair retry also failed.`);
+}
+
+function worldArchitectSyncBasics(world) {
+    const fields = [['w-studio-name', 'name'], ['w-studio-desc', 'description'], ['w-studio-dm-prompt', 'dmPrompt'], ['w-studio-intro', 'intro'], ['w-studio-note', 'authorNote']];
+    fields.forEach(([id, key]) => { const input = document.getElementById(id); if (input) world[key] = input.value; });
+}
+
+async function persistWorldArchitectCheckpoint(world, clear = false) {
+    const index = state.worlds.findIndex(candidate => candidate.id === world?.id);
+    if (index < 0) return;
+    if (clear || !world.architectJob) delete state.worlds[index].architectJob;
+    else state.worlds[index].architectJob = safeJsonClone(world.architectJob);
+    await saveState();
+}
+
+async function populateWorldArchitectModels(force = false) {
+    const input = document.getElementById('w-architect-model');
+    const list = document.getElementById('w-architect-model-options');
+    const status = document.getElementById('w-architect-model-status');
+    if (!input || !list) return;
+    try {
+        if (force) { openRouterModels = []; modelCatalogSource = null; modelCatalogFetchedAt = 0; }
+        const catalog = await getOpenRouterModels();
+        const models = rankStructuredModels(catalog, 60);
+        list.innerHTML = models.map(model => `<option value="${escapeHTML(model.id)}">${escapeHTML(model.name)} · ${escapeHTML(model.note)}</option>`).join('');
+        // Do not make an expensive frontier model the silent default merely
+        // because it tops the capability ranking. Choose the first strong,
+        // current option at or below $5/M while leaving the full list visible.
+        const automatic = models.find(model => model.price > 0 && model.price <= 5) || models[0];
+        input.dataset.recommendedModel = automatic?.id || '';
+        const fetched = modelCatalogFetchedAt ? new Date(modelCatalogFetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'now';
+        status.textContent = models.length
+            ? `${models.length} compatible models from the live ${isLocalProvider() ? 'local server' : cloudProviderName()} /models catalog (${catalog.length} total), fetched ${fetched}. Blank auto-selects ${automatic.id} as a capable cost-balanced choice.`
+            : `The live ${isLocalProvider() ? 'local server' : cloudProviderName()} /models endpoint returned no compatible structured models. You may type an exact model ID.`;
+    } catch (error) { status.textContent = `Catalog unavailable: ${error.message}. You may type an exact model ID.`; }
+}
+
+function worldArchitectOperationLabel(operation) {
+    const op = normalizeWorldArchitectOperation(operation) || {};
+    return op.record?.name || op.keyword || op.label || op.targetId || op.id || `${op.from || ''}${op.to ? ` → ${op.to}` : ''}` || 'change';
+}
+
+function renderWorldArchitectAgent() {
+    const world = state.editingWorld;
+    const host = document.getElementById('w-architect-job');
+    if (!world || !host) return;
+    const job = world.architectJob;
+    if (!job) {
+        host.innerHTML = '<div class="world-architect-empty"><strong>No staged job</strong><p>Describe an expansion or repair. Horde will show assumptions, batches and expected calls before generating anything.</p></div>';
+        return;
+    }
+    // Jobs saved by the first Architect build treated a perfectly usable
+    // deterministic fallback as a red error. Repair that presentation in place
+    // so users do not have to discard and recreate an already-valid plan.
+    if (job.plan && String(job.error || '').startsWith('Planner fallback used:')) {
+        job.notice = `Horde used its safe deterministic plan because the Director's planning reply was not structured. You can continue normally.`;
+        job.error = '';
+    }
+    const completed = (job.completedBatchIds || []).length;
+    const total = job.plan?.batches?.length || 0;
+    const stage = job.status === 'review' && job.operations?.length ? stageWorldArchitectJob(world, job) : null;
+    const reviewDeltas = stage?.deltas || job.appliedDeltas || {};
+    const counts = job.plan?.requestedCounts || {};
+    host.innerHTML = `<div class="world-architect-job-head"><div><span class="world-architect-kicker">${escapeHTML(job.options?.policy || 'fill gaps')} · ${escapeHTML(job.model || '')}</span><h3>${escapeHTML(job.plan?.title || 'Planning changes')}</h3><small>${escapeHTML(job.request || '')}</small></div><span class="world-architect-status">${escapeHTML(job.status || 'draft')}</span></div>
+        ${job.error ? `<p class="world-architect-error">${escapeHTML(job.error)}</p>` : ''}
+        ${job.notice ? `<p class="world-architect-warning">${escapeHTML(job.notice)}</p>` : ''}
+        ${job.plan ? `<div class="world-architect-plan-summary"><p>${escapeHTML(job.plan.summary || '')}</p><div class="world-architect-counts">${Object.entries(counts).filter(([, value]) => value).map(([key, value]) => `<span>${value} ${escapeHTML(key)}</span>`).join('') || '<span>No exact numeric target</span>'}<span>${job.plan.estimatedCalls || job.plan.batches.length} Director call${(job.plan.estimatedCalls || job.plan.batches.length) === 1 ? '' : 's'}</span></div>${(job.plan.assumptions || []).map(item => `<small>• ${escapeHTML(item)}</small>`).join('<br>')}</div>` : '<p>Asking the Director to structure the work…</p>'}
+        ${job.status === 'planned' ? `<div class="world-architect-batches">${job.plan.batches.map((batch, index) => `<div class="world-architect-batch"><strong>${index + 1}</strong><div><strong>${escapeHTML(batch.label)}</strong><small>${escapeHTML(batch.instruction)}</small></div></div>`).join('')}</div>` : ''}
+        ${['running', 'failed', 'cancelled'].includes(job.status) ? `<div class="world-architect-progress"><span style="width:${total ? Math.round(completed / total * 100) : 0}%"></span></div><p>${completed} of ${total} batches complete · ${job.operations?.length || 0} proposed operations</p>` : ''}
+        ${job.status === 'review' || job.status === 'applied' ? `<div class="world-architect-counts">${Object.entries(reviewDeltas).filter(([, value]) => value).map(([key, value]) => `<span>+${value} ${escapeHTML(key)}</span>`).join('') || '<span>No net additions</span>'}<span>Health ${stage?.health?.score ?? job.appliedHealth ?? '—'}%</span></div>
+            ${stage?.blockers?.length ? `<div class="world-architect-validation is-blocking"><strong>${stage.blockers.length} proposed-change blocker${stage.blockers.length === 1 ? '' : 's'}</strong>${stage.blockers.slice(0, 8).map(item => `<p class="world-architect-error">⚠ ${escapeHTML(item)}</p>`).join('')}</div>` : ''}
+            ${stage?.existingIssues?.length ? `<details class="world-architect-validation is-existing"><summary>${stage.existingIssues.length} pre-existing world issue${stage.existingIssues.length === 1 ? '' : 's'} — does not block this batch</summary>${stage.existingIssues.slice(0, 12).map(item => `<p class="world-architect-warning">• ${escapeHTML(item)}</p>`).join('')}</details>` : ''}
+            ${(stage?.warnings || []).slice(0, 5).map(item => `<p class="world-architect-warning">• ${escapeHTML(item)}</p>`).join('')}
+            ${job.status === 'review' ? `<div class="world-architect-operations">${(job.operations || []).map((operation, index) => `<label class="world-architect-operation ${(job.dismissed || []).includes(index) ? 'is-dismissed' : ''}"><input type="checkbox" data-world-architect-operation="${index}" ${(job.dismissed || []).includes(index) ? '' : 'checked'}><div><strong>${escapeHTML(String(operation.type || '').replaceAll('_', ' '))}: ${escapeHTML(worldArchitectOperationLabel(operation))}</strong><small>${escapeHTML(operation.reason || operation.record?.description || '')}</small></div></label>`).join('')}</div>` : '<p>Changes are in the draft. Use Undo below or Save World to keep them.</p>'}` : ''}
+        <div class="world-architect-actions">
+            ${job.status === 'planned' ? '<button class="btn btn-primary" data-world-architect-action="generate">Approve plan &amp; generate</button>' : ''}
+            ${job.status === 'running' ? '<button class="btn btn-ghost" data-world-architect-action="cancel">Pause after this batch</button>' : ''}
+            ${['failed', 'cancelled'].includes(job.status) ? '<button class="btn btn-primary" data-world-architect-action="generate">Resume remaining batches</button>' : ''}
+            ${job.status === 'review' ? `<button class="btn ${stage?.blockers?.length ? 'btn-ghost' : 'btn-primary'}" data-world-architect-action="apply">${stage?.blockers?.length ? `Review ${stage.blockers.length} blocker${stage.blockers.length === 1 ? '' : 's'}` : `Apply ${job.operations.length - (job.dismissed || []).length} changes &amp; save`}</button>` : ''}
+            ${world.architectUndo ? '<button class="btn btn-ghost" data-world-architect-action="undo">Undo last apply</button>' : ''}
+            ${job.status !== 'running' ? '<button class="btn btn-ghost" data-world-architect-action="discard">Discard job</button>' : ''}
+        </div>`;
+    host.querySelectorAll('[data-world-architect-operation]').forEach(input => input.onchange = () => {
+        const index = Number(input.dataset.worldArchitectOperation);
+        job.dismissed ||= [];
+        job.dismissed = input.checked ? job.dismissed.filter(item => item !== index) : [...new Set([...job.dismissed, index])];
+        void persistWorldArchitectCheckpoint(world);
+        renderWorldArchitectAgent();
+    });
+    host.querySelectorAll('[data-world-architect-action]').forEach(button => button.onclick = () => handleWorldArchitectAction(button.dataset.worldArchitectAction));
+}
+
+async function planWorldArchitectJob() {
+    const world = state.editingWorld;
+    const request = document.getElementById('w-architect-request')?.value.trim();
+    if (!world || !request) return showToast('Describe what the Architect should change.', 'info');
+    if (!hasApiCredentials()) return showToast('Configure a text provider first.', 'error');
+    worldArchitectSyncBasics(world);
+    const options = {
+        scope: document.getElementById('w-architect-scope')?.value || 'whole',
+        policy: WORLD_ARCHITECT_POLICIES.has(document.getElementById('w-architect-policy')?.value) ? document.getElementById('w-architect-policy').value : 'fill_gaps',
+        detail: document.getElementById('w-architect-detail')?.value || 'standard',
+        batchSize: Number(document.getElementById('w-architect-batch-size')?.value) || 12
+    };
+    const modelInput = document.getElementById('w-architect-model');
+    const model = modelInput?.value.trim() || modelInput?.dataset.recommendedModel || structuredModelFor(world);
+    const fallback = defaultWorldArchitectPlan(world, request, options);
+    const job = world.architectJob = {
+        id: `architect_${Date.now()}`, request, options, model, status: 'planning', plan: null, operations: [], dismissed: [],
+        completedBatchIds: [], baseRevision: Number(world.authoringRevision) || 0, baseFingerprint: worldArchitectFingerprint(world), createdAt: Date.now(), updatedAt: Date.now()
+    };
+    renderWorldArchitectAgent();
+    await persistWorldArchitectCheckpoint(world);
+    const hasExactCounts = Object.values(fallback.requestedCounts).some(Boolean);
+    try {
+        // Numeric requests already have a safer engine-owned plan. Asking a
+        // model to repeat “7 people in one batch” only adds latency and a JSON
+        // failure point, while normalizeWorldArchitectPlan must ignore its
+        // re-batching anyway.
+        if (hasExactCounts) {
+            job.plan = fallback;
+            job.notice = 'Exact quantities use Horde’s deterministic resumable batching; the Director will write the records after approval.';
+        } else {
+            const raw = await worldArchitectJSON(world, model, [
+                { role: 'system', content: 'You plan safe, incremental edits to an existing roleplay world. Return only JSON. Never reduce an explicit requested count. Plan small resumable batches; do not write the records yet.' },
+                { role: 'user', content: `REQUEST: ${request}\nOPTIONS: ${JSON.stringify(options)}\nEXACT COUNTS: ${JSON.stringify(fallback.requestedCounts)}\nCURRENT WORLD INDEX: ${worldArchitectIndex(world)}\nReturn {"title":"","summary":"","assumptions":[],"batches":[{"label":"","instruction":"","expectedCounts":{"rooms":0,"locations":0,"people":0,"items":0,"regions":0,"groups":0,"factions":0,"lore":0}}]}.` }
+            ], 3000, 'batches');
+            job.plan = normalizeWorldArchitectPlan(raw, fallback);
+        }
+    } catch (error) {
+        job.plan = fallback;
+        job.notice = `The Director's planning reply was not structured, so Horde used its safe one-batch plan. You can continue normally. (${error.message})`;
+    }
+    job.status = 'planned'; job.updatedAt = Date.now();
+    await persistWorldArchitectCheckpoint(world);
+    renderWorldArchitectAgent();
+}
+
+async function runWorldArchitectJob() {
+    const world = state.editingWorld;
+    const job = world?.architectJob;
+    if (!world || !job?.plan) return;
+    worldArchitectSyncBasics(world);
+    // Repair plans created by the earlier positional merge bug in place. This
+    // lets an already-failed job Resume without forcing the author to discard
+    // completed, valid batches.
+    job.plan = normalizeWorldArchitectPlan(job.plan, defaultWorldArchitectPlan(world, job.request, job.options));
+    if (worldArchitectFingerprint(world) !== job.baseFingerprint || (Number(world.authoringRevision) || 0) !== job.baseRevision) {
+        job.status = 'failed'; job.error = 'The world changed after this plan was created. Discard it and make a fresh plan.'; renderWorldArchitectAgent(); return;
+    }
+    job.status = 'running'; job.error = ''; job.cancelRequested = false; renderWorldArchitectAgent();
+    for (const batch of job.plan.batches) {
+        if ((job.completedBatchIds || []).includes(batch.id)) continue;
+        if (job.cancelRequested) {
+            job.status = 'cancelled'; job.updatedAt = Date.now();
+            await persistWorldArchitectCheckpoint(world);
+            renderWorldArchitectAgent(); return;
+        }
+        try {
+            const current = stageWorldArchitectJob(world, { ...job, plan: { requestedCounts: {} } }).world;
+            const batchMessages = [
+                { role: 'system', content: `You are a roleplay World Architect. Return JSON only: {"operations":[]}. Allowed operation types: ${[...WORLD_ARCHITECT_OPERATION_TYPES].join(', ')}. Never delete locations, people, items, factions or lore. delete_group and merge_groups are permitted only when the user's request explicitly asks for that and the change policy allows edits. Use existing IDs exactly. New records need stable snake_case IDs. Put new data inside "record". A location operation is {"type":"add_location","record":{"id":"loc_example","name":"Example","description":"...","regionId":"existing_region_id","parentLocationId":"","mapType":"room","tags":[]}}. A character uses record {id,name,description,persona,startLocation,homeLocation,goal,goalSteps,groupIds,schedule,tags}; a group uses {id,name,type,description,homeLocationId,tags}; connections use from,to,mode,minutes,oneWay. Every operation is atomic.` },
+                { role: 'user', content: `ORIGINAL REQUEST: ${job.request}\nPOLICY: ${job.options.policy}; DETAIL: ${job.options.detail}\nTHIS BATCH: ${batch.instruction}\nEXACT BATCH COUNTS: ${JSON.stringify(batch.expectedCounts)}\nCURRENT STAGED WORLD INDEX: ${worldArchitectIndex(current)}\nGenerate only this batch. Respect the exact counts and make additions coherent, playable and reference-valid.` }
+            ];
+            const maxTokens = Math.max(6000, Math.min(24000, (job.options.batchSize || 12) * 900));
+            let raw = await worldArchitectJSON(world, job.model, batchMessages, maxTokens, 'operations');
+            let operations = worldArchitectOperationArray(raw)
+                .map((operation, index) => normalizeWorldArchitectOperation(operation, job.operations.length + index)).filter(Boolean);
+            if (!operations.length) {
+                // A syntactically valid object used to bypass JSON repair and
+                // then die here if its operation vocabulary was slightly off.
+                // Give the model one validation-aware correction with the exact
+                // rejected payload and schema instead of asking the user to
+                // discard an otherwise healthy resumable job.
+                raw = await worldArchitectJSON(world, job.model, [
+                    ...batchMessages,
+                    { role: 'assistant', content: JSON.stringify(raw).slice(0, 12000) },
+                    { role: 'user', content: `That JSON parsed, but none of its entries used a supported operation schema. Rewrite the same requested changes as {"operations":[{"type":"one exact allowed type","record":{}}]}. Exact allowed types: ${[...WORLD_ARCHITECT_OPERATION_TYPES].join(', ')}. Return only the corrected JSON object.` }
+                ], maxTokens, 'operations');
+                operations = worldArchitectOperationArray(raw)
+                    .map((operation, index) => normalizeWorldArchitectOperation(operation, job.operations.length + index)).filter(Boolean);
+            }
+            if (!operations.length) throw new Error('The model returned JSON, but no supported changes could be recovered after a schema repair retry.');
+            const generatedCounts = worldArchitectOperationCounts(operations);
+            const mismatch = Object.entries(batch.expectedCounts || {}).find(([key, expected]) => Number(expected) > 0 && generatedCounts[key] !== Number(expected));
+            if (mismatch) throw new Error(`The model produced ${generatedCounts[mismatch[0]] || 0} ${mismatch[0]}, but this batch requires exactly ${mismatch[1]}. Retry this batch or choose a stronger structured model.`);
+            operations.forEach(operation => { operation.batchId = batch.id; });
+            job.operations.push(...operations);
+            job.completedBatchIds.push(batch.id);
+            job.updatedAt = Date.now();
+            await persistWorldArchitectCheckpoint(world);
+            renderWorldArchitectAgent();
+        } catch (error) {
+            job.status = 'failed'; job.error = `Stopped at ${batch.label}: ${error.message}`; job.updatedAt = Date.now();
+            await persistWorldArchitectCheckpoint(world);
+            renderWorldArchitectAgent(); return;
+        }
+    }
+    job.status = 'review'; job.updatedAt = Date.now();
+    await persistWorldArchitectCheckpoint(world);
+    renderWorldArchitectAgent();
+}
+
+async function handleWorldArchitectAction(action) {
+    const world = state.editingWorld;
+    const job = world?.architectJob;
+    if (!world || !job) return;
+    if (action === 'generate') return runWorldArchitectJob();
+    if (action === 'cancel') { job.cancelRequested = true; showToast('The Architect will pause after the current request.', 'info'); return; }
+    if (action === 'discard') {
+        delete world.architectJob;
+        await persistWorldArchitectCheckpoint(world, true);
+        renderWorldArchitectAgent(); return;
+    }
+    if (action === 'undo' && world.architectUndo?.snapshot) {
+        state.editingWorld = safeJsonClone(world.architectUndo.snapshot);
+        const index = state.worlds.findIndex(candidate => candidate.id === state.editingWorld.id);
+        if (index >= 0) state.worlds[index] = safeJsonClone(state.editingWorld);
+        await saveState();
+        await verifyWorldPersisted(state.editingWorld);
+        openWorldStudio();
+        document.querySelector('.world-studio-tab[data-tab="w-architect-agent"]')?.click();
+        showToast('Architect changes undone and saved.', 'success');
+        return;
+    }
+    if (action === 'apply') {
+        worldArchitectSyncBasics(world);
+        if (worldArchitectFingerprint(world) !== job.baseFingerprint || (Number(world.authoringRevision) || 0) !== job.baseRevision) {
+            job.error = 'The world changed after this plan was created. Discard it and make a fresh plan.';
+            showToast(job.error, 'error'); renderWorldArchitectAgent(); return;
+        }
+        const staged = stageWorldArchitectJob(world, job);
+        if (staged.blockers.length) {
+            job.error = `Cannot apply yet: ${staged.blockers[0]}`;
+            showToast(job.error, 'error'); renderWorldArchitectAgent(); return;
+        }
+        const before = worldArchitectSnapshot(world);
+        staged.world.authoringRevision = job.baseRevision + 1;
+        staged.world.architectUndo = { jobId: job.id, createdAt: Date.now(), snapshot: before };
+        staged.world.architectJob = { ...job, status: 'applied', appliedDeltas: staged.deltas, appliedHealth: staged.health.score, updatedAt: Date.now() };
+        const index = state.worlds.findIndex(candidate => candidate.id === staged.world.id);
+        const previousStoredWorld = index >= 0 ? safeJsonClone(state.worlds[index]) : null;
+        state.editingWorld = staged.world;
+        if (index >= 0) state.worlds[index] = safeJsonClone(staged.world);
+        try {
+            await saveState();
+            await verifyWorldPersisted(staged.world);
+        } catch (error) {
+            // Do not strand the editor on an in-memory revision that was not
+            // durably committed. Keep the review intact so Apply can be retried.
+            state.editingWorld = world;
+            if (index >= 0 && previousStoredWorld) state.worlds[index] = previousStoredWorld;
+            job.status = 'review';
+            job.error = `The changes were valid, but could not be saved: ${error.message}`;
+            showToast(job.error, 'error');
+            renderWorldArchitectAgent();
+            return;
+        }
+        openWorldStudio();
+        document.querySelector('.world-studio-tab[data-tab="w-architect-agent"]')?.click();
+        showToast('Architect changes applied and saved.', 'success');
+    }
+}
+
+function setupWorldArchitectLogic() {
+    const plan = document.getElementById('w-architect-plan-btn');
+    if (!plan || plan.dataset.ready) return;
+    plan.dataset.ready = '1';
+    plan.onclick = () => void planWorldArchitectJob();
+    document.getElementById('w-architect-refresh-models').onclick = () => void populateWorldArchitectModels(true);
+    document.querySelectorAll('[data-world-architect-quick]').forEach(button => button.onclick = () => {
+        const input = document.getElementById('w-architect-request');
+        input.value = [input.value.trim(), button.dataset.worldArchitectQuick].filter(Boolean).join('\n');
+        input.focus();
+    });
+    void populateWorldArchitectModels();
+}
+
 // --- World Calibration -----------------------------------------------------
 // A hand-authored world leaves most of the engine asleep: no stats, no NPC
 // homes, no schedules, no relationships, no markets, no travel times, rooms that
@@ -30258,9 +31366,9 @@ function applyCalibrationFinding(world, finding) {
 // it is being asked to hit a JSON contract by luck.
 const STRUCTURED_PARAM_FLAGS = Object.freeze(['response_format', 'structured_outputs']);
 
-// Reasoning models are the specific failure this picker exists to avoid: they
-// spend the whole budget thinking and emit nothing usable. The catalog reports
-// the parameters that mark one.
+// This describes a capability, not a reason to exclude a model. Modern models
+// often advertise optional reasoning alongside reliable structured output;
+// treating that flag as “reasoning-only” hid most current frontier models.
 const REASONING_PARAM_FLAGS = Object.freeze(['reasoning', 'include_reasoning', 'thinking']);
 
 // A batch's answer has to fit in one reply. Below this, a model cannot finish
@@ -30297,8 +31405,8 @@ function structuredModelPricePerMillion(model) {
 }
 
 /**
- * Rank the live catalog for structured work: can emit JSON, is not a reasoning
- * model, has room for a world digest, and is cheap. Returns [] when the
+ * Rank the live catalog for structured work: can emit JSON, has room for a
+ * world digest and a complete reply, and has not expired. Returns [] when the
  * catalog has not loaded, so the picker degrades to a plain text field rather
  * than offering ids that may no longer resolve.
  */
@@ -30316,6 +31424,8 @@ function rankStructuredModels(models, limit = 12) {
                 // silently truncating replies — not the context window.
                 maxOutput: Number(model?.top_provider?.max_completion_tokens) || 0,
                 price,
+                created: Number(model?.created) || 0,
+                expirationDate: String(model?.expiration_date || ''),
                 json: STRUCTURED_PARAM_FLAGS.some(flag => params.includes(flag)),
                 reasoning: REASONING_PARAM_FLAGS.some(flag => params.includes(flag)),
                 // Sorting by price alone put two music-generation models at the
@@ -30327,13 +31437,15 @@ function rankStructuredModels(models, limit = 12) {
                 free: price === 0
             };
         })
-        .filter(model => model.id && model.json && !model.reasoning && model.textOnly
+        // Batch-only slugs are not suitable for this synchronous, resumable UI.
+        .filter(model => model.id && !/:batch$/i.test(model.id) && model.json && model.textOnly
             && model.context >= 32000          // a world digest has to fit
             // The reply has to fit too. A model that can only write 4k tokens
             // will truncate a batch however cheap it is — this is the exact
             // ceiling that was failing, so it is now a hard requirement.
             && (model.maxOutput === 0 || model.maxOutput >= STRUCTURED_MIN_OUTPUT_TOKENS)
-            && model.price != null)
+            && model.price != null
+            && (!model.expirationDate || Date.parse(model.expirationDate) > Date.now()))
         // Cheapest first was the wrong order: it put 4-billion-parameter models
         // at the top, and small models are exactly the ones that lose the
         // thread of a long structured answer. Sort by capability band first,
@@ -30341,6 +31453,7 @@ function rankStructuredModels(models, limit = 12) {
         // actually finish the job.
         .sort((left, right) =>
             structuredCapabilityBand(right) - structuredCapabilityBand(left)
+            || right.created - left.created
             || left.price - right.price)
         .slice(0, limit)
         .map(model => {
@@ -30348,7 +31461,8 @@ function rankStructuredModels(models, limit = 12) {
                 ? 'free'
                 : '$' + (model.price < 1 ? model.price.toFixed(3) : model.price.toFixed(2)) + '/M';
             const out = model.maxOutput ? `${Math.round(model.maxOutput / 1000)}k out` : 'output unstated';
-            return { ...model, note: `${price} · ${Math.round(model.context / 1000)}k ctx · ${out}` };
+            const added = model.created ? ` · added ${new Date(model.created * 1000).getFullYear()}` : '';
+            return { ...model, note: `${price} · ${Math.round(model.context / 1000)}k ctx · ${out}${added}${model.reasoning ? ' · reasoning-capable' : ''}` };
         });
 }
 
@@ -31680,7 +32794,7 @@ function wireCalibrationControls(world, calibration, container) {
                     ? `<option value="${escapeHTML(chosen)}" selected>${escapeHTML(chosen)} (typed)</option>` : '');
             if (!status) return;
             status.textContent = ranked.length
-                ? `${ranked.length} models offered, cheapest first — live from ${isLocalProvider() ? 'your local server' : cloudProviderName()}, so nothing here is a stale id.`
+                ? `${ranked.length} capable models offered — live from ${isLocalProvider() ? 'your local server' : cloudProviderName()}, ranked by output capacity, recency and then price.`
                 : `Could not reach the ${isLocalProvider() ? 'local' : cloudProviderName()} catalog. Type a model id above, or press Refresh once you are online.`;
         };
         if (refresh) refresh.onclick = () => populate(true);
@@ -33369,12 +34483,29 @@ function normalizeCompanionTrauma(raw) {
 }
 
 function normalizeCompanionMemoryEntry(raw) {
+    const text = String(raw?.text || '').trim().slice(0, 500);
+    const semanticKey = String(raw?.semanticKey || text).toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240);
     return {
-        id: String(raw?.id || livingId('mem', raw?.text)).slice(0, 80),
-        text: String(raw?.text || '').trim().slice(0, 500),
-        kind: ['fact', 'trauma', 'preference', 'milestone'].includes(raw?.kind) ? raw.kind : 'fact',
+        id: String(raw?.id || livingId('mem', text)).slice(0, 80),
+        text,
+        kind: ['fact', 'claim', 'observation', 'inference', 'trauma', 'preference', 'milestone'].includes(raw?.kind)
+            ? raw.kind : 'fact',
         weight: livingClamp(raw?.weight == null ? 50 : raw.weight, 0, 100),
-        createdAt: Number.isFinite(raw?.createdAt) ? raw.createdAt : Date.now()
+        certainty: livingClamp(Number.isFinite(Number(raw?.certainty)) ? Number(raw.certainty) : 100, 0, 100),
+        subject: String(raw?.subject || 'player').trim().slice(0, 100),
+        source: ['player_statement', 'observed_behavior', 'companion_statement', 'media', 'observed_media', 'social', 'manual', 'author_correction', 'legacy']
+            .includes(raw?.source) ? raw.source : 'legacy',
+        sourceMessageIds: (Array.isArray(raw?.sourceMessageIds) ? raw.sourceMessageIds : [])
+            .map(value => String(value).slice(0, 100)).filter(Boolean).slice(-20),
+        semanticKey,
+        status: ['active', 'superseded', 'forgotten'].includes(raw?.status) ? raw.status : 'active',
+        supersedes: String(raw?.supersedes || '').slice(0, 80),
+        createdAt: Number.isFinite(raw?.createdAt) ? raw.createdAt : Date.now(),
+        updatedAt: Number.isFinite(raw?.updatedAt) ? raw.updatedAt
+            : (Number.isFinite(raw?.createdAt) ? raw.createdAt : Date.now()),
+        lastRecalledAt: Number.isFinite(raw?.lastRecalledAt) ? raw.lastRecalledAt : 0,
+        recallCount: Math.max(0, Math.round(Number(raw?.recallCount) || 0))
     };
 }
 
@@ -33628,6 +34759,20 @@ function normalizeCompanionLifeRuntime(raw, socialCircle = []) {
         } : null,
         environment: normalizeCompanionEnvironment(runtime.environment),
         socialWorld: normalizeCompanionSocialWorldRuntime(runtime.socialWorld, socialCircle),
+        dayPlan: (Array.isArray(runtime.dayPlan) ? runtime.dayPlan : []).map((item, index) => ({
+            id: String(item?.id || livingId('vh_life_plan', `${item?.dateKey}|${item?.kind}|${index}`)).slice(0, 100),
+            dateKey: String(item?.dateKey || '').slice(0, 20),
+            kind: ['schedule', 'relationship', 'obligation', 'opportunity', 'recovery'].includes(item?.kind)
+                ? item.kind : 'schedule',
+            summary: String(item?.summary || '').trim().slice(0, 500),
+            cause: String(item?.cause || '').trim().slice(0, 500),
+            personId: String(item?.personId || '').slice(0, 80),
+            dueAt: Number.isFinite(item?.dueAt) ? item.dueAt : 0,
+            status: ['planned', 'active', 'completed', 'cancelled'].includes(item?.status) ? item.status : 'planned',
+            createdAt: Number.isFinite(item?.createdAt) ? item.createdAt : Date.now(),
+            resolvedAt: Number.isFinite(item?.resolvedAt) ? item.resolvedAt : 0
+        })).filter(item => item.summary).slice(-80),
+        plannedDateKey: String(runtime.plannedDateKey || '').slice(0, 20),
         simulationLedger: (Array.isArray(runtime.simulationLedger) ? runtime.simulationLedger : []).map(item => ({
             id: String(item?.id || livingId('vh_sim', item?.createdAt || Date.now())).slice(0, 100),
             kind: ['schedule', 'travel', 'social', 'wildcard', 'initiative', 'post', 'provider', 'warning'].includes(item?.kind) ? item.kind : 'schedule',
@@ -33655,6 +34800,7 @@ function normalizeCompanionContinuityEvent(raw, index = 0) {
         certainty: livingClamp(Number.isFinite(Number(event.certainty)) ? Number(event.certainty) : 100, 0, 100),
         sourceMessageIds: (Array.isArray(event.sourceMessageIds) ? event.sourceMessageIds : [])
             .map(value => String(value).slice(0, 100)).filter(Boolean).slice(0, 20),
+        sourceResponseGroupId: String(event.sourceResponseGroupId || '').slice(0, 100),
         dedupeKey: String(event.dedupeKey || '').trim().slice(0, 180),
         createdAt,
         perceivedAt: Number.isFinite(event.perceivedAt) ? event.perceivedAt : 0,
@@ -33970,7 +35116,8 @@ function companionRecordMilestone(companion, raw, nowMs = Date.now()) {
 function normalizeCompanionContinuityRuntime(raw, nowMs = Date.now()) {
     const runtime = isPlainObject(raw) ? raw : {};
     return {
-        version: 5,
+        version: 6,
+        revision: Math.max(0, Math.round(Number(runtime.revision) || 0)),
         originScenarioConsumedAt: Number.isFinite(runtime.originScenarioConsumedAt)
             ? runtime.originScenarioConsumedAt : 0,
         originEpisodeId: String(runtime.originEpisodeId || '').slice(0, 100),
@@ -34444,6 +35591,7 @@ function normalizeCompanion(raw) {
         basePhoto: typeof c.basePhoto === 'string' ? c.basePhoto : '',
         appearance: String(c.appearance || '').trim().slice(0, 800),
         personality: String(c.personality || '').trim().slice(0, 2000),
+        behaviorExamples: String(c.behaviorExamples || '').trim().slice(0, 4000),
         backstory: String(c.backstory || '').trim().slice(0, 4000),
         occupation: String(c.occupation || '').trim().slice(0, 1200),
         socialWorld: String(c.socialWorld || '').trim().slice(0, 2000),
@@ -34468,6 +35616,12 @@ function normalizeCompanion(raw) {
         lifeWildcardsEnabled: c.lifeWildcardsEnabled !== false,
         lifeWeatherEnabled: c.lifeWeatherEnabled !== false,
         lifeBuilderModel: typeof c.lifeBuilderModel === 'string' ? c.lifeBuilderModel.trim().slice(0, 300) : '',
+        observerModel: typeof c.observerModel === 'string' ? c.observerModel.trim().slice(0, 300) : '',
+        observerInputModalities: Array.isArray(c.observerInputModalities)
+            ? [...new Set(c.observerInputModalities.map(value => String(value).toLowerCase()))]
+                .filter(value => ['text', 'image', 'audio'].includes(value))
+            : ['text'],
+        separatedCognition: c.separatedCognition !== false,
         lifeProfile,
         lifeRuntime: normalizeCompanionLifeRuntime(c.lifeRuntime, lifeProfile.socialCircle),
         continuityRuntime: normalizeCompanionContinuityRuntime(c.continuityRuntime, now),
@@ -34761,6 +35915,33 @@ function companionMediaFingerprint(value) {
 function companionInputSupports(companion, modality) {
     return (Array.isArray(companion?.inputModalities) ? companion.inputModalities : ['text'])
         .map(value => String(value).toLowerCase()).includes(modality);
+}
+
+function companionObserverInputSupports(companion, modality) {
+    const observerModel = String(companion?.observerModel || companion?.lifeBuilderModel || '').trim();
+    const conversationModel = String(companion?.model || state.globalSettings.defaultModel || '').trim();
+    if (!observerModel || observerModel === conversationModel) return companionInputSupports(companion, modality);
+    return (Array.isArray(companion?.observerInputModalities) ? companion.observerInputModalities : ['text'])
+        .map(value => String(value).toLowerCase()).includes(modality);
+}
+
+async function refreshCompanionObserverCapabilities(companion) {
+    const observerModel = String(companion?.observerModel || companion?.lifeBuilderModel || '').trim();
+    const conversationModel = String(companion?.model || state.globalSettings.defaultModel || '').trim();
+    if (!observerModel || observerModel === conversationModel) {
+        companion.observerInputModalities = [...(companion.inputModalities || ['text'])];
+        return;
+    }
+    try {
+        const catalog = rankCompanionTextModels(await getCompanionOutputModels(
+            'text', false, companionTextProviderId(companion)));
+        const match = catalog.find(model => model.id === observerModel);
+        companion.observerInputModalities = match?.inputModalities?.length
+            ? [...match.inputModalities] : ['text'];
+    } catch (error) {
+        companion.observerInputModalities = ['text'];
+        console.warn('Could not resolve State Observer input capabilities:', error);
+    }
 }
 
 function companionPendingPersonaVision(companion) {
@@ -35737,6 +36918,8 @@ function companionResponsePlan(companion, message, nowMs, rawExperience = null) 
     let readAt;
     let replyDueAt;
 
+    const cadence = companionCommunicationCadence(getCompanionThread(companion.id));
+    const replyPace = cadence.replySamples >= 3 ? cadence.replyPaceFactor : 1;
     if (life.availability === 'asleep') {
         readAt = companionNextWakeAt(companion, nowMs) + Math.round(roll * 12 * 60 * 1000);
         replyDueAt = readAt + (2 + Math.round(roll * 16)) * 60 * 1000;
@@ -35749,7 +36932,7 @@ function companionResponsePlan(companion, message, nowMs, rawExperience = null) 
         replyDueAt = Math.max(readAt + 60 * 1000, naturalBreak);
     } else {
         readAt = nowMs + (2 + Math.round(roll * 16)) * 1000;
-        replyDueAt = readAt + (4 + Math.round(roll * 32)) * 1000;
+        replyDueAt = readAt + Math.round((4 + roll * 32) * replyPace) * 1000;
     }
 
     const initiallyWilling = !experience.allowNoReply || roll >= moodRefusalChance;
@@ -35840,6 +37023,38 @@ function companionUnansweredState(messages, nowMs = Date.now()) {
     };
 }
 
+function companionCommunicationCadence(messages) {
+    const thread = (Array.isArray(messages) ? messages : []).filter(message =>
+        ['user', 'companion'].includes(message?.role) && !message.invalidated && !message.pending)
+        .slice(-160);
+    const replyGaps = [];
+    const returnGaps = [];
+    for (let index = 1; index < thread.length; index += 1) {
+        const prior = thread[index - 1];
+        const current = thread[index];
+        const gap = Number(current.timestamp) - Number(prior.timestamp);
+        if (!Number.isFinite(gap) || gap < 0 || gap > 90 * 86400000) continue;
+        if (prior.role === 'user' && current.role === 'companion') replyGaps.push(gap);
+        if (prior.role === 'companion' && current.role === 'user') returnGaps.push(gap);
+    }
+    const median = values => {
+        if (!values.length) return 0;
+        const sorted = [...values].sort((left, right) => left - right);
+        const middle = Math.floor(sorted.length / 2);
+        return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    };
+    const replyMedianMs = median(replyGaps);
+    const returnMedianMs = median(returnGaps);
+    return {
+        replyMedianMs,
+        returnMedianMs,
+        replySamples: replyGaps.length,
+        returnSamples: returnGaps.length,
+        replyPaceFactor: livingClamp(replyMedianMs / 24000 || 1, 0.55, 3),
+        silencePaceFactor: livingClamp(returnMedianMs / (18 * 60 * 60 * 1000) || 1, 0.65, 3)
+    };
+}
+
 const COMPANION_SILENCE_STAGE_ORDER = Object.freeze(['noticed', 'concerned', 'hurt', 'detached']);
 
 function companionElapsedLabel(milliseconds) {
@@ -35922,11 +37137,13 @@ function companionCurrentSilence(companion, messages, nowMs = Date.now(), rawExp
         return { stage: '', durationMs, anchor, interpretation: '', unanswered };
     }
     const sensitivity = companionSilenceSensitivity(companion);
+    const cadence = companionCommunicationCadence(messages);
+    const learnedPace = cadence.returnSamples >= 3 ? cadence.silencePaceFactor : 1;
     const thresholds = {
-        noticed: 18 * 60 * 60 * 1000 * sensitivity,
-        concerned: 3 * 24 * 60 * 60 * 1000 * sensitivity,
-        hurt: 7 * 24 * 60 * 60 * 1000 * sensitivity,
-        detached: 21 * 24 * 60 * 60 * 1000 * sensitivity
+        noticed: 18 * 60 * 60 * 1000 * sensitivity * learnedPace,
+        concerned: 3 * 24 * 60 * 60 * 1000 * sensitivity * learnedPace,
+        hurt: 7 * 24 * 60 * 60 * 1000 * sensitivity * learnedPace,
+        detached: 21 * 24 * 60 * 60 * 1000 * sensitivity * learnedPace
     };
     let stage = '';
     COMPANION_SILENCE_STAGE_ORDER.forEach(candidate => {
@@ -36113,12 +37330,41 @@ function companionSocialBehaviorSummary(companion) {
 const COMPANION_SHORT_TERM_LIMIT = 24;      // messages kept verbatim in the prompt
 const COMPANION_CONSOLIDATE_CHUNK = 20;     // messages folded into memory once the buffer overflows
 
+function upsertCompanionMemory(companion, raw) {
+    const candidate = normalizeCompanionMemoryEntry(raw);
+    if (!candidate.text) return null;
+    const memories = companion.memory.longTerm;
+    let existing = candidate.supersedes ? memories.find(item => item.id === candidate.supersedes) : null;
+    if (existing) {
+        existing.status = 'superseded';
+        existing.updatedAt = candidate.updatedAt;
+    }
+    existing = memories.find(item => item.status === 'active'
+        && item.semanticKey && item.semanticKey === candidate.semanticKey
+        && item.subject === candidate.subject);
+    if (existing) {
+        existing.weight = Math.max(existing.weight, candidate.weight);
+        existing.certainty = Math.max(existing.certainty, candidate.certainty);
+        existing.sourceMessageIds = [...new Set([...existing.sourceMessageIds, ...candidate.sourceMessageIds])].slice(-20);
+        existing.updatedAt = Math.max(existing.updatedAt, candidate.updatedAt);
+        return existing;
+    }
+    memories.push(candidate);
+    // Keep tombstones and superseded claims for audit/reversal. Active memory
+    // sorts first so historical provenance can never evict facts still in use.
+    companion.memory.longTerm = memories.sort((left, right) =>
+        Number(right.status === 'active') - Number(left.status === 'active')
+        || (right.weight - left.weight)
+        || (right.updatedAt - left.updatedAt)).slice(0, 200);
+    return candidate;
+}
+
 /**
  * Fold the oldest unconsolidated messages into durable memory once the
  * short-term buffer would otherwise overflow. Deterministic and offline: the
- * substantial player turns are kept as facts, verbatim, rather than paying
- * for a summarization call on every single overflow. A trauma the emotional
- * engine already recorded is not duplicated here.
+ * Only explicit first-person player declarations receive a conservative
+ * legacy claim. The State Observer owns semantic memory; text length is never
+ * treated as importance and the human's own chatter is never stored as fact.
  */
 function consolidateCompanionMemory(companion, messages) {
     const total = messages.length;
@@ -36129,27 +37375,16 @@ function consolidateCompanionMemory(companion, messages) {
     const chunk = messages.slice(companion.memory.consolidatedThroughIndex, chunkEnd);
     let added = 0;
     chunk.forEach(message => {
-        if (message.type === 'photo' && message.role === 'companion' && message.scene) {
-            companion.memory.longTerm.push(normalizeCompanionMemoryEntry({
-                text: `I sent a photo showing ${message.scene}`.slice(0, 300),
-                kind: 'milestone', weight: 55, createdAt: message.timestamp
-            }));
-            added++;
-            return;
-        }
-        if (message.type !== 'text' || !['user', 'companion'].includes(message.role)) return;
+        if (message.type !== 'text' || message.role !== 'user') return;
         const text = message.text.trim();
-        if (text.length < 20) return;         // "lol", "ok" — not worth remembering
-        companion.memory.longTerm.push(normalizeCompanionMemoryEntry({
-            text: `${message.role === 'companion' ? 'I said: ' : ''}${text}`.slice(0, 300),
-            kind: message.role === 'companion' ? 'milestone' : 'fact',
-            weight: Math.min(100, (message.role === 'companion' ? 32 : 40) + Math.floor(text.length / 10)),
-            createdAt: message.timestamp
-        }));
-        added++;
+        if (text.length < 8 || text.length > 500 || /\?$/.test(text)) return;
+        if (!/\b(?:i am|i'm|i live|i work|i study|i like|i love|i hate|i prefer|my (?:name|birthday|job|family|favorite)|remember that)\b/i.test(text)) return;
+        if (upsertCompanionMemory(companion, {
+            text: `The player stated: ${text}`.slice(0, 500), kind: 'claim',
+            source: 'player_statement', subject: 'player', certainty: 82,
+            sourceMessageIds: [message.id], weight: 46, createdAt: message.timestamp
+        })) added++;
     });
-    companion.memory.longTerm.sort((a, b) => b.weight - a.weight);
-    companion.memory.longTerm = companion.memory.longTerm.slice(0, 200);
     companion.memory.consolidatedThroughIndex = chunkEnd;
     return added;
 }
@@ -36170,19 +37405,16 @@ async function applyCompanionLabsMemoryGate(companion, userMessage, replyMessage
     const candidate = result?.candidate;
     if (!candidate || candidate.memoryClass === 'discard' || !String(candidate.factualSentence || '').trim()) return result;
     const text = String(candidate.factualSentence).trim().slice(0, 500);
-    const duplicate = companion.memory.longTerm.some(memory => memory.text.toLowerCase() === text.toLowerCase());
-    if (!duplicate) {
-        companion.memory.longTerm.push(normalizeCompanionMemoryEntry({
-            text,
-            kind: ['preference', 'milestone'].includes(candidate.kind) ? candidate.kind : 'fact',
-            weight: candidate.memoryClass === 'durable'
-                ? 55 + (Number(candidate.emotionalWeight) || 0) * 10
-                : 35 + (Number(candidate.novelty) || 0) * 6,
-            createdAt: nowMs
-        }));
-        companion.memory.longTerm.sort((left, right) => right.weight - left.weight);
-        companion.memory.longTerm = companion.memory.longTerm.slice(0, 200);
-    }
+    upsertCompanionMemory(companion, {
+        text,
+        kind: ['preference', 'milestone'].includes(candidate.kind) ? candidate.kind : 'observation',
+        source: 'observed_behavior', subject: 'player', certainty: candidate.confidence * 100 || 70,
+        sourceMessageIds: [userMessage?.id, ...(replyMessages || []).map(message => message.id)].filter(Boolean),
+        weight: candidate.memoryClass === 'durable'
+            ? 55 + (Number(candidate.emotionalWeight) || 0) * 10
+            : 35 + (Number(candidate.novelty) || 0) * 6,
+        createdAt: nowMs
+    });
     return result;
 }
 
@@ -36341,6 +37573,146 @@ function companionContinuityPrompt(companion) {
         .map(item => `- [episode ${item.id}; importance ${Math.round(item.importance)}/100] ${item.title}: ${item.summary}${item.emotionalMeaning ? ` Meaning: ${item.emotionalMeaning}` : ''}${item.emotionalTone ? ` Tone: ${item.emotionalTone}.` : ''}`)
         .join('\n') || '(no autobiographical episodes have formed yet)';
     return `PLAYER MODEL — claims, statements, observed patterns and inferences stay distinct:\n${playerModel}\n\nACTIVE BOUNDARIES — respect does not erase prior violations:\n${boundaries}\n\nPRIVATE TRUTH LEDGER — what is true may differ from what the player was told:\n${truthLedger}\n\nRELATIONSHIP MILESTONES:\n${milestones}\n\nPREVIOUS TURN'S CONVERSATION GOAL — context only; choose again now:\n${priorGoal}\n\nRECENT PERCEIVED EVENTS:\n${events}\n\nAUTOBIOGRAPHICAL EPISODES — significant remembered experiences, not a full transcript:\n${episodes}\n\nPRIVATE BELIEFS — interpretations, not guaranteed facts:\n${beliefs}\n\nACTIVE INTENTIONS:\n${intentions}\n\nUNRESOLVED THREADS:\n${threads}`;
+}
+
+function companionMemoryTerms(value) {
+    return new Set(String(value || '').toLowerCase().match(/[a-z0-9']{3,}/g) || []);
+}
+
+function companionRelevantMemories(companion, query = '', selectedIds = null, nowMs = Date.now(), limit = 10) {
+    const allowed = Array.isArray(selectedIds) ? new Set(selectedIds) : null;
+    const queryTerms = companionMemoryTerms(query);
+    return (companion.memory?.longTerm || []).filter(memory => memory.status !== 'forgotten'
+        && memory.status !== 'superseded' && (!allowed || allowed.has(memory.id)))
+        .map(memory => {
+            const terms = companionMemoryTerms(`${memory.text} ${memory.subject} ${memory.kind}`);
+            let overlap = 0;
+            queryTerms.forEach(term => { if (terms.has(term)) overlap += 1; });
+            const ageDays = Math.max(0, nowMs - Number(memory.updatedAt || memory.createdAt || nowMs)) / 86400000;
+            const recency = Math.max(0, 1 - ageDays / 180);
+            const unresolvedBonus = memory.kind === 'trauma' || memory.kind === 'milestone' ? 12 : 0;
+            const score = overlap * 20 + Number(memory.weight || 0) * 0.55
+                + Number(memory.certainty || 0) * 0.08 + recency * 10 + unresolvedBonus;
+            return { memory, score };
+        })
+        .sort((left, right) => (right.score - left.score)
+            || (Number(right.memory.updatedAt) - Number(left.memory.updatedAt)))
+        .slice(0, limit).map(item => item.memory);
+}
+
+function companionBehaviorSignature(companion) {
+    const expression = {
+        transparent: 'shows feelings directly', guarded: 'reveals feelings selectively',
+        masked: 'often hides strong feelings', performative: 'can perform a social mood that differs from private feeling'
+    }[companion.emotionExpression] || 'reveals feelings selectively';
+    const recovery = {
+        quick: 'repairs conflict quickly', normal: 'needs ordinary time before repairing conflict',
+        slow: 'needs sustained space after conflict', grudge: 'does not repair conflict without meaningful accountability'
+    }[companion.conflictRecovery] || 'needs ordinary time before repairing conflict';
+    const reaction = {
+        immediate: 'reacts in the moment', mixed: 'sometimes reacts now and sometimes after thinking',
+        delayed: 'often understands and expresses reactions later'
+    }[companion.reactionTiming] || 'sometimes reacts now and sometimes after thinking';
+    return [
+        companion.textingStyle || 'Natural concise texting with an individual rhythm.',
+        companion.habits ? `Recurring habits and tells: ${companion.habits}` : '',
+        companion.contradictions ? `Contradictions that should show through behavior: ${companion.contradictions}` : '',
+        companion.relationshipStyle ? `Relationship behavior: ${companion.relationshipStyle}` : '',
+        companion.behaviorExamples ? `Concrete behavior examples (follow their pattern, do not recite them):\n${companion.behaviorExamples}` : '',
+        `Emotional behavior: ${expression}; ${reaction}; ${recovery}.`,
+        'Do not turn these traits into exposition. Express them through word choice, timing, omissions, questions and decisions.'
+    ].filter(Boolean).join('\n').slice(0, 3600);
+}
+
+function buildCompanionContextPacket(companion, messages, nowMs = Date.now(), options = {}) {
+    const experience = normalizeCompanionChatExperience(options.experience);
+    const life = companionLifeState(companion, nowMs);
+    const situation = life.situation || companionSituationAt(companion, nowMs);
+    const runtime = companionContinuity(companion);
+    const activePersona = state.personas.find(persona => persona.id === state.activePersonaId) || null;
+    const query = String(options.query || [...messages].reverse().find(message => message.role === 'user')?.text || '');
+    const memories = companionRelevantMemories(companion, query, options.relevantMemoryIds, nowMs, 10);
+    const events = runtime.eventLedger.filter(event => event.perceivedAt > 0 && !event.resolvedAt).slice(-8);
+    const threads = runtime.openThreads.filter(thread => thread.status !== 'resolved')
+        .sort((left, right) => right.salience - left.salience).slice(0, 6);
+    const commitments = companion.commitments.filter(item => item.status === 'pending')
+        .sort((left, right) => (left.dueAt || Infinity) - (right.dueAt || Infinity)).slice(0, 6);
+    const boundaries = runtime.boundaries.filter(item => item.status === 'active')
+        .sort((left, right) => right.sensitivity - left.sensitivity).slice(0, 6);
+    const beliefs = runtime.beliefs.filter(item => item.status === 'active')
+        .sort((left, right) => right.confidence - left.confidence).slice(0, 6);
+    return {
+        version: 1,
+        stateRevision: runtime.revision || 0,
+        identity: {
+            name: companion.name, age: companion.age, pronouns: companion.pronouns,
+            personality: companion.personality, backstory: companion.backstory,
+            occupation: companion.occupation, values: companion.values,
+            vulnerabilities: companion.vulnerabilities, privateLife: companion.privateLife
+        },
+        behavior: companionBehaviorSignature(companion),
+        connection: {
+            type: companion.connectionType, role: companion.connectionRole,
+            context: companion.relationshipContext, motive: companion.initialMotive,
+            authenticity: companion.connectionAuthenticity, playerKnowledge: companion.playerKnowledge,
+            player: activePersona ? `${activePersona.name || 'Player'}: ${activePersona.text || ''}` : ''
+        },
+        present: {
+            time: companionTimestampLabel(companion, nowMs), activity: situation.label || life.label,
+            place: situation.placeLabel || companion.locationLabel, company: situation.withNames || [],
+            availability: life.availability, outfit: situation.outfit || companion.currentOutfit,
+            experience
+        },
+        feeling: {
+            mood: companionMoodDescription(companion), dynamics: companionDynamicsDescription(companion),
+            relationship: companionRelationshipDescription(companion.mood.relationship),
+            dimensions: safeJsonClone(companion.relationshipDynamics)
+        },
+        memories: memories.map(memory => ({ id: memory.id, kind: memory.kind, certainty: memory.certainty, text: memory.text })),
+        events: events.map(event => ({ id: event.id, summary: event.summary, interpretation: event.interpretation, certainty: event.certainty })),
+        threads: threads.map(thread => ({ id: thread.id, topic: thread.topic, summary: thread.summary, stakes: thread.stakes })),
+        commitments: commitments.map(item => ({ id: item.id, text: item.text, medium: item.medium, dueAt: item.dueAt })),
+        boundaries: boundaries.map(item => ({ id: item.id, topic: item.topic, rule: item.rule, strength: item.strength })),
+        beliefs: beliefs.map(item => ({ id: item.id, proposition: item.proposition, confidence: item.confidence })),
+        lifeEvents: companion.lifeEvents.slice(-6).map(event => event.text),
+        lifePlan: (companion.lifeRuntime?.dayPlan || []).filter(item => ['planned', 'active'].includes(item.status))
+            .sort((left, right) => left.dueAt - right.dueAt).slice(0, 8)
+            .map(item => ({ summary: item.summary, cause: item.cause, dueAt: item.dueAt, status: item.status })),
+        social: companionSocialWorldState(companion).interactions.slice(-4).map(item => item.summary)
+    };
+}
+
+function companionContextPacketText(packet) {
+    const lines = [
+        `PERSON: ${packet.identity.name}${packet.identity.age ? `, ${packet.identity.age}` : ''}${packet.identity.pronouns ? `, ${packet.identity.pronouns}` : ''}.`,
+        `IDENTITY: ${packet.identity.personality || 'Grounded personality not fully authored.'}`,
+        packet.identity.backstory ? `BACKSTORY: ${packet.identity.backstory}` : '',
+        packet.identity.occupation ? `WORK/LIFE: ${packet.identity.occupation}` : '',
+        packet.identity.values ? `VALUES: ${packet.identity.values}` : '',
+        packet.identity.vulnerabilities ? `FEARS/DEFENSES: ${packet.identity.vulnerabilities}` : '',
+        `BEHAVIORAL SIGNATURE:\n${packet.behavior}`,
+        `PLAYER CONNECTION: ${packet.connection.type}${packet.connection.role ? `; ${packet.connection.role}` : ''}. ${packet.connection.context || ''} ${packet.connection.motive ? `Current motive: ${packet.connection.motive}.` : ''}`,
+        packet.connection.player ? `PLAYER PROFILE (a claim, not proof): ${packet.connection.player}` : '',
+        `RIGHT NOW: ${packet.present.time}; ${packet.present.activity || 'living their normal life'}${packet.present.place ? ` at ${packet.present.place}` : ''}${packet.present.company.length ? ` with ${packet.present.company.join(', ')}` : ''}; ${packet.present.availability}. Outfit: ${packet.present.outfit || 'not established'}.`,
+        `INNER STATE: ${packet.feeling.mood}; ${packet.feeling.dynamics}; relationship is ${packet.feeling.relationship}. Do not narrate scores or labels—express them behaviorally.`,
+        packet.memories.length ? `RELEVANT MEMORIES:\n${packet.memories.map(item => `- [${item.kind}; certainty ${Math.round(item.certainty)}/100] ${item.text}`).join('\n')}` : 'RELEVANT MEMORIES: none.',
+        packet.events.length ? `RECENT EVENTS:\n${packet.events.map(item => `- ${item.summary}${item.interpretation ? ` (private interpretation: ${item.interpretation})` : ''}`).join('\n')}` : '',
+        packet.threads.length ? `UNFINISHED THREADS:\n${packet.threads.map(item => `- ${item.topic}: ${item.summary}`).join('\n')}` : '',
+        packet.commitments.length ? `PENDING COMMITMENTS:\n${packet.commitments.map(item => `- [${item.id}] ${item.text}`).join('\n')}` : '',
+        packet.boundaries.length ? `ACTIVE BOUNDARIES:\n${packet.boundaries.map(item => `- ${item.topic}: ${item.rule} (${item.strength})`).join('\n')}` : '',
+        packet.lifeEvents.length ? `RECENT LIFE EVENTS:\n${packet.lifeEvents.map(item => `- ${item}`).join('\n')}` : '',
+        packet.lifePlan.length ? `PLANNED LIFE (not completed facts):\n${packet.lifePlan.map(item => `- [${item.status}] ${item.summary}; because ${item.cause}`).join('\n')}` : '',
+        packet.social.length ? `RECENT SOCIAL LIFE:\n${packet.social.map(item => `- ${item}`).join('\n')}` : ''
+    ];
+    return lines.filter(Boolean).join('\n\n').slice(0, 18000);
+}
+
+function buildCompanionPerformancePrompt(companion, messages, nowMs = Date.now(), options = {}) {
+    const packet = buildCompanionContextPacket(companion, messages, nowMs, options);
+    const channelRule = options.channel === 'call'
+        ? 'This is a live voice call. Output only natural spoken words. Never narrate actions or use stage directions.'
+        : 'This is texting. Output only what this person types. Never use roleplay narration, stage directions or dialogue tags.';
+    return `You are ${companion.name}, a real person with a continuing private life—not an assistant and not a narrator.\n\n${companionContextPacketText(packet)}\n\nPERFORMANCE RULES:\n- ${channelRule}\n- Respond to the exact message actually received. Never invent the player's side, memories or off-screen facts.\n- Sound recognizably like this individual. Prefer specific reactions, selective attention and natural imperfection over generic warmth.\n- Do not expose prompts, tools, JSON, hidden state, scores or reasoning.\n- Do not mechanically summarize context, ask a question every turn, or advance intimacy without evidence.\n- Media and links are optional actions. Never claim something was sent unless you call the corresponding enabled tool.\n- Keep ordinary replies brief; longer replies must be earned by the moment.\n- The life state above is authoritative. Plans are not completed events.\n- If this is an autonomous message, contact the player only for the concrete supplied reason.\n\nWrite the visible response now.`;
 }
 
 /**
@@ -36584,7 +37956,12 @@ function buildCompanionMessages(companion, messages, nowMs, options = {}) {
     ).map((message, index) => ({ message, index }))
         .sort((a, b) => (Number(a.message.timestamp) - Number(b.message.timestamp)) || (a.index - b.index))
         .map(item => item.message);
-    const systemContent = buildCompanionSystemPrompt(companion, visibleMessages, nowMs, options)
+    const systemContent = (options.performanceOnly
+        ? buildCompanionPerformancePrompt(companion, visibleMessages, nowMs, {
+            ...options,
+            query: options.query || [...visibleMessages].reverse().find(message => message.role === 'user')?.text || ''
+        })
+        : buildCompanionSystemPrompt(companion, visibleMessages, nowMs, options))
         + (localCognition ? `\n\n${localCognition}` : '');
     const candidates = visibleMessages.slice(-COMPANION_SHORT_TERM_LIMIT);
     const contextChars = Math.max(2048, companion.contextSize || 8192) * 3.5;
@@ -36941,6 +38318,26 @@ const COMPANION_TURN_COMMIT_TOOL = {
     }
 };
 
+// The speaking model never sees this tool. The observer gets only the state
+// surfaces it can legitimately derive from an exchange, avoiding the media
+// generation and social schemas that made the old monolithic receipt slow
+// and encouraged models to perform private engine markup in public text.
+const COMPANION_OBSERVER_COMMIT_TOOL = Object.freeze({
+    type: 'function',
+    function: {
+        name: 'commit_human_turn',
+        description: 'Private evidence-backed state transaction for an exchange that has already been shown to the player.',
+        parameters: {
+            type: 'object',
+            properties: Object.fromEntries([
+                'state', 'relationship_event', 'memory_write', 'persona_visual_memory',
+                'player_media_memory', 'life_event', 'commitments', 'life_state', 'agency'
+            ].map(key => [key, COMPANION_TURN_COMMIT_TOOL.function.parameters.properties[key]])),
+            required: ['state']
+        }
+    }
+});
+
 const COMPANION_STATE_TOOL = Object.freeze({
     type: 'function',
     function: {
@@ -37096,9 +38493,10 @@ const COMPANION_TOOLS = Object.freeze([
  * Capabilities are enforced at the request boundary, not just requested in a
  * prompt. A disabled paid medium is absent from the model's tools entirely.
  */
-function companionToolsFor(companion, localProvider = false) {
+function companionToolsFor(companion, localProvider = false, performanceOnly = false) {
     const tools = COMPANION_TOOLS.filter(tool => {
         const name = tool.function?.name;
+        if (performanceOnly && ['commit_human_turn', 'companion_state'].includes(name)) return false;
         if (name === 'share_link' && !companion.webAccess) return false;
         if (name === 'send_photo' && !companion.allowPhotos) return false;
         if (name === 'send_voice_note' && !companion.allowVoiceNotes) return false;
@@ -38246,6 +39644,7 @@ async function repairCompanionTurnCommit(companion, promptMessages, visibleReply
     try {
         const textProvider = companionTextProviderId(companion);
         const recoverVisibleOnly = options.recoverVisible === true && options.preserveCommit === true;
+        const commitTool = options.observer ? COMPANION_OBSERVER_COMMIT_TOOL : COMPANION_TURN_COMMIT_TOOL;
         const repairMessages = [
             ...promptMessages,
             { role: 'assistant', content: visibleReply || '[No visible text; the response may consist only of media.]' },
@@ -38254,23 +39653,45 @@ async function repairCompanionTurnCommit(companion, promptMessages, visibleReply
                 content: recoverVisibleOnly
                     ? `[VISIBLE REPLY RECOVERY — PRIVATE INSTRUCTION, NOT A PLAYER MESSAGE]
 The private commit_human_turn receipt was recorded successfully, but the completion contained no player-visible reply or deliverable media. Return only one clean, natural reply to the player's latest actual message. Do not call tools, output JSON, mention this recovery, add timing headers, or expose engine language.`
-                    : `[PRIVATE SIMULATION RECEIPT REPAIR — DO NOT WRITE ANOTHER VISIBLE MESSAGE]
+                    : options.observer
+                        ? `[PRIVATE STATE OBSERVATION — DO NOT WRITE A VISIBLE MESSAGE]
+Call commit_human_turn once for the exchange above. Record only the smallest evidence-backed changes. Routine conversation should normally create no durable memory, event, belief, intention, boundary or relationship jump. Claims are not facts and plans are not completed events.`
+                        : `[PRIVATE SIMULATION RECEIPT REPAIR — DO NOT WRITE ANOTHER VISIBLE MESSAGE]
 Call commit_human_turn once for the response immediately above. Preserve what it actually did. Explicitly decide photo, voice_note and video_clip; use video_clip=none unless the player explicitly sent a [CLIP REQUEST id]. Report the emotional state change. Do not invent media that the visible response did not agree to send. Choose one conversation_goal. Keep profile claims, direct statements and observed patterns distinct. Add no unsupported relationship jump, secret, boundary event or milestone.`
             }
         ];
         const body = applyCompanionGenerationConfig({
-            model: companion.model || state.globalSettings.defaultModel,
+            model: options.model || companion.observerModel || companion.model || state.globalSettings.defaultModel,
             messages: sanitizeMessagesForProvider(repairMessages, textProvider),
             ...(recoverVisibleOnly ? {} : {
-                tools: [COMPANION_TURN_COMMIT_TOOL],
+                tools: [commitTool],
                 tool_choice: { type: 'function', function: { name: 'commit_human_turn' } }
             })
         }, companion, { maxTokens: Math.min(2400, companionProviderOutputBudget(companion)) });
-        const response = await fetchCompanionCompletion(providerApiBase(textProvider) + '/chat/completions', {
+        let response = await fetchCompanionCompletion(providerApiBase(textProvider) + '/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...providerAuthHeaders(textProvider), ...providerAttributionHeaders(textProvider) },
             body: JSON.stringify(body)
         }, companion, true);
+        // Some otherwise-useful local servers implement JSON mode but reject
+        // OpenAI tool_choice. Retry the private observer as schema-guided JSON;
+        // this never changes or delays the already-visible human reply.
+        if (!response.ok && options.observer && !recoverVisibleOnly) {
+            const jsonMessages = [...repairMessages, {
+                role: 'user',
+                content: `Your server does not support forced tool calls. Return only one JSON object matching this schema:\n${JSON.stringify(commitTool.function.parameters)}`
+            }];
+            const jsonBody = applyCompanionGenerationConfig({
+                model: options.model || companion.observerModel || companion.model || state.globalSettings.defaultModel,
+                messages: sanitizeMessagesForProvider(jsonMessages, textProvider),
+                response_format: { type: 'json_object' }
+            }, companion, { maxTokens: Math.min(2400, companionProviderOutputBudget(companion)) });
+            response = await fetchCompanionCompletion(providerApiBase(textProvider) + '/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...providerAuthHeaders(textProvider), ...providerAttributionHeaders(textProvider) },
+                body: JSON.stringify(jsonBody)
+            }, companion, true);
+        }
         if (!response.ok) return null;
         const message = (await response.json())?.choices?.[0]?.message || {};
         const embedded = extractCompanionEmbeddedToolCalls(message.content);
@@ -38292,7 +39713,135 @@ Call commit_human_turn once for the response immediately above. Preserve what it
     }
 }
 
-function applyCompanionAgencyCommit(companion, rawAgency, nowMs, sourceMessageIds = []) {
+const companionObserverQueues = new Map();
+
+function companionObserverPrompt(companion, messages, nowMs, sourceMessageIds, responseGroupId, relevantMemoryIds) {
+    const packet = buildCompanionContextPacket(companion, messages, nowMs, {
+        experience: companionChatExperience(companion.id),
+        query: messages.filter(message => sourceMessageIds.includes(message.id))
+            .map(message => message.text || message.mediaDescription || '').join('\n'),
+        relevantMemoryIds
+    });
+    const observed = messages.filter(message => sourceMessageIds.includes(message.id)).map(message => {
+        let content = `[player message ${message.id}] ${message.text || ''}`;
+        if (message.type === 'photo') {
+            const parts = [{ type: 'text', text: `[player image ${message.id}] ${message.text || message.mediaDescription || 'Inspect the attached image.'}` }];
+            if (message.photo && companionObserverInputSupports(companion, 'image')) {
+                parts.push({ type: 'image_url', image_url: { url: message.photo } });
+            }
+            content = parts;
+        } else if (message.type === 'voice') {
+            const parts = [{ type: 'text', text: `[player voice note ${message.id}] ${message.text || message.mediaDescription || 'Listen to the attached voice note.'}` }];
+            const match = String(message.audio || '').match(/^data:audio\/[^;]+;base64,(.+)$/);
+            if (match && companionObserverInputSupports(companion, 'audio')) {
+                parts.push({ type: 'input_audio', input_audio: { data: match[1], format: message.audioFormat || 'webm' } });
+            }
+            content = parts;
+        }
+        return { role: 'user', content };
+    });
+    return [{
+        role: 'system',
+        content: `You are the private State Observer for a persistent simulated person. You never speak to the player. Inspect only the supplied exchange and propose the smallest evidence-backed state transaction. Ordinary banter should usually produce zero deltas and no durable memory. Claims stay claims; an inference is never promoted to fact. Do not manufacture secrets, trauma, milestones, life events or intentions for narrative interest. A plan is not a completed event. Every update must be attributable to the supplied source messages and response group ${responseGroupId}.\n\nSTATE BEFORE EXCHANGE (revision ${packet.stateRevision}):\n${companionContextPacketText(packet)}`
+    }, ...observed];
+}
+
+function sanitizeCompanionObserverCommit(companion, commit, nowMs) {
+    if (!isPlainObject(commit)) return null;
+    const cleaned = safeJsonClone(commit);
+    cleaned.photo = { decision: 'none' };
+    cleaned.voice_note = { decision: 'none' };
+    cleaned.video_clip = { decision: 'none' };
+    cleaned.social_post = { decision: 'none' };
+    if (!isPlainObject(cleaned.state)) cleaned.state = {
+        valence_change: 0, arousal_change: 0, relationship_change: 0,
+        mood_label: companion.mood.label,
+        emotion_appraisal: {
+            goal_impact: 0, threat: 0, loss: 0, novelty: 0, norm_violation: 0,
+            control: 50, certainty: 100, social_safety: 50, responsibility: 'unclear'
+        }
+    };
+    if (!companionSexualSystemActive(companion)) {
+        ['desire_change', 'sexual_arousal_change', 'sexual_frustration_change', 'sexual_cooldown_minutes']
+            .forEach(field => { cleaned.state[field] = 0; });
+        cleaned.state.intimacy_outcome = 'none';
+    }
+    if (Number(cleaned.state.intoxication_change) > 0 && !companionAlcoholContext(companion, nowMs)) {
+        cleaned.state.intoxication_change = 0;
+    }
+    return cleaned;
+}
+
+function scheduleCompanionTurnObservation(companion, messages, visibleReply, details = {}) {
+    if (!companion?.separatedCognition) return Promise.resolve(null);
+    const companionId = companion.id;
+    const responseGroupId = String(details.responseGroupId || '');
+    const sourceMessageIds = (details.sourceMessageIds || []).map(String).slice(-20);
+    const prior = companionObserverQueues.get(companionId) || Promise.resolve();
+    const task = prior.catch(() => null).then(async () => {
+        const liveCompanion = getCompanion(companionId);
+        const timeline = liveCompanion && getActiveCompanionTimeline(companionId);
+        if (!liveCompanion || !timeline || timeline.id !== details.timelineId) return null;
+        const liveMessages = timeline.messages || messages;
+        if (!liveMessages.some(message => message.responseGroupId === responseGroupId && !message.invalidated)) return null;
+        await refreshCompanionObserverCapabilities(liveCompanion);
+        const prompt = companionObserverPrompt(liveCompanion, liveMessages, details.nowMs || Date.now(),
+            sourceMessageIds, responseGroupId, details.relevantMemoryIds);
+        const observed = await repairCompanionTurnCommit(liveCompanion, prompt, visibleReply, {
+            model: liveCompanion.observerModel || liveCompanion.lifeBuilderModel || liveCompanion.model,
+            observer: true
+        });
+        if (!observed?.commit) throw new Error('State Observer returned no valid transaction.');
+        if (!liveMessages.some(message => message.responseGroupId === responseGroupId && !message.invalidated)) return null;
+        const commit = sanitizeCompanionObserverCommit(liveCompanion, observed.commit, details.nowMs || Date.now());
+        if (!commit) return null;
+        if (commit.state) applyCompanionMoodUpdate(liveCompanion, commit.state, details.nowMs || Date.now());
+        applyCompanionTurnCommit(liveCompanion, commit, details.nowMs || Date.now(),
+            details.initiative ? 'autonomy' : 'observer', sourceMessageIds, responseGroupId);
+        const continuity = companionContinuity(liveCompanion);
+        continuity.revision = Math.max(0, Number(continuity.revision) || 0) + 1;
+        const first = liveMessages.find(message => message.responseGroupId === responseGroupId);
+        if (first?.turnAudit) {
+            first.turnAudit.observerStatus = 'committed';
+            first.turnAudit.observerModel = liveCompanion.observerModel || liveCompanion.lifeBuilderModel || liveCompanion.model || '';
+            first.turnAudit.observerBaseRevision = Number(details.baseRevision) || 0;
+            first.turnAudit.observerCommittedRevision = continuity.revision;
+        }
+        persistCompanionRuntime(liveCompanion);
+        await saveState();
+        if (state.activeCompanionId === companionId && state.view === 'companionChat') renderCompanionThread();
+        // The canonical observer transaction is durable before any optional
+        // Labs enrichment. A disabled, slow or failed memory gate can never
+        // strand the relationship update in RAM.
+        try {
+            await applyCompanionLabsMemoryGate(liveCompanion,
+                liveMessages.find(message => sourceMessageIds.includes(message.id)) || null,
+                liveMessages.filter(message => message.responseGroupId === responseGroupId), details.nowMs || Date.now());
+            persistCompanionRuntime(liveCompanion);
+            await saveState();
+        } catch (memoryError) {
+            console.warn('Optional Virtual Human memory enrichment failed:', memoryError);
+        }
+        return commit;
+    }).catch(async error => {
+        const liveCompanion = getCompanion(companionId);
+        const liveMessages = liveCompanion ? getCompanionThread(companionId) : [];
+        const first = liveMessages.find(message => message.responseGroupId === responseGroupId);
+        if (first?.turnAudit) {
+            first.turnAudit.observerStatus = 'failed';
+            first.turnAudit.observerError = String(error?.message || error).slice(0, 300);
+        }
+        console.warn('Virtual Human State Observer failed:', error);
+        try { await saveState(); } catch (saveError) { /* foreground reply remains valid */ }
+        return null;
+    }).finally(() => {
+        if (companionObserverQueues.get(companionId) === task) companionObserverQueues.delete(companionId);
+    });
+    companionObserverQueues.set(companionId, task);
+    return task;
+}
+
+function applyCompanionAgencyCommit(companion, rawAgency, nowMs, sourceMessageIds = [], sourceResponseGroupId = '') {
     const agency = isPlainObject(rawAgency) ? rawAgency : {};
     const runtime = companionContinuity(companion);
     const perceived = String(agency.perceived_event || '').trim().slice(0, 700);
@@ -38324,6 +39873,7 @@ function applyCompanionAgencyCommit(companion, rawAgency, nowMs, sourceMessageId
         interpretation,
         certainty: agency.confidence,
         sourceMessageIds,
+        sourceResponseGroupId,
         createdAt: nowMs,
         perceivedAt: nowMs,
         dedupeKey: sourceMessageIds.length ? `decision:${sourceMessageIds.join(',')}:${nowMs}` : ''
@@ -38385,9 +39935,9 @@ function applyCompanionAgencyCommit(companion, rawAgency, nowMs, sourceMessageId
     runtime.milestones = runtime.milestones.slice(-120);
 }
 
-function applyCompanionTurnCommit(companion, commit, nowMs, source = 'turn', sourceMessageIds = []) {
+function applyCompanionTurnCommit(companion, commit, nowMs, source = 'turn', sourceMessageIds = [], sourceResponseGroupId = '') {
     if (!isPlainObject(commit)) return;
-    applyCompanionAgencyCommit(companion, commit.agency, nowMs, sourceMessageIds);
+    applyCompanionAgencyCommit(companion, commit.agency, nowMs, sourceMessageIds, sourceResponseGroupId);
     if (sourceMessageIds.length) companionRecordMilestone(companion, {
         type: 'first_message', summary: `First active exchange between ${companion.name} and the player.`
     }, nowMs);
@@ -38412,6 +39962,32 @@ function applyCompanionTurnCommit(companion, commit, nowMs, source = 'turn', sou
             relationshipImpact: Number(commit.state?.relationship_change) || 0,
             emotionalTone: String(commit.state?.mood_label || ''), createdAt: nowMs
         }, nowMs);
+    }
+    [
+        ['memory_write', 'observation', 'observed_behavior', 65],
+        ['relationship_event', 'milestone', 'observed_behavior', 78],
+        ['life_event', 'milestone', 'companion_statement', 68]
+    ].forEach(([field, kind, memorySource, weight]) => {
+        const text = String(commit[field] || '').trim();
+        if (!text) return;
+        upsertCompanionMemory(companion, {
+            text: text.slice(0, 500), kind, weight, source: memorySource,
+            subject: field === 'life_event' ? companion.id : 'relationship',
+            sourceMessageIds, certainty: field === 'memory_write' ? 82 : 100,
+            createdAt: nowMs, updatedAt: nowMs
+        });
+    });
+    const mediaMemory = String(commit.player_media_memory || '').trim().slice(0, 600);
+    if (mediaMemory && sourceMessageIds.length) {
+        const thread = getCompanionThread(companion.id);
+        const mediaMessages = thread.filter(message => sourceMessageIds.includes(message.id)
+            && ['photo', 'voice'].includes(message.type));
+        mediaMessages.forEach(message => { message.mediaDescription = mediaMemory; });
+        if (mediaMessages.length) upsertCompanionMemory(companion, {
+            text: mediaMemory, kind: 'observation', source: 'observed_media', subject: 'player',
+            certainty: 92, sourceMessageIds: mediaMessages.map(message => message.id),
+            weight: 52, createdAt: nowMs, updatedAt: nowMs
+        });
     }
     if (isPlainObject(commit.life_state)) {
         if (String(commit.life_state.outfit || '').trim()) {
@@ -38445,6 +40021,14 @@ function applyCompanionTurnCommit(companion, commit, nowMs, source = 'turn', sou
         const action = raw?.action;
         if (action === 'create' && String(raw.text || '').trim()) {
             const dueMinutes = livingClamp(Number(raw.due_in_minutes) || 0, 0, 60 * 24 * 90);
+            const semanticText = String(raw.text).trim().toLowerCase().replace(/\s+/g, ' ');
+            const duplicate = companion.commitments.find(item => item.status === 'pending'
+                && item.medium === raw.medium
+                && String(item.text || '').trim().toLowerCase().replace(/\s+/g, ' ') === semanticText);
+            if (duplicate) {
+                if (dueMinutes) duplicate.dueAt = nowMs + dueMinutes * 60 * 1000;
+                return;
+            }
             companion.commitments.push(normalizeCompanionCommitment({
                 text: raw.text,
                 medium: raw.medium,
@@ -38470,11 +40054,14 @@ function applyCompanionTurnCommit(companion, commit, nowMs, source = 'turn', sou
     });
     if (commit.photo?.decision === 'postpone' && Number(commit.photo.due_in_minutes) > 0) {
         const text = String(commit.photo.reason || 'Send the promised photo').trim();
-        companion.commitments.push(normalizeCompanionCommitment({
-            text, medium: 'photo',
-            dueAt: nowMs + livingClamp(Number(commit.photo.due_in_minutes), 1, 60 * 24 * 30) * 60 * 1000,
-            createdAt: nowMs
-        }));
+        if (!companion.commitments.some(item => item.status === 'pending' && item.medium === 'photo'
+            && String(item.text).trim().toLowerCase() === text.toLowerCase())) {
+            companion.commitments.push(normalizeCompanionCommitment({
+                text, medium: 'photo',
+                dueAt: nowMs + livingClamp(Number(commit.photo.due_in_minutes), 1, 60 * 24 * 30) * 60 * 1000,
+                createdAt: nowMs
+            }));
+        }
     }
     const fulfillOldest = medium => {
         const pending = companion.commitments.find(item => item.status === 'pending' && item.medium === medium);
@@ -38827,12 +40414,16 @@ async function sendCompanionMessage(companion, messages, userText, nowMs = Date.
     // OpenRouter's native web-search tool is not part of the OpenAI-compatible
     // contract used by GPTProto or local servers. All ordinary function tools
     // remain available everywhere.
-    const tools = companionToolsFor(companion, textProvider !== 'openrouter');
+    const separatedCognition = companion.separatedCognition !== false;
+    const tools = companionToolsFor(companion, textProvider !== 'openrouter', separatedCognition);
     const pendingPersonaVision = !options.initiative ? companionPendingPersonaVision(companion) : null;
     const startingScenarioThisTurn = !options.initiative
         ? companionConsumeStartingScenario(companion, userMessage, nowMs) : '';
     const cognitionRuntime = companionContinuity(companion);
-    const labsSocial = !options.initiative && userText ? await labsProposal('social_signal', {
+    // The separated pipeline keeps the foreground path to one model call.
+    // Optional classifiers belong after the visible response; waiting for
+    // them here recreated the sluggishness this architecture is meant to fix.
+    const labsSocial = !separatedCognition && !options.initiative && userText ? await labsProposal('social_signal', {
         message: String(userText).slice(0, 1800),
         text: String(userText).slice(0, 1800),
         relationshipContext: `Virtual Human: ${companion.name}; relationship ${companion.mood?.relationship ?? 'unspecified'}; mood ${companion.mood?.label || 'unspecified'}; channel ${options.channel || 'text'}; connection ${companion.connectionType || 'stranger'}; motive ${companion.initialMotive || 'unspecified'}`,
@@ -38848,14 +40439,19 @@ async function sendCompanionMessage(companion, messages, userText, nowMs = Date.
         const memoryQuery = options.initiative
             ? String(options.initiativeReason || 'Evaluate a grounded proactive contact.').slice(0, 1200)
             : String(userText || userMessage?.text || '').slice(0, 1200);
-        const memoryResult = await labsProposal('memory_relevance', {
-            text: memoryQuery,
-            currentMessage: memoryQuery,
-            allowedMemoryIds: companion.memory.longTerm.map(entry => entry.id),
-            memories: companion.memory.longTerm.slice(0, 60).map(entry => ({ id: entry.id, text: entry.text }))
-        }, 'humans', { priority: 115 });
-        if (memoryResult?.candidate && Number(memoryResult.candidate.confidence) >= 0.65) {
-            relevantMemoryIds = memoryResult.candidate.memoryIds;
+        if (separatedCognition) {
+            relevantMemoryIds = companionRelevantMemories(companion, memoryQuery, null, nowMs, 10)
+                .map(memory => memory.id);
+        } else {
+            const memoryResult = await labsProposal('memory_relevance', {
+                text: memoryQuery,
+                currentMessage: memoryQuery,
+                allowedMemoryIds: companion.memory.longTerm.map(entry => entry.id),
+                memories: companion.memory.longTerm.slice(0, 60).map(entry => ({ id: entry.id, text: entry.text }))
+            }, 'humans', { priority: 115 });
+            if (memoryResult?.candidate && Number(memoryResult.candidate.confidence) >= 0.65) {
+                relevantMemoryIds = memoryResult.candidate.memoryIds;
+            }
         }
     }
     const promptMessages = buildCompanionMessages(companion, messages, nowMs, {
@@ -38863,7 +40459,9 @@ async function sendCompanionMessage(companion, messages, userText, nowMs = Date.
         initiative: options.initiative === true,
         localCognition: labsSocial,
         startingScenarioThisTurn,
-        relevantMemoryIds
+        relevantMemoryIds,
+        performanceOnly: separatedCognition,
+        query: userText || userMessage?.text || options.initiativeReason || ''
     });
     if (options.initiative) {
         const initiativeReason = String(options.initiativeReason || '').trim();
@@ -38913,7 +40511,7 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
         };
         commitSource = 'legacy_tools';
     }
-    if (!actions.commit) {
+    if (!actions.commit && !separatedCognition) {
         const repaired = await repairCompanionTurnCommit(companion, promptMessages, replyText);
         if (repaired?.commit) {
             actions = repaired;
@@ -38932,7 +40530,7 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
             video_clip: { decision: 'none' }
         };
         actions.state = actions.commit.state;
-        commitSource = 'frozen_no_receipt';
+        commitSource = separatedCognition ? 'observer_pending' : 'frozen_no_receipt';
     }
     const annotationCanDeliver = (Array.isArray(choice.message?.annotations) ? choice.message.annotations : [])
         .some(annotation => annotation?.type === 'url_citation'
@@ -39041,8 +40639,18 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
             }
         };
     }
-    if (actions.state) applyCompanionMoodUpdate(companion, actions.state, nowMs);
-    applyCompanionTurnCommit(companion, actions.commit, nowMs, options.initiative ? 'autonomy' : 'turn', sourceMessageIds);
+    if (!separatedCognition && actions.state) applyCompanionMoodUpdate(companion, actions.state, nowMs);
+    // Media actions must be committed immediately so a photo/voice/clip request
+    // can enter its pending UI state. Deeper cognition is observed after the
+    // visible reply and never blocks it.
+    const immediateCommit = separatedCognition ? {
+        photo: actions.commit.photo || { decision: 'none' },
+        voice_note: actions.commit.voice_note || { decision: 'none' },
+        video_clip: actions.commit.video_clip || { decision: 'none' },
+        commitments: actions.commit.commitments || []
+    } : actions.commit;
+    applyCompanionTurnCommit(companion, immediateCommit, nowMs,
+        options.initiative ? 'autonomy' : 'turn', sourceMessageIds, responseGroupId);
     if (pendingPersonaVision && companion.personaVisualMemory?.avatarFingerprint !== pendingPersonaVision.fingerprint) {
         companion.personaVisualMemory = {
             personaId: pendingPersonaVision.persona.id,
@@ -39057,19 +40665,6 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
         userMessage.mediaDescription = String(actions.commit?.player_media_memory || '').trim().slice(0, 600)
             || (userMessage.type === 'photo' ? 'A photo the player shared.' : 'A voice note the player shared.');
     }
-    [
-        ['memory_write', 'fact'],
-        ['relationship_event', 'milestone'],
-        ['life_event', 'milestone']
-    ].forEach(([field, kind]) => {
-        const text = String(actions.commit?.[field] || '').trim();
-        if (!text) return;
-        companion.memory.longTerm.push(normalizeCompanionMemoryEntry({
-            text: text.slice(0, 500), kind, weight: field === 'relationship_event' ? 75 : 60,
-            createdAt: nowMs
-        }));
-    });
-    companion.memory.longTerm = companion.memory.longTerm.slice(-200);
     const turnAudit = {
         source: commitSource,
         protocolLeakBlocked,
@@ -39085,6 +40680,7 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
         rejectedActions,
         committedAt: nowMs
     };
+    if (separatedCognition) turnAudit.observerStatus = 'pending';
 
     const newMessages = splitCompanionReplyIntoBubbles(replyText, experience.replyBursts).map((bubble, index) =>
         normalizeCompanionMessage({
@@ -39136,8 +40732,17 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
     newMessages.forEach(m => messages.push(m));
     companion.usage.textTurns += 1;
     consolidateCompanionMemory(companion, messages);
-    await applyCompanionLabsMemoryGate(companion, userMessage, newMessages, nowMs);
-    return { userMessage, replyMessages: newMessages, mood: companion.mood, pendingPhoto, pendingSocialPhoto };
+    persistCompanionRuntime(companion);
+    if (state.activeCompanionId === companion.id && state.view === 'companionChat') renderCompanionThread();
+    const timeline = getActiveCompanionTimeline(companion.id);
+    const observation = separatedCognition
+        ? scheduleCompanionTurnObservation(companion, messages, replyText, {
+            timelineId: timeline?.id || '', responseGroupId, sourceMessageIds,
+            relevantMemoryIds, nowMs, initiative: options.initiative === true,
+            baseRevision: companionContinuity(companion).revision || 0
+        })
+        : applyCompanionLabsMemoryGate(companion, userMessage, newMessages, nowMs);
+    return { userMessage, replyMessages: newMessages, mood: companion.mood, pendingPhoto, pendingSocialPhoto, observation };
 }
 
 /** Tolerant JSON parse for a tool-call payload that came back slightly malformed. */
@@ -42730,6 +44335,7 @@ function commitCompanionStudioForm() {
         'cs-pronouns': 'pronouns',
         'cs-appearance': 'appearance',
         'cs-personality': 'personality',
+        'cs-behavior-examples': 'behaviorExamples',
         'cs-backstory': 'backstory',
         'cs-occupation': 'occupation',
         'cs-social-world': 'socialWorld',
@@ -42743,6 +44349,7 @@ function commitCompanionStudioForm() {
         'cs-habits': 'habits',
         'cs-routine': 'routine',
         'cs-life-builder-model': 'lifeBuilderModel',
+        'cs-observer-model': 'observerModel',
         'cs-private-life': 'privateLife',
         'cs-relationship-context': 'relationshipContext',
         'cs-connection-role': 'connectionRole',
@@ -42826,6 +44433,8 @@ function commitCompanionStudioForm() {
         if (modelImageInput?.checked) companion.inputModalities.push('image');
         if (modelAudioInput?.checked) companion.inputModalities.push('audio');
     }
+    const separatedCognition = document.getElementById('cs-separated-cognition');
+    if (separatedCognition) companion.separatedCognition = separatedCognition.checked;
     const regulationProfile = document.getElementById('cs-regulation-profile');
     if (regulationProfile) companion.regulationProfile = COMPANION_REGULATION_PROFILES.includes(regulationProfile.value)
         ? regulationProfile.value : 'typical';
@@ -42895,6 +44504,7 @@ function renderCompanionStudioForm() {
     document.getElementById('cs-pronouns').value = companion.pronouns;
     document.getElementById('cs-appearance').value = companion.appearance;
     document.getElementById('cs-personality').value = companion.personality;
+    document.getElementById('cs-behavior-examples').value = companion.behaviorExamples || '';
     document.getElementById('cs-backstory').value = companion.backstory;
     document.getElementById('cs-occupation').value = companion.occupation;
     document.getElementById('cs-social-world').value = companion.socialWorld;
@@ -42914,6 +44524,11 @@ function renderCompanionStudioForm() {
     document.getElementById('cs-habits').value = companion.habits;
     document.getElementById('cs-routine').value = companion.routine;
     document.getElementById('cs-life-builder-model').value = companion.lifeBuilderModel || '';
+    const observerModel = document.getElementById('cs-observer-model');
+    if (observerModel) observerModel.value = companion.observerModel || '';
+    const separatedCognition = document.getElementById('cs-separated-cognition');
+    if (separatedCognition) separatedCognition.checked = companion.separatedCognition !== false;
+    document.getElementById('cs-observer-model-row')?.classList.toggle('hidden', companion.separatedCognition === false);
     updateCompanionLifeBuilderModelStatus(companion);
     document.getElementById('cs-life-wildcards').checked = companion.lifeWildcardsEnabled;
     document.getElementById('cs-life-weather').checked = companion.lifeWeatherEnabled;
@@ -43083,19 +44698,36 @@ function renderCompanionMemoriesList(companion) {
     if (!companion.memory.longTerm.length) {
         memList.innerHTML = `<div class="form-hint">Nothing consolidated yet. You can also add memories manually below.</div>`;
     } else {
-        memList.innerHTML = companion.memory.longTerm.slice(0, 20).map((entry, idx) =>
+        memList.innerHTML = companion.memory.longTerm.filter(entry => entry.status === 'active').slice(0, 20).map(entry =>
             `<div style="display:flex; justify-content:space-between; align-items:center; background:var(--surface2); padding:6px 10px; border-radius:8px; font-size:0.82rem;">
-                <span>${escapeHTML(entry.text)}</span>
-                <button class="btn btn-ghost" style="padding:2px 6px; font-size:0.7rem; color:var(--red);" data-del-mem="${idx}">✕</button>
+                <span><span>${escapeHTML(entry.text)}</span><small style="display:block; opacity:.65; margin-top:3px;">${escapeHTML(entry.kind)} · ${Math.round(entry.certainty)}% certain · ${escapeHTML(entry.source.replaceAll('_', ' '))}</small></span>
+                <span style="display:flex; gap:4px;"><button class="btn btn-ghost" style="padding:2px 6px; font-size:0.7rem;" data-edit-mem="${escapeHTML(entry.id)}">Correct</button><button class="btn btn-ghost" style="padding:2px 6px; font-size:0.7rem; color:var(--red);" data-del-mem="${escapeHTML(entry.id)}">Forget</button></span>
             </div>`).join('');
         memList.querySelectorAll('[data-del-mem]').forEach(btn => {
             btn.onclick = () => {
-                const idx = parseInt(btn.dataset.delMem);
-                if (Number.isInteger(idx)) {
-                    companion.memory.longTerm.splice(idx, 1);
+                const entry = companion.memory.longTerm.find(item => item.id === btn.dataset.delMem);
+                if (entry) {
+                    entry.status = 'forgotten';
+                    entry.updatedAt = Date.now();
                     saveState();
                     renderCompanionMemoriesList(companion);
                 }
+            };
+        });
+        memList.querySelectorAll('[data-edit-mem]').forEach(btn => {
+            btn.onclick = () => {
+                const entry = companion.memory.longTerm.find(item => item.id === btn.dataset.editMem);
+                if (!entry) return;
+                const corrected = prompt('Correct this memory:', entry.text);
+                if (!corrected?.trim() || corrected.trim() === entry.text) return;
+                upsertCompanionMemory(companion, {
+                    text: corrected.trim(), kind: entry.kind, weight: Math.max(70, entry.weight),
+                    certainty: 100, subject: entry.subject, source: 'author_correction',
+                    sourceMessageIds: entry.sourceMessageIds, supersedes: entry.id,
+                    createdAt: Date.now(), updatedAt: Date.now()
+                });
+                saveState();
+                renderCompanionMemoriesList(companion);
             };
         });
     }
@@ -43258,6 +44890,40 @@ function rankCompanionTextModels(models) {
         .slice(0, 500);
 }
 
+function rankCompanionObserverModels(models) {
+    return [...(Array.isArray(models) ? models : [])].sort((left, right) => {
+        const structuredLeft = Number(left.supportsTools) + Number(left.supportsJSON);
+        const structuredRight = Number(right.supportsTools) + Number(right.supportsJSON);
+        const size = model => {
+            const match = `${model.id} ${model.name}`.match(/(?:^|[^\d])(\d+(?:\.\d+)?)\s*[bB](?:[^\w]|$)/);
+            return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
+        };
+        return structuredRight - structuredLeft
+            || (left.promptPrice ?? Number.POSITIVE_INFINITY) - (right.promptPrice ?? Number.POSITIVE_INFINITY)
+            || size(left) - size(right)
+            || left.name.localeCompare(right.name);
+    });
+}
+
+function updateCompanionObserverModelOptions(companion, catalog = companionTextModelCatalog) {
+    const list = document.getElementById('cs-observer-model-options');
+    const input = document.getElementById('cs-observer-model');
+    const hint = document.getElementById('cs-observer-model-hint');
+    if (!list || !input || !hint) return;
+    const ranked = rankCompanionObserverModels(catalog);
+    const recommended = ranked.find(model => model.supportsTools || model.supportsJSON) || ranked[0] || null;
+    list.innerHTML = ranked.slice(0, 80).map(model => {
+        const traits = [model.supportsTools ? 'Tools' : '', model.supportsJSON ? 'JSON' : '',
+            model.inputModalities.includes('image') ? 'Vision' : '', companionTextModelPriceLabel(model.promptPrice)]
+            .filter(Boolean).join(' · ');
+        return `<option value="${escapeHTML(model.id)}" label="${escapeHTML(`${model.name}${traits ? ` · ${traits}` : ''}`)}"></option>`;
+    }).join('');
+    if (!companion.observerModel && recommended) input.placeholder = `Recommended: ${recommended.id}`;
+    hint.textContent = recommended
+        ? `Recommended for private state: ${recommended.name}. Structured-output models are ranked first, then lower input cost and size. Blank inherits the Life Architect or conversation model.`
+        : 'Use a small, fast model with reliable tool/JSON output. Blank inherits the Life Architect or conversation model.';
+}
+
 function companionTextModelPriceLabel(price) {
     if (!Number.isFinite(price)) return '';
     const perMillion = price * 1000000;
@@ -43385,6 +45051,7 @@ function renderCompanionTextModelResults(companion) {
     if (status && query) {
         status.textContent = `${matches.length} of ${companionTextModelCatalog.length} text models match “${query}”.`;
     }
+    updateCompanionObserverModelOptions(companion, companionTextModelCatalog);
 }
 
 async function populateCompanionTextModelPicker(companion, force = false) {
@@ -44545,6 +46212,19 @@ function setupCompanionsLogic() {
         const companion = getCompanion(state.editingCompanionId);
         if (companion) applyCompanionModelPreset(companion, event.target.value);
     };
+    document.getElementById('cs-separated-cognition').onchange = (event) => {
+        const companion = getCompanion(state.editingCompanionId);
+        if (companion) companion.separatedCognition = event.target.checked;
+        document.getElementById('cs-observer-model-row')?.classList.toggle('hidden', !event.target.checked);
+    };
+    document.getElementById('cs-observer-model').oninput = event => {
+        const companion = getCompanion(state.editingCompanionId);
+        if (!companion) return;
+        companion.observerModel = event.target.value.trim();
+        const selected = companionTextModelCatalog.find(model => model.id === companion.observerModel);
+        companion.observerInputModalities = selected?.inputModalities?.length
+            ? [...selected.inputModalities] : ['text'];
+    };
     Object.values(COMPANION_PARAMETER_FIELDS).forEach(([inputId, field]) => {
         document.getElementById(inputId).oninput = (event) => {
             const companion = getCompanion(state.editingCompanionId);
@@ -45518,6 +47198,8 @@ function setupCompanionTimelineControls() {
         const timeline = companion && getActiveCompanionTimeline(companion.id);
         if (!timeline || !confirm('Clear this conversation but keep its current relationship, mood and memories?')) return;
         timeline.messages.length = 0;
+        companion.memory.consolidatedThroughIndex = 0;
+        persistCompanionRuntime(companion);
         closeCompanionThreadMenu();
         await saveState();
         renderCompanionThread();
@@ -46756,6 +48438,73 @@ function companionAutonomyHealthReport(companion, days = 28, nowMs = Date.now())
     };
 }
 
+function companionPlanLifeDay(companion, nowMs = Date.now()) {
+    const runtime = companion.lifeRuntime;
+    const local = companionLocalMinuteInfo(companion, nowMs);
+    if (runtime.plannedDateKey === local.dateKey && runtime.dayPlan.some(item => item.dateKey === local.dateKey)) {
+        return runtime.dayPlan.filter(item => item.dateKey === local.dateKey);
+    }
+    const localMidnight = nowMs - (local.hour * 60 + local.minute) * 60000;
+    const schedule = (companion.lifeProfile?.weeklySchedule || []).filter(block => block.days.includes(local.weekday))
+        .sort((left, right) => left.startMinute - right.startMinute).slice(0, 12);
+    const plan = schedule.map(block => ({
+        id: livingId('vh_life_plan', `${companion.id}|${local.dateKey}|schedule|${block.id}`),
+        dateKey: local.dateKey, kind: 'schedule',
+        summary: `${block.activity}${block.placeLabel ? ` at ${block.placeLabel}` : ''}`,
+        cause: `Authored ${COMPANION_WEEKDAYS[local.weekday]} routine`,
+        personId: block.withIds?.[0] || '', dueAt: localMidnight + block.startMinute * 60000,
+        status: 'planned', createdAt: nowMs, resolvedAt: 0
+    }));
+    companion.commitments.filter(item => item.status === 'pending' && item.dueAt > 0
+        && companionLocalMinuteInfo(companion, item.dueAt).dateKey === local.dateKey).slice(0, 6).forEach(item => {
+        plan.push({
+            id: livingId('vh_life_plan', `${companion.id}|${local.dateKey}|commitment|${item.id}`),
+            dateKey: local.dateKey, kind: 'obligation', summary: item.text,
+            cause: 'A promise to the player remains due', personId: '', dueAt: item.dueAt,
+            status: 'planned', createdAt: nowMs, resolvedAt: 0
+        });
+    });
+    const socialWorld = companionSocialWorldState(companion);
+    socialWorld.people.filter(person => person.nextInteractionAt > 0
+        && companionLocalMinuteInfo(companion, person.nextInteractionAt).dateKey === local.dateKey)
+        .sort((left, right) => left.nextInteractionAt - right.nextInteractionAt).slice(0, 4).forEach(person => {
+        const authored = companion.lifeProfile.socialCircle.find(item => item.id === person.personId);
+        if (!authored) return;
+        plan.push({
+            id: livingId('vh_life_plan', `${companion.id}|${local.dateKey}|relationship|${person.personId}`),
+            dateKey: local.dateKey, kind: 'relationship',
+            summary: `Likely contact with ${authored.name}${authored.currentTension ? ` around ${authored.currentTension}` : ''}`,
+            cause: `${authored.contactFrequency.replace('_', ' ')} contact pattern${authored.currentTension ? ' and unresolved tension' : ''}`,
+            personId: person.personId, dueAt: person.nextInteractionAt,
+            status: 'planned', createdAt: nowMs, resolvedAt: 0
+        });
+    });
+    runtime.dayPlan = [...runtime.dayPlan.filter(item => item.dateKey !== local.dateKey), ...plan]
+        .sort((left, right) => left.dueAt - right.dueAt).slice(-80);
+    runtime.plannedDateKey = local.dateKey;
+    return plan;
+}
+
+function advanceCompanionLifePlan(companion, nowMs = Date.now()) {
+    const plan = companionPlanLifeDay(companion, nowMs);
+    let changed = false;
+    plan.forEach(item => {
+        if (item.status === 'planned' && item.dueAt <= nowMs) {
+            item.status = 'active';
+            changed = true;
+        }
+        if (item.status === 'active' && item.kind === 'relationship') {
+            const interaction = companionSocialWorldState(companion).interactions
+                .find(event => event.personId === item.personId && event.createdAt >= item.dueAt - 60000);
+            if (interaction) {
+                item.status = 'completed'; item.resolvedAt = interaction.createdAt;
+                item.summary = interaction.summary; changed = true;
+            }
+        }
+    });
+    return changed;
+}
+
 function advanceCompanionLife(companion, nowMs = Date.now()) {
     // Uninitialized life is a pure fallback computed from the clock. Merely
     // observing it must not dirty persistent state on every agency poll.
@@ -46764,6 +48513,7 @@ function advanceCompanionLife(companion, nowMs = Date.now()) {
     const priorSimulatedAt = runtime.lastSimulatedAt || nowMs;
     const elapsed = Math.max(0, nowMs - priorSimulatedAt);
     let changed = false;
+    if (advanceCompanionLifePlan(companion, nowMs)) changed = true;
     const socialBefore = JSON.stringify(runtime.socialWorld || null);
     advanceCompanionSocialWorld(companion, nowMs);
     if (socialBefore !== JSON.stringify(runtime.socialWorld || null)) changed = true;
@@ -47324,20 +49074,11 @@ function companionAlwaysOnClientId() {
 }
 
 function companionAlwaysOnContext(companion, timeline, nowMs) {
-    const life = companionLifeState(companion, nowMs);
-    const relation = companion.relationshipDynamics || {};
-    return [
-        `PERSON: ${companion.name}. ${companion.age ? `Age ${companion.age}.` : ''}`,
-        `IDENTITY: ${companion.personality || 'No personality summary authored.'}`,
-        `TEXTING VOICE: ${companion.textingStyle || 'Natural, concise texting.'}`,
-        `LIFE: ${companion.occupation || 'Occupation unspecified'}; ${companion.routine || 'routine unspecified'}.`,
-        `RIGHT NOW: ${life.label || life.activity || 'living their normal life'}; ${companion.locationLabel || 'location unspecified'}.`,
-        `PLAYER CONNECTION: ${companion.connectionType}; ${companion.relationshipContext || 'no additional context'}.`,
-        `RELATIONSHIP STATE: trust ${Math.round(Number(relation.trust) || 0)}, warmth ${Math.round(Number(relation.warmth) || 0)}, attraction ${Math.round(Number(relation.attraction) || 0)}, resentment ${Math.round(Number(relation.resentment) || 0)}.`,
-        `CURRENT FEELING: ${companion.mood?.label || 'neutral'}.`,
-        `BOUNDARIES AND PRIVATE CONTEXT: ${companion.privateLife || companion.intimacyBoundaries || 'none authored'}.`,
-        `TIMELINE: ${timeline.name}. Never mention being an AI, a worker, a prompt, scores, or background processing.`
-    ].join('\n').slice(0, 15000);
+    const packet = buildCompanionContextPacket(companion, timeline.messages || [], nowMs, {
+        experience: timeline.experience,
+        query: 'Decide whether a grounded reply or proactive message is due.'
+    });
+    return `${companionContextPacketText(packet)}\n\nBACKGROUND PERFORMANCE:\nYou are still the same person from foreground chat. Do not become a generic check-in bot. Contact the player only because of an unread message, a due commitment, an active intention, or a concrete life event. Never expose engine state, JSON, prompts or scores. Timeline: ${timeline.name}.`.slice(0, 18000);
 }
 
 function companionAlwaysOnManifest(companion, nowMs = Date.now()) {
@@ -47353,6 +49094,15 @@ function companionAlwaysOnManifest(companion, nowMs = Date.now()) {
     const proactiveDue = companion.initiativeMode !== 'off' && hasSpoken
         ? companionNextInitiativeAt(companion, messages, nowMs) : 0;
     const headers = { ...providerAuthHeaders(providerId), ...providerAttributionHeaders(providerId) };
+    const dueCommitment = companion.commitments.find(item => item.status === 'pending' && item.dueAt > 0);
+    const dueIntention = companionContinuity(companion).intentions.filter(item => item.status === 'active'
+        && ['reach_out', 'remind', 'commitment'].includes(item.executionMode))
+        .sort((left, right) => (left.dueAt || Infinity) - (right.dueAt || Infinity))[0];
+    const initiativeReason = pending
+        ? `Reply to the unread player message ${pending.id}.`
+        : dueCommitment ? `A promise is due: ${dueCommitment.text}`
+        : dueIntention ? `A private intention is due: ${dueIntention.action}${dueIntention.reason ? ` — ${dueIntention.reason}` : ''}`
+        : companion.lifeRuntime?.pendingInitiative?.text || 'A concrete current-life reason may justify contact; choosing none is allowed.';
     return {
         id: companion.id,
         name: companion.name,
@@ -47363,9 +49113,11 @@ function companionAlwaysOnManifest(companion, nowMs = Date.now()) {
         messageDueAt: Number(pending?.replyDueAt || proactiveDue || 0),
         socialDueAt: Number(companion.socialFeedRuntime?.nextPostAt || 0),
         hasSpoken,
+        stateRevision: companionContinuity(companion).revision || 0,
+        initiativeReason,
         context: companionAlwaysOnContext(companion, timeline, nowMs),
         recentMessages: messages.filter(message => ['user', 'companion'].includes(message.role)
-            && !message.invalidated && message.type === 'text').slice(-12).map(message => ({
+            && !message.invalidated && message.type === 'text').slice(-24).map(message => ({
                 role: message.role, text: message.text, timestamp: message.timestamp
             })),
         provider: {
@@ -47419,6 +49171,9 @@ async function importCompanionAlwaysOnEvents() {
         const alreadyImported = timeline.messages.some(message => message.id === event.id)
             || (timeline.runtime?.socialPosts || []).some(post => post.id === event.id);
         if (!alreadyImported && event.kind === 'message' && event.text) {
+            const sourceMessageIds = timeline.messages.filter(message => message.role === 'user' && message.awaitingReply)
+                .map(message => message.id).slice(-20);
+            const turnSnapshot = { runtime: captureCompanionRuntime(companion), messageCount: timeline.messages.length, initiative: !sourceMessageIds.length };
             timeline.messages.filter(message => message.role === 'user' && message.awaitingReply).forEach(message => {
                 message.awaitingReply = false;
                 message.deliveryState = 'read';
@@ -47427,9 +49182,15 @@ async function importCompanionAlwaysOnEvents() {
             timeline.messages.push(normalizeCompanionMessage({
                 id: event.id, role: 'companion', type: 'text', text: event.text,
                 timestamp: Number(event.createdAt) || Date.now(), autonomous: true,
-                responseGroupId: event.id
+                responseGroupId: event.id, turnSnapshot,
+                turnAudit: { source: 'always_on_performer', observerStatus: 'pending', committedAt: Number(event.createdAt) || Date.now() }
             }));
             timeline.updatedAt = Date.now();
+            scheduleCompanionTurnObservation(companion, timeline.messages, event.text, {
+                timelineId: timeline.id, responseGroupId: event.id, sourceMessageIds,
+                nowMs: Number(event.createdAt) || Date.now(), initiative: !sourceMessageIds.length,
+                baseRevision: Number(event.stateRevision) || companionContinuity(companion).revision || 0
+            });
             imported.push(event.id);
         } else if (!alreadyImported && event.kind === 'social_status' && event.text) {
             const post = normalizeCompanionSocialPost({

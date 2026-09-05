@@ -2934,6 +2934,112 @@ input[type=number].form-input::-webkit-inner-spin-button {
   .world-community-mode-label { grid-template-columns: 1fr; }
 }
 
+/* Existing-world Architect Agent ----------------------------------------- */
+.world-group-manager { margin-bottom: 16px; }
+.world-group-manager-shell,
+.world-group-card { border: 1px solid var(--border); border-radius: 13px; background: var(--surface1); overflow: clip; }
+.world-group-manager-shell > summary,
+.world-group-card > summary { cursor: pointer; list-style: none; display: flex; align-items: center; padding: 13px 15px; }
+.world-group-manager-shell > summary::-webkit-details-marker,
+.world-group-card > summary::-webkit-details-marker { display: none; }
+.world-group-manager-shell > summary::after,
+.world-group-card > summary::after { content: '›'; margin-left: auto; color: var(--text-3); transform: rotate(90deg); transition: transform .15s ease; }
+.world-group-manager-shell:not([open]) > summary::after,
+.world-group-card:not([open]) > summary::after { transform: rotate(0); }
+.world-group-manager summary span { display: grid; gap: 3px; min-width: 0; }
+.world-group-manager summary small { color: var(--text-3); font-size: .7rem; font-weight: 400; }
+.world-group-create { display: grid; grid-template-columns: minmax(180px, 1fr) 160px auto; gap: 8px; padding: 0 15px 13px; }
+.world-group-card-list { display: grid; gap: 9px; padding: 0 15px 15px; }
+.world-group-card { background: var(--surface2); }
+.world-group-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; padding: 0 13px 12px; }
+.world-group-fields label { display: grid; gap: 5px; color: var(--text-3); font-size: .68rem; }
+.world-group-fields .is-wide { grid-column: 1 / -1; }
+.world-group-members { display: grid; gap: 8px; padding: 12px 13px; border-top: 1px solid var(--border); }
+.world-group-members > strong { font-size: .72rem; }
+.world-group-members > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.world-group-members > div > span { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border-radius: 999px; background: var(--surface1); color: var(--text-2); font-size: .7rem; }
+.world-group-members > div > span button { padding: 0; border: 0; background: transparent; color: var(--text-3); cursor: pointer; font-size: 1rem; line-height: .8; }
+.world-group-add-member { display: grid !important; grid-template-columns: minmax(0, 1fr) auto; }
+.world-group-card-actions { display: grid; grid-template-columns: minmax(150px, 1fr) auto auto; gap: 8px; padding: 12px 13px; border-top: 1px solid var(--border); }
+.relationship-person-picker { display: grid; grid-template-columns: minmax(150px, 230px) auto; gap: 6px; align-items: center; }
+.relationship-person-picker .form-input { min-width: 0; padding: 5px 8px; font-size: 11px; }
+@media (max-width: 700px) {
+    .world-group-create,
+    .world-group-fields,
+    .world-group-card-actions { grid-template-columns: 1fr; }
+    .relationship-person-picker { grid-template-columns: minmax(0, 1fr) auto; width: 100%; }
+    .secret-header:has(.relationship-person-picker) { align-items: stretch; flex-direction: column; }
+}
+
+.world-architect-agent-layout {
+    display: grid;
+    grid-template-columns: minmax(320px, .9fr) minmax(420px, 1.2fr);
+    gap: 18px;
+    align-items: start;
+}
+.world-architect-request-card,
+.world-architect-job {
+    min-width: 0;
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface1);
+}
+.world-architect-job { min-height: 320px; }
+.world-architect-quick-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 16px; }
+.world-architect-quick-actions button,
+.world-architect-operation-toggle {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface2);
+    color: var(--text-2);
+    padding: 7px 10px;
+    cursor: pointer;
+    font: inherit;
+    font-size: .74rem;
+}
+.world-architect-quick-actions button:hover { color: var(--text-1); border-color: var(--accent); }
+.world-architect-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 13px 0; }
+.world-architect-controls label,
+.world-architect-model-row label { display: grid; gap: 6px; color: var(--text-2); font-size: .72rem; }
+.world-architect-model-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: end; }
+.world-architect-empty { display: grid; place-items: center; align-content: center; min-height: 270px; text-align: center; color: var(--text-2); }
+.world-architect-empty p { max-width: 460px; color: var(--text-3); }
+.world-architect-job-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.world-architect-job-head h3 { margin: 3px 0 4px; }
+.world-architect-kicker { color: var(--accent); font-size: .66rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.world-architect-status { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 999px; padding: 5px 9px; color: var(--text-2); font-size: .68rem; text-transform: capitalize; }
+.world-architect-plan-summary,
+.world-architect-validation { padding: 12px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface2); }
+.world-architect-batches,
+.world-architect-operations { display: grid; gap: 8px; margin: 12px 0; max-height: 430px; overflow: auto; overscroll-behavior: contain; }
+.world-architect-batch,
+.world-architect-operation { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 11px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,.018); }
+.world-architect-batch strong,
+.world-architect-operation strong { display: block; font-size: .8rem; }
+.world-architect-batch small,
+.world-architect-operation small { display: block; margin-top: 3px; color: var(--text-3); line-height: 1.35; }
+.world-architect-operation.is-dismissed { opacity: .48; }
+.world-architect-operation input { margin-top: 3px; accent-color: var(--accent); }
+.world-architect-counts { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0; }
+.world-architect-counts span { padding: 5px 8px; border-radius: 999px; background: var(--surface2); color: var(--text-2); font-size: .68rem; }
+.world-architect-warning { margin: 7px 0; color: #efb25d; font-size: .74rem; }
+.world-architect-error { margin: 7px 0; color: #ff7182; font-size: .74rem; }
+.world-architect-validation { margin: 10px 0; }
+.world-architect-validation.is-blocking { border-color: rgba(255, 80, 105, .45); background: rgba(255, 80, 105, .06); }
+.world-architect-validation.is-existing { color: var(--text-2); }
+.world-architect-validation.is-existing summary { cursor: pointer; font-size: .74rem; font-weight: 700; }
+.world-architect-progress { height: 7px; overflow: hidden; border-radius: 999px; background: var(--surface2); margin: 11px 0; }
+.world-architect-progress span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
+.world-architect-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
+@media (max-width: 1050px) {
+    .world-architect-agent-layout { grid-template-columns: 1fr; }
+}
+@media (max-width: 620px) {
+    .world-architect-controls { grid-template-columns: 1fr; }
+    .world-architect-model-row { grid-template-columns: 1fr; }
+}
+
 .world-map-modal {
   width: min(1440px, calc(100vw - 32px));
   height: min(90vh, 940px);

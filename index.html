@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=20260902-v171">
+    <link rel="stylesheet" href="style.css?v=20260905-v173">
 </head>
 <body>
 <div id="app">
@@ -754,6 +754,7 @@
                         <button class="world-studio-tab" data-tab="w-ai">AI Config</button>
                         <button class="world-studio-tab" data-tab="w-hud">HUD & Stats</button>
                         <button class="world-studio-tab" data-tab="w-visual-map">World Architect</button>
+                        <button class="world-studio-tab" data-tab="w-architect-agent" style="color:var(--accent); font-weight:700;">✦ Architect Agent</button>
                         <button class="world-studio-tab" data-tab="w-builder" style="color:var(--accent); font-weight:700;">✨ AI Builder</button>
                     </div>
                     <div class="studio-nav-actions">
@@ -779,7 +780,7 @@
                             <button type="button" class="creator-overview-card" data-world-studio-target="w-visuals"><span>06</span><strong>Presentation</strong><small>Add optional banners, room art, portraits and visual styling.</small></button>
                             <details class="creator-advanced-card">
                                 <summary>Advanced world systems</summary>
-                                <div><button type="button" data-world-studio-target="w-items">Items &amp; objects</button><button type="button" data-world-studio-target="w-factions">Factions</button><button type="button" data-world-studio-target="w-lore">Lore</button><button type="button" data-world-studio-target="w-note">Author's Note</button><button type="button" data-world-studio-target="w-hud">HUD &amp; Stats</button><button type="button" data-world-studio-target="w-visual-map">World Architect</button><button type="button" data-world-studio-target="w-builder">AI Builder</button></div>
+                                <div><button type="button" data-world-studio-target="w-items">Items &amp; objects</button><button type="button" data-world-studio-target="w-factions">Factions</button><button type="button" data-world-studio-target="w-lore">Lore</button><button type="button" data-world-studio-target="w-note">Author's Note</button><button type="button" data-world-studio-target="w-hud">HUD &amp; Stats</button><button type="button" data-world-studio-target="w-visual-map">World Architect</button><button type="button" data-world-studio-target="w-architect-agent">Architect Agent</button><button type="button" data-world-studio-target="w-builder">AI Builder</button></div>
                             </details>
                         </div>
                     </div>
@@ -1493,6 +1494,43 @@
                             <label class="form-label">Note Content</label>
                             <textarea id="w-studio-note" class="form-textarea" rows="10" placeholder="e.g. Narrate with heavy focus on sensory details. Use archaic language. Ensure the player feels constantly watched."></textarea>
                             <p class="form-hint" style="margin-top:12px;">This note is appended to the DM's instructions every turn, giving it high influence over the current narrative style.</p>
+                        </div>
+                    </div>
+
+                    <!-- Existing-world authoring agent -->
+                    <div id="tab-w-architect-agent" class="studio-panel hidden">
+                        <div class="panel-header">
+                            <h2>✦ World Architect Agent</h2>
+                            <p>Expand or refine this world conversationally. The agent stages typed changes for review; it never rewrites the live world behind your back.</p>
+                        </div>
+                        <div class="form-body world-architect-agent-layout">
+                            <section class="world-architect-request-card">
+                                <div class="world-architect-quick-actions" aria-label="Common World Architect requests">
+                                    <button type="button" data-world-architect-quick="Add playable locations with sensible containment and connections.">Add places</button>
+                                    <button type="button" data-world-architect-quick="Add new characters with homes, personalities, schedules and private goals.">Add characters</button>
+                                    <button type="button" data-world-architect-quick="Find thin records and add missing useful detail without replacing authored writing.">Flesh things out</button>
+                                    <button type="button" data-world-architect-quick="Connect inaccessible locations and repair the travel graph without changing intentional one-way routes.">Connect the map</button>
+                                    <button type="button" data-world-architect-quick="Add factions, memberships and meaningful relationships supported by the setting.">Build society</button>
+                                </div>
+                                <label class="form-label" for="w-architect-request">What should change?</label>
+                                <textarea id="w-architect-request" class="form-textarea" rows="7" placeholder="For example: Add 100 rooms across the existing city. Distribute them sensibly inside current buildings, make every room reachable, and add recurring staff where the fiction needs them."></textarea>
+                                <div class="world-architect-controls">
+                                    <label><span>Scope</span><select id="w-architect-scope" class="form-select"><option value="whole">Whole world</option><option value="locations">Places &amp; map</option><option value="people">People &amp; society</option><option value="lore">Lore &amp; setting</option></select></label>
+                                    <label><span>Change policy</span><select id="w-architect-policy" class="form-select"><option value="add_only">Add only</option><option value="fill_gaps" selected>Fill gaps</option><option value="allow_edits">Allow safe edits</option></select></label>
+                                    <label><span>Detail</span><select id="w-architect-detail" class="form-select"><option value="draft">Draft</option><option value="standard" selected>Standard</option><option value="deep">Deep</option></select></label>
+                                    <label><span>Batch size</span><select id="w-architect-batch-size" class="form-select"><option value="8">8 records</option><option value="12" selected>12 records</option><option value="20">20 records</option></select></label>
+                                </div>
+                                <div class="world-architect-model-row">
+                                    <label><span>Structured model <small>optional</small></span><input id="w-architect-model" class="form-input" list="w-architect-model-options" placeholder="Use audits &amp; calibration model"></label>
+                                    <datalist id="w-architect-model-options"></datalist>
+                                    <button id="w-architect-refresh-models" class="btn btn-ghost" type="button">↻ Models</button>
+                                </div>
+                                <p id="w-architect-model-status" class="form-hint">Uses the same structured-model fallback as calibration. No generation starts until you approve a plan.</p>
+                                <button id="w-architect-plan-btn" class="btn btn-primary btn-full" type="button">Plan changes</button>
+                            </section>
+                            <section id="w-architect-job" class="world-architect-job" aria-live="polite">
+                                <div class="world-architect-empty"><strong>No staged job</strong><p>Describe an expansion or repair. Horde will show assumptions, batches and expected calls before generating anything.</p></div>
+                            </section>
                         </div>
                     </div>
 
@@ -2292,6 +2330,9 @@
                             <div class="form-section">
                                 <label class="form-label">Personality</label>
                                 <textarea id="cs-personality" class="form-textarea" rows="5" placeholder="Warm but guarded until she trusts you. Sarcastic when nervous. Loves late-night conversations, hates being kept waiting."></textarea>
+                                <label class="form-label" for="cs-behavior-examples">Behavior examples <span class="optional">optional</span></label>
+                                <textarea id="cs-behavior-examples" class="form-textarea" rows="4" placeholder="When busy: leaves messages unread, then returns with context.&#10;When hurt: gets brief instead of explaining immediately.&#10;When wrong: cools off, then apologizes directly.&#10;When excited: sends two short messages and a link."></textarea>
+                                <p class="form-hint">Concrete reactions teach the human more reliably than a long list of adjectives.</p>
                             </div>
                             <div class="form-section">
                                 <label class="form-label">Backstory</label>
@@ -2937,7 +2978,7 @@
                             <div>
                                 <span class="vh-eyebrow">Runtime</span>
                                 <h2>AI &amp; Models</h2>
-                                <p>Choose the brain behind this virtual human. This model writes messages, makes social decisions, updates mood, and decides when photos or voice notes feel natural.</p>
+                                <p>Choose how this virtual human thinks. The conversation model stays focused on natural dialogue; an optional private observer updates memory and relationship state after the reply is already visible.</p>
                             </div>
                             <div class="vh-model-header-actions">
                                 <button id="cs-unlock-all-params" class="btn btn-ghost" type="button" title="Show every control even when the provider catalog does not advertise it.">🔓 Unlock all parameters</button>
@@ -2995,6 +3036,30 @@
                                     <p class="form-hint">For models the provider catalog does not list yet. The ID is sent exactly as entered.</p>
                                 </div>
                                 <input id="cs-text-model-custom" class="form-input" type="text" placeholder="provider/model-id">
+                            </section>
+
+                            <section class="vh-ai-config-section">
+                                <div class="vh-ai-config-heading">
+                                    <div>
+                                        <span class="vh-model-kicker">Cognition architecture</span>
+                                        <h3>Separate voice from memory</h3>
+                                        <p class="form-hint">Recommended. The reply appears first; a private observer then records only evidence-backed changes. This prevents internal state markup leaking into chat and keeps the speaking model natural.</p>
+                                    </div>
+                                </div>
+                                <label class="toggle-row vh-config-toggle">
+                                    <input type="checkbox" id="cs-separated-cognition" class="toggle-checkbox" checked>
+                                    <span class="toggle-switch"></span>
+                                    <span>
+                                        <strong>Use a separate State Observer</strong>
+                                        <small>Turn this off only for compatibility with an older single-call setup.</small>
+                                    </span>
+                                </label>
+                                <div id="cs-observer-model-row" class="vh-config-field">
+                                    <label class="form-label" for="cs-observer-model">Observer model ID <span class="optional">optional</span></label>
+                                    <input id="cs-observer-model" class="form-input" type="text" list="cs-observer-model-options" placeholder="Blank = Life Architect or conversation model">
+                                    <datalist id="cs-observer-model-options"></datalist>
+                                    <p id="cs-observer-model-hint" class="form-hint">Use a small, fast model with reliable tool/JSON output. It never writes dialogue. The Life Architect remains responsible for schedules and off-screen life.</p>
+                                </div>
                             </section>
 
                             <section class="vh-ai-config-section">
@@ -5084,12 +5149,12 @@
 <script src="labs-core.js?v=20260822-v161"></script>
 <script src="labs-tasks.js?v=20260822-v161"></script>
 <script src="labs-guide.js?v=20260822-v161"></script>
-<script src="help-system.js?v=20260902-v171"></script>
+    <script src="help-system.js?v=20260905-v173"></script>
 <script src="labs-ui.js?v=20260822-v161"></script>
 <script src="rpg-mechanics.js?v=20260823-v166-rpg-release"></script>
 <script src="multiplayer-engine.js?v=20260902-v171"></script>
 <script src="multiplayer.js?v=20260902-v171"></script>
 <script src="video-worlds.js?v=20260902-v171"></script>
-    <script src="app.js?v=20260902-v171"></script>
+    <script src="app.js?v=20260905-v173"></script>
 </body>
 </html>
