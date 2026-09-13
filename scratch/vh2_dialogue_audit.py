@@ -22,6 +22,17 @@ class Dialogue(unittest.TestCase):
     def queue(self,text='Oh, nice.'):
         return self.cmd('queue_dialogue',text=text)[1]['jobId']
     def status(self):return self.s.dialogue.list(self.w)[0]['status']
+    def test_calendar_order_and_clock_do_not_cancel_reply(self):
+        import copy
+        state=self.state()
+        ages={'self':{'currentAge':25,'asOf':'2026-09-12'},'friend':{'currentAge':26,'asOf':'2026-09-12'}}
+        state['truth']['companion'].setdefault('vh2Calendar',{})['ages']=ages
+        first=self.s.dialogue.snapshot(self.w,1,state)[1]
+        other=copy.deepcopy(state);other['simAt']+=60_000
+        other['truth']['companion']['vh2Calendar']['ages']=dict(reversed(list(ages.items())))
+        self.assertEqual(first,self.s.dialogue.snapshot(self.w,2,other)[1])
+        other['truth']['companion']['vh2Calendar']['ages']['friend']['currentAge']=27
+        self.assertNotEqual(first,self.s.dialogue.snapshot(self.w,2,other)[1])
     def make_check_in(self):
         self.cmd('receive_message',text="I'll text you in 20 minutes.")
         self.cmd('advance',steps=1)

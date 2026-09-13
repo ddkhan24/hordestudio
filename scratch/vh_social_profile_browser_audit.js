@@ -21,6 +21,7 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.evaluate(async()=>{const c=getCompanion('social-design-fixture');await vh2CreateTimeline(c);await vhUiCommand(getActiveCompanionTimeline(c.id),'set_running',{running:false});companionSocialTab='feed';companionSocialPanelVisibility.set(companionSocialPanelKey(c),true);renderCompanionSocialPanel(c);});
   await page.locator('.vh-feed-photo img').first().waitFor();await page.waitForFunction(()=>[...document.querySelectorAll('.vh-feed-photo img')].every(i=>i.complete&&i.naturalWidth));
   assert.equal(await page.locator('[data-social-post]').count(),3);
+  await page.evaluate(()=>{const content=document.getElementById('companion-social-content'),before=content.querySelector('.vh-feed-like');for(let i=0;i<10;i++)renderCompanionSocialPanel(getCompanion('social-design-fixture'));if(before!==content.querySelector('.vh-feed-like'))throw Error('Unchanged refresh replaced interactive feed controls');});
   await page.locator('.vh-feed-like').first().click();await page.locator('.vh-feed-like.is-liked').waitFor();
   await page.locator('.vh-feed-actions [aria-label="Comment on post"]').first().click();await page.locator('.vh-feed-comments[open] input').fill('That light is beautiful.');
   await page.evaluate(()=>renderCompanionSocialPanel(getCompanion('social-design-fixture')));

@@ -8,7 +8,7 @@
 
 Character cards & group rooms · Living Worlds · Virtual Humans 2.0 · Optional RPG rules · Multiplayer · Video Adventures
 
-[**Download v18**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.0.1) · [Release notes](docs/releases/v18.0.1.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
+[**Download v18**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.0.2) · [Release notes](docs/releases/v18.0.2.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
 
 Horde Studio brings your characters, stories and simulations into one local application. Import a character card and start a conversation, build a world with places and consequences, host a campaign with friends, or create a virtual human whose conversations draw on an ongoing life. Connect your own local models or cloud providers; the application does not include paid inference.
 
@@ -128,7 +128,7 @@ Horde Studio is free to run and its source is available in this repository. The 
 
 ## Quick start
 
-Download the [v18 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.0.1), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
+Download the [v18 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.0.2), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
 
 ### Requirements
 

@@ -18,6 +18,20 @@ class Social(unittest.TestCase):
  def photo(self,destination='gallery'):
   ident=self.cmd('capture_photo',scene='A relaxed close-up',destination=destination)['photoId']
   self.cmd('submit_photo',photoId=ident);self.cmd('import_photo',photoId=ident,image=PNG);return ident
+ def test_live_ticks_do_not_starve_inputs(self):
+  post=self.cmd('publish_photo',photoId=self.photo())['postId']
+  stale=self.s.projection(self.w)['revision']
+  self.cmd('advance',steps=2)
+  for kind,values in [('like_post',dict(postId=post,liked=True)),('comment_post',dict(postId=post,text='A saved comment')),('receive_message',dict(text='Hello there'))]:
+   body=dict(schemaVersion=1,key=str(uuid.uuid4()),type=kind,worldId=self.w,expectedRevision=stale,**values)
+   result=self.s.command(body);self.assertEqual(result,self.s.command(body))
+  self.assertEqual(len(self.state()['social']['posts'][0]['comments']),1)
+  self.assertEqual(sum(m.get('text')=='Hello there' for m in self.state()['communication']['messages']),1)
+  with self.assertRaises(Conflict):
+   self.s.command(dict(schemaVersion=1,key=str(uuid.uuid4()),type='set_running',worldId=self.w,expectedRevision=stale,running=True))
+  self.cmd('withdraw_post',postId=post)
+  with self.assertRaises(Conflict):
+   self.s.command(dict(schemaVersion=1,key=str(uuid.uuid4()),type='comment_post',worldId=self.w,expectedRevision=stale,postId=post,text='Too late'))
  def test_gallery_is_not_chat_or_publication(self):
   pid=self.photo();self.assertEqual(self.state()['communication']['messages'],[])
   self.assertEqual(self.state()['photos'][0]['status'],'stored');self.assertEqual(self.s.context(self.w)['ownSocialPosts'],[])

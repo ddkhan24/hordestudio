@@ -90,6 +90,10 @@ class DialogueQueue:
         # An unread follow-up changes the response batch without leaking its text.
         pending=[m['id'] for m in state.get('communication',{}).get('messages',[]) if m.get('awaitingReply')]
         semantic={k:v for k,v in context.items() if k not in ('revision','simAt')}
+        semantic = json.loads(encode(semantic))
+        if isinstance(semantic.get('calendar'),dict):
+            semantic['calendar'].pop('localTime',None)
+            semantic['calendar']['ages']=sorted([{k:v for k,v in row.items() if k!='asOf'} for row in semantic['calendar'].get('ages',[])],key=lambda row:row.get('personId',''))
         semantic['pendingMessageIds']=pending
         semantic['kernelVersion']=state['kernelVersion']
         if state.get('integration'):semantic['automation']={'running':state['running'],'autoReplies':state['integration']['autoReplies']}
@@ -157,8 +161,12 @@ class DialogueQueue:
         # A failed/uncertain batch needs user intervention. Context supersession
         # can retry at most twice; polling must never become a billing loop.
         same=[]
-        for row in db.execute('SELECT status,snapshot FROM dialogue_jobs WHERE world_id=? ORDER BY rowid DESC LIMIT 20',(world_id,)):
-            if json.loads(row['snapshot'])['context']['readyMessageIds']==ready:same.append(row['status'])
+        for row in db.execute('SELECT status,snapshot,attempt,created_at FROM dialogue_jobs WHERE world_id=? ORDER BY rowid DESC LIMIT 20',(world_id,)):
+            if json.loads(row['snapshot'])['context']['readyMessageIds']==ready:
+                # Unsubmitted cancellations cost no provider request. After a quiet
+                # minute allow recovery, while retaining caps for attempted jobs.
+                if row['status']=='superseded' and row['attempt']==0 and row['created_at']<self.service.clock()-60_000:continue
+                same.append(row['status'])
         if same and (same[0]!='superseded' or len(same)>=3):return revision,state
         try:
             self.service.dialogue_provider.freeze(db,state['integration']['providerScope'])

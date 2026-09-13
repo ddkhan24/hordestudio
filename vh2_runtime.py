@@ -361,7 +361,13 @@ class WorldService:
                 world_id = body.get('worldId')
                 revision,state = self.read(db,world_id)
                 if state.get('mergedInto'):raise Conflict('This life was merged into '+state['mergedInto']+'. Open the merged life to continue.')
-                if type(body.get('expectedRevision')) is not int or body['expectedRevision'] != revision:
+                expected = body.get('expectedRevision')
+                # These are new inputs, not replacements of a previously read state.
+                # Apply them to the current state under this transaction; live clock
+                # ticks must not starve chat or social input. Target/persona checks
+                # below still apply, and the original key/body remain idempotent.
+                current_input = kind in ('receive_message', 'like_post', 'comment_post')
+                if type(expected) is not int or expected < 0 or expected > revision or (expected != revision and not current_input):
                     raise Conflict('World changed; refresh its projection before sending a new command')
                 if kind!='upgrade_kernel' and state['kernelVersion'] != self.kernel_version:
                     raise Conflict('World requires a kernel migration')
