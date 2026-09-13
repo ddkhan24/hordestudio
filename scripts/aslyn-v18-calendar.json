@@ -1,0 +1,148 @@
+{
+  "personalCalendar": [
+    {
+      "date": "2007-03-06",
+      "enabled": true,
+      "id": "birthday_06c604b332b386b6",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "self",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Aslyn Jonas’s birthday"
+    },
+    {
+      "date": "2006-11-21",
+      "enabled": true,
+      "id": "birthday_9cdc43c18fa5d828",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "jordan_kelley",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Jordan Kelley’s birthday"
+    },
+    {
+      "date": "2007-05-28",
+      "enabled": true,
+      "id": "birthday_6a609d08739033ff",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "priya_reddy",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Priya Reddy’s birthday"
+    },
+    {
+      "date": "2006-05-31",
+      "enabled": true,
+      "id": "birthday_6be285559e2dfc56",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "colton_marsh",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Colton Marsh’s birthday"
+    },
+    {
+      "date": "2007-01-25",
+      "enabled": true,
+      "id": "birthday_37f315ec8d405575",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "kaylee_tatum",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Kaylee Tatum’s birthday"
+    },
+    {
+      "date": "1976-07-21",
+      "enabled": true,
+      "id": "birthday_566392550808d667",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "dale_jonas",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Dale Jonas’s birthday"
+    },
+    {
+      "date": "1978-01-24",
+      "enabled": true,
+      "id": "birthday_47aed07735867619",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "tammy_jonas",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Tammy Jonas’s birthday"
+    },
+    {
+      "date": "2002-10-25",
+      "enabled": true,
+      "id": "birthday_22c9c7e1322f14b8",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "cody_jonas",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Cody Jonas’s birthday"
+    },
+    {
+      "date": "2006-01-25",
+      "enabled": true,
+      "id": "birthday_7e78ddbff9c7a84d",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "megan_cross",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Megan Cross’s birthday"
+    },
+    {
+      "date": "2004-10-11",
+      "enabled": true,
+      "id": "birthday_17f34d332dec5991",
+      "kind": "birthday",
+      "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+      "personId": "tyler_voss",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Tyler Voss’s birthday"
+    },
+    {
+      "date": "--10-14",
+      "enabled": true,
+      "id": "colton_relationship_anniversary",
+      "kind": "anniversary",
+      "notes": "Suggested date for the relationship already established in her biography; its exact start date was not supplied. Does not override how that relationship evolves.",
+      "personId": "colton_marsh",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Anniversary with Colton"
+    },
+    {
+      "date": "2026-12-04",
+      "enabled": true,
+      "id": "fall_term_planning_reminder",
+      "kind": "milestone",
+      "notes": "An optional planning reminder tied to her authored Fall 2026 Session C courses. It is not an official application deadline or proof of enrollment next term. Term dates: https://registrar.asu.edu/academic-calendar",
+      "personId": "self",
+      "recurrence": "none",
+      "reminderDays": 14,
+      "source": "fictional_assumption",
+      "title": "Think about next term before fall classes end"
+    }
+  ]
+}

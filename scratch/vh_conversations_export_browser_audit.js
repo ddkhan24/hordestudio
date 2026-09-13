@@ -1,0 +1,114 @@
+'use strict';
+const {spawn}=require('node:child_process'),assert=require('node:assert/strict');
+const { chromium, launchOptions } = require('./browser_runtime').browserRuntime();
+(async()=>{
+ const server=spawn('python3',['scratch/vh2_browser_server.py'],{stdio:['ignore','pipe','pipe']});let browser;
+ try{
+  const port=await new Promise((resolve,reject)=>{server.stdout.once('data',d=>resolve(+String(d).trim()));server.stderr.on('data',d=>process.stderr.write(d));server.once('exit',code=>reject(Error('Fixture server '+code)));});const base='http://127.0.0.1:'+port;
+  browser=await chromium.launch(launchOptions);
+  const page=await browser.newPage({viewport:{width:1440,height:1050}}),errors=[];page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));
+  await page.route('**/*',r=>r.request().url().startsWith(base)||r.request().url().startsWith('blob:')?r.continue():r.abort());
+  await page.goto(base+'/index.html');await page.waitForFunction(()=>typeof companionAgencyTimer!=='undefined'&&!!companionAgencyTimer);
+  await page.addStyleTag({content:'*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}'});
+  await page.evaluate(base=>{
+   clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);mcpBridgeBase=()=>base;
+   state.globalSettings.localBaseUrl=base+'/test';state.globalSettings.localApiKey='LOCAL_TEST_KEY';state.globalSettings.apiProvider='local';state.globalSettings.defaultModel='browser-fixture';
+   state.personas=[{id:'lena',name:'Lena',text:'A longtime friend.'},{id:'noah',name:'Noah',text:'A new acquaintance.'}];state.activePersonaId='lena';
+   const image='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+   const c=normalizeCompanion({id:'shared-life-fixture',name:'Alex',age:27,textProvider:'local',model:'browser-fixture',imageSource:'comfyui',startingSocialPosts:[{id:'starter-photo',kind:'photo',text:'A day out before we met.',photo:image,seedAgeDays:3}],startingReferences:[{id:'identity-fixture',role:'identity',entityId:'self',label:'Identity',tags:['front_face'],status:'approved',image}]});
+   state.companions=[c];state.activeCompanionId=c.id;state.companionTimelines={};state.companionThreads={};ensureCompanionTimelineStore(c.id);
+   hideGlobalSettings();switchView('companionStudio');openCompanionStudio(c.id);activateCompanionStudioTab('cs-social');
+  },base);
+  // A real, tiny WebM test pattern verifies upload and browser playback without a provider.
+  const media=await page.evaluate(async()=>{const canvas=document.createElement('canvas');canvas.width=64;canvas.height=64;canvas.getContext('2d').fillRect(0,0,64,64);const stream=canvas.captureStream(10),recorder=new MediaRecorder(stream,{mimeType:'video/webm'}),chunks=[];recorder.ondataavailable=e=>chunks.push(e.data);const done=new Promise(resolve=>recorder.onstop=resolve);recorder.start();const paint=setInterval(()=>{const ctx=canvas.getContext('2d');ctx.fillStyle=Date.now()%2?'#247fff':'#24bb77';ctx.fillRect(0,0,64,64);},40);await new Promise(r=>setTimeout(r,500));clearInterval(paint);recorder.stop();await done;stream.getTracks().forEach(t=>t.stop());return await blobToDataUrl(new Blob(chunks,{type:'video/webm'}));});
+  await page.locator('#cs-starter-clips [data-file]').setInputFiles({name:'starter.webm',mimeType:'video/webm',buffer:Buffer.from(media.split(',')[1],'base64')});
+  await page.getByText('Starter clip saved.',{exact:true}).waitFor();await page.waitForFunction(()=>document.querySelector('#cs-starter-clips video')?.videoWidth===64);
+  await page.locator('#cs-starter-clips textarea').fill('An old weekend clip.');await page.locator('#cs-starter-clips textarea').blur();
+  const started=await page.evaluate(async()=>{const c=getCompanion('shared-life-fixture');await vh2CreateTimeline(c);const t=getActiveCompanionTimeline(c.id);await vhUiCommand(t,'set_running',{running:false});state.activeCompanionId=c.id;switchView('companionChat');renderCompanionThread();return {worldId:t.vh2.worldId,posts:t.vh2.socialPosts.length,clips:c.videoJobs.length,refs:t.vh2.bible.entries.length,sessions:ensureCompanionTimelineStore(c.id).sessions.length};});
+  assert.equal(started.posts,1);assert.equal(started.clips,1);assert.equal(started.refs,1);assert.equal(started.sessions,1);
+  await page.locator('#companion-new-timeline-btn').click();let picker=page.getByRole('dialog',{name:'New conversation'});await picker.getByRole('button',{name:'Noah · Start chat',exact:true}).click();await picker.waitFor({state:'detached'});
+  let status=await page.evaluate(()=>({worldId:getActiveCompanionTimeline('shared-life-fixture').vh2.worldId,persona:getActiveCompanionTimeline('shared-life-fixture').personaId,count:ensureCompanionTimelineStore('shared-life-fixture').sessions.length,messages:getCompanionThread('shared-life-fixture').length}));
+  assert.equal(status.worldId,started.worldId);assert.equal(status.persona,'noah');assert.equal(status.count,2);assert.equal(status.messages,0);
+  await page.locator('#companion-new-timeline-btn').click();picker=page.getByRole('dialog',{name:'New conversation'});await picker.getByRole('button',{name:'Noah · Current chat',exact:true}).click();await picker.waitFor({state:'detached'});assert.equal(await page.evaluate(()=>ensureCompanionTimelineStore('shared-life-fixture').sessions.length),2);
+  await page.locator('#cc-persona-select').selectOption('lena');await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').personaId==='lena');
+  await page.locator('#cc-profile-details > summary').click();await page.locator('.vh-contact-relationship [data-role]').selectOption('best_friend');await page.locator('.vh-contact-relationship [data-days]').fill('2000');await page.locator('.vh-contact-relationship [data-context]').fill('Friends since school.');await page.getByRole('button',{name:'Save connection',exact:true}).click();await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').vh2.contactRelationship.role==='best_friend');
+  await page.evaluate(async()=>{const t=getActiveCompanionTimeline('shared-life-fixture');await vhUiCommand(t,'receive_message',{text:'A private message from Lena.'});});
+  await page.locator('#cc-persona-select').selectOption('noah');await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').personaId==='noah');assert.equal(await page.evaluate(()=>getCompanionThread('shared-life-fixture').length),0);
+  await page.locator('#companion-new-timeline-btn').click();await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), 'vh-persona-conversations-desktop.png')});await page.setViewportSize({width:390,height:844});await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), 'vh-persona-conversations-mobile.png')});assert(await page.evaluate(()=>document.querySelector('.vh-conversation-picker').getBoundingClientRect().width<=390));await page.getByRole('dialog',{name:'New conversation'}).getByRole('button',{name:'Close',exact:true}).click();
+  const result=await page.evaluate(async()=>{
+   const c=getCompanion('shared-life-fixture');const archive=await buildCompanionArchivePayload(c,'portable-human');
+   if(archive.vh2ServiceArchives.length!==1)throw Error('Expected one authoritative life archive for both chats.');
+   const originalRequest=mcpBridgeRequest;let restoredWorld;
+   mcpBridgeRequest=async(path,options)=>{const response=await originalRequest(path,options);if(path==='/vh2/character/restore'){restoredWorld=response.worlds[0].worldId;throw Error('Fixture: connection lost after service import.');}return response;};
+   try{await importCompanionArchiveData(archive);throw Error('Expected interrupted import.');}catch(error){if(!error.message.includes('Fixture: connection lost'))throw error;}finally{mcpBridgeRequest=originalRequest;}
+   const imported=await importCompanionArchiveData(archive);const store=ensureCompanionTimelineStore(imported.id);
+   if(store.sessions[0].vh2.worldId!==restoredWorld)throw Error('Interrupted import duplicated its life.');
+   for(const t of store.sessions)await vh2Poll(imported,t,{force:true,throwOnError:true});
+   const lena=store.sessions.find(t=>t.personaId==='lena'),noah=store.sessions.find(t=>t.personaId==='noah');
+   const clip=imported.videoJobs[0],blob=await HordeDB.get('companionVideoAsset:'+clip.assetId);
+   const normalized=validateCompanionArchiveData(archive),hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(normalized))))).map(b=>b.toString(16).padStart(2,'0')).join('');
+   await HordeDB.set('vh-character-import:'+hash,{companionId:imported.id,importId:'completed-receipt-fixture'});
+   if((await importCompanionArchiveData(archive)).id!==imported.id)throw Error('Saved import with an uncleared receipt was duplicated.');
+   return {worldId:lena.vh2.worldId,otherWorld:noah.vh2.worldId,paused:!lena.vh2.running&&!noah.vh2.running,first:lena.messages.map(m=>m.text),second:noah.messages.map(m=>m.text),clipType:blob?.type,posts:lena.vh2.socialPosts.length,refs:lena.vh2.bible.entries.length};
+  });
+  assert.notEqual(result.worldId,started.worldId);assert.equal(result.worldId,result.otherWorld);assert(result.paused);assert(result.first.includes('A private message from Lena.'));assert.deepEqual(result.second,[]);assert.equal(result.clipType,'video/webm');assert.equal(result.posts,1);assert.equal(result.refs,1);
+  const template=await page.evaluate(async()=>{
+   const archive=await buildCompanionArchivePayload(getCompanion('shared-life-fixture'),'character-template');
+   if(archive.vh2ServiceArchives||archive.timelines)throw Error('Template leaked lived history.');
+   const imported=await importCompanionArchiveData(archive);state.activeCompanionId=imported.id;
+   await vh2CreateTimeline(imported);const t=getActiveCompanionTimeline(imported.id);await vhUiCommand(t,'set_running',{running:false});
+   const video=await HordeDB.get('companionVideoAsset:'+imported.videoJobs[0].assetId);
+   return {worldId:t.vh2.worldId,posts:t.vh2.socialPosts.length,clips:imported.videoJobs.length,refs:t.vh2.bible.entries.length,messages:t.messages,videoType:video?.type};
+  });
+  assert.notEqual(template.worldId,started.worldId);assert.notEqual(template.worldId,result.worldId);
+  assert.equal(template.posts,1);assert.equal(template.clips,1);assert.equal(template.refs,1);assert.deepEqual(template.messages,[]);assert.equal(template.videoType,'video/webm');
+  await page.evaluate(async()=>{const c=getCompanion('shared-life-fixture');state.activeCompanionId=c.id;const t=ensureCompanionTimelineStore(c.id).sessions.find(t=>t.personaId==='noah');activateCompanionTimeline(c.id,t.id);await vh2Poll(c,t,{force:true,throwOnError:true});switchView('companionChat');renderCompanionThread();});
+  const action=async(kind,title,name)=>{await page.locator('.companion-thread-menu > summary').click();await page.locator('#companion-'+kind+'-timeline-btn').click();const dialog=page.getByRole('dialog',{name:title,exact:true});if(name)await dialog.locator('input').fill(name);await dialog.getByRole('button',{name:title,exact:true}).click();await dialog.waitFor({state:'detached'});};
+  await action('rename','Rename chat','Noah — test chat');assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('shared-life-fixture').name),'Noah — test chat');
+  await page.evaluate(async()=>{const t=getActiveCompanionTimeline('shared-life-fixture');await vhUiCommand(t,'receive_message',{text:'Clear only this conversation.'});});
+  await action('clear','Clear messages');assert.equal(await page.evaluate(()=>getCompanionThread('shared-life-fixture').length),0);
+  assert(await page.evaluate(()=>ensureCompanionTimelineStore('shared-life-fixture').sessions.find(t=>t.personaId==='lena').messages.some(m=>m.text==='A private message from Lena.')));
+  await action('reset','Reset chat & relationship');
+  await action('delete','Delete chat');assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('shared-life-fixture').personaId),'lena');
+  await action('delete','Delete chat');assert.equal(await page.locator('#companion-timeline-select').textContent(),'Choose a persona');assert(await page.locator('#companion-send-btn').isDisabled());
+  await page.locator('#companion-new-timeline-btn').click();await page.getByRole('dialog',{name:'New conversation'}).getByRole('button',{name:'Noah · Start chat',exact:true}).click();await page.getByRole('dialog',{name:'New conversation'}).waitFor({state:'detached'});
+  assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('shared-life-fixture').vh2.worldId),started.worldId);
+  assert.equal(await page.evaluate(()=>getCompanionThread('shared-life-fixture').length),0);assert(await page.locator('#companion-send-btn').isEnabled());
+  await page.evaluate(async()=>{const c=getCompanion('shared-life-fixture');await addCompanionStarterClip(c,c.startingVideoClips[0]);
+   // Reproduce an older saved starter that never reached an already-existing life.
+   c.startingVideoClips.push(normalizeCompanionVideoJob({...c.startingVideoClips[0],id:'missed-starter',caption:'An older starter clip.'}));await saveState();
+   companionSocialTab='clips';companionSocialPanelVisibility.set(companionSocialPanelKey(c),true);renderCompanionSocialPanel(c);
+  });
+  await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').vh2.clips?.some(j=>j.id==='missed-starter'));
+  await page.waitForFunction(()=>document.querySelectorAll('.companion-clip-card.ready video').length===3&&[...document.querySelectorAll('.companion-clip-card.ready video')].every(v=>v.videoWidth===64));
+  await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), 'vh-chat-actions-starter-clips.png')});
+  await page.evaluate(async()=>{const c=getCompanion('shared-life-fixture');await vh2Poll(c,getActiveCompanionTimeline(c.id),{force:true,throwOnError:true});});
+  assert.equal(await page.locator('.companion-clip-card.ready').count(),3);
+  const savedPhoto=await page.evaluate(async()=>{
+   const c=getCompanion('shared-life-fixture'),t=getActiveCompanionTimeline(c.id);
+   await vh2SaveImageProvider(c,t,{scope:'horde:'+c.id,provider:'openrouter',model:'fixture/image',apiKey:'OFFLINE_FIXTURE',enabled:false,dailyLimit:1,maxReferences:8});
+   const receipt=await vhUiCommand(t,'capture_photo',{scene:'A quiet moment at home with the captured outfit.',destination:'gallery'});
+   companionSocialTab='gallery';renderCompanionSocialPanel(c);
+   return receipt.photoId;
+  });
+  await page.locator('.vh-saved-moment').waitFor();
+  await page.locator('.vh-saved-moment summary').click();
+  assert.match(await page.locator('.vh-reference-tags').textContent(),/identity: Identity/);
+  assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('shared-life-fixture').vh2.providerJobs.filter(j=>j.kind==='image').length),0,'Viewing saved ideas must not queue image work');
+  await page.evaluate(()=>{document.querySelectorAll('.toast').forEach(t=>t.remove());document.getElementById('companion-social-content').scrollTop=0;});
+  await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), 'vh-saved-gallery-mobile.png')});
+  assert(await page.evaluate(()=>document.querySelector('.vh-saved-gallery').getBoundingClientRect().width<=390));
+  await page.locator('[data-generate-moment]').click();
+  const review=page.getByRole('dialog',{name:'Review captured photo'});await review.getByRole('button',{name:'Generate this photo · uses credits'}).waitFor();
+  assert.match(await review.textContent(),/identity: Identity/);
+  await review.getByRole('button',{name:'Generate this photo · uses credits'}).click();
+  const activity=page.getByRole('dialog',{name:'Image activity',exact:true});await activity.waitFor();
+  await page.waitForFunction(id=>getActiveCompanionTimeline('shared-life-fixture').vh2.photos.some(p=>p.id===id&&p.assetId),savedPhoto);
+  assert.match(await activity.locator('.vh-image-purpose').textContent(),/Personal gallery idea/);
+  await activity.getByRole('button',{name:'Close',exact:true}).click();
+  await page.evaluate(()=>renderCompanionSocialPanel(getCompanion('shared-life-fixture')));
+  assert.match(await page.locator('.vh-gallery-ready').textContent(),/Private gallery · not posted or sent/);
+  await page.setViewportSize({width:1440,height:1050});await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), 'vh-saved-gallery-desktop.png')});
+  assert.deepEqual(errors,[]);console.log('PASS starter upload/playback before and after life creation, repair of missed starters, all four real chat-menu actions, last-chat deletion/reopening, persona isolation, shared life, both portable imports, saved gallery references, free preview and one explicit fixture image render. No external providers.');
+ }finally{await browser?.close();server.kill('SIGTERM');}
+})().catch(error=>{console.error(error);process.exitCode=1;});

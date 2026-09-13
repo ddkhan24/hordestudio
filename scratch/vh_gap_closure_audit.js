@@ -1,0 +1,23 @@
+const assert=require('node:assert/strict'),vm=require('node:vm');
+const engine=require('../vh-activity-engine'),worker=require('../vh-host-worker'),{buildContext}=require('./app_source');
+const ctx={console,state:{globalSettings:{},personas:[],companions:[],companionThreads:{},companionTimelines:{}}};
+buildContext(vm,['normalizeCompanion','companionConversationTransition'],ctx);
+const t=Date.UTC(2026,8,9,12),m=60000;
+function breakState(override={}){const s=engine.normalize({lastAdvancedAt:t});const situation={source:'schedule',blockId:'work',availability:'busy',startedAt:t-180*m,endsAt:t+240*m,placeId:'work',breakAllowed:true,...override};engine.advanceBreak(s,t,{situation,hunger:90,energy:60,policy:{}});return {s,situation};}
+const {s,situation}=breakState();assert(s.break.goalId);const goal=s.goals[0];let hunger=90;
+for(let n=0;n<25;n++){const delta=engine.advance(s,t+(n+1)*m,{availability:'available',placeId:'work',onlyGoalId:goal.id});hunger+=delta.hunger;}
+assert.equal(goal.status,'completed');assert.equal(hunger,40);engine.advanceBreak(s,t+25*m,{situation,hunger,energy:70});assert.equal(s.break.goalId,'');assert(s.events.some(e=>e.kind==='break_ended'));
+assert(!breakState({breakAllowed:false}).s.break.goalId);assert(!breakState({availability:'private'}).s.break.goalId);assert(!breakState({source:'travel'}).s.break.goalId);
+const unavailable=engine.normalize();engine.advanceBreak(unavailable,t,{situation,hunger:90,energy:60,policy:{foodAvailable:false}});assert(!unavailable.break.goalId);
+function choice(conscientiousness,sociability,hunger=10){const s=engine.normalize({lastAdvancedAt:t});for(const kind of ['focus','contact','meal']){const g=engine.addGoal(s,kind,kind,t);g.priority=40;}engine.advance(s,t+m,{availability:'available',energy:90,stress:10,hunger,socialNeed:30,seed:'same',policy:{variation:0,conscientiousness,sociability,personalityWeight:3}});return s.decision.goalId;}
+assert.equal(choice(100,0),'focus');assert.equal(choice(0,100),'contact');assert.equal(choice(100,0,100),'meal');
+function person(){return ctx.normalizeCompanion({id:'handoff',name:'Ada',age:28,initiativeMode:'balanced',locationMode:'custom',timezoneOffsetMinutes:0,lifeProfile:{initializedAt:t,places:[{id:'home',kind:'home',label:'Home'}],weeklySchedule:[]},lifeRuntime:{lastSimulatedAt:t,activities:{lastAdvancedAt:t}},humanDynamics:{lastUpdated:t,sleep:{stage:'winding_down',pressure:85,lastAt:t,windDownAt:t-5*m,lastWakeAt:t-16*3600000}},mood:{lastUpdated:t},emotionState:{lastUpdated:t}});}
+const messages=[{id:'u',role:'user',type:'text',text:'Long day?',timestamp:t-m},{id:'c',role:'companion',type:'text',text:'yeah',timestamp:t-m}];const c=person();c.initiativeMode='balanced';
+const first=worker.run({companion:c,messages,now:t,experience:{realTimeLife:true}});assert(first.handoff);assert.match(first.dialogueGuidance,/sign-off/);assert.equal(first.handoff.key,ctx.companionConversationTransition(c,messages,t).upcoming.key);
+const committed=worker.run({companion:c,messages,now:t,experience:{realTimeLife:true},commit:{state:{},text:'night',handoffKey:first.handoff.key}});assert.equal(committed.companion.continuityRuntime.lastHandoffKey,first.handoff.key);assert(!worker.run({companion:committed.companion,messages,now:t,experience:{realTimeLife:true}}).handoff);
+const silent=person();silent.initiativeMode='off';assert(!worker.run({companion:silent,messages,now:t,experience:{realTimeLife:true}}).handoff);
+assert(!worker.run({companion:person(),messages:[],now:t,experience:{realTimeLife:true}}).handoff);
+console.log('PASS executable meal breaks, return to obligation, forbidden breaks, food access, personality-sensitive competition, urgent needs, shared handoffs and commit deduplication');
+const routePerson=person();routePerson.humanDynamics.sleep.stage='awake';routePerson.lifeProfile.places.push({id:'work',label:'Office',kind:'work'});routePerson.lifeProfile.weeklySchedule=[{id:'shift',days:[3],startMinute:750,endMinute:1020,activity:'Work',placeId:'work',availability:'busy',withIds:[],departureCosts:{}}];routePerson.lifeProfile.travelLegs=[{from:'home',to:'work',mode:'WALK',minutes:25,cost:0}];routePerson.lifeProfile.world.transport.enabled=true;routePerson.lifeRuntime.world.placeId='home';
+const departure=ctx.companionConversationTransition(routePerson,messages,t).upcoming;assert(departure);assert.equal(departure.at,t+5*m);assert.match(departure.activity,/leaving for Work/);
+routePerson.lifeProfile.weeklySchedule[0].departureCosts={ticket:1};assert(!ctx.companionConversationTransition(routePerson,messages,t).upcoming,'missing departure supplies must not fabricate a planned departure');

@@ -19,6 +19,7 @@ import hashlib
 import ipaddress
 import json
 import math
+import vh_maps_budget
 import platform
 import mimetypes
 import os
@@ -37,6 +38,9 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from vh2_runtime import WorldService, Conflict as VH2Conflict
+from vh2_migration import inspect_archive
+from vh2_provider import RejectedOutput, UnknownOutcome
 
 # ── Load .env if present ────────────────────────────────────
 APP_DIR = Path(__file__).resolve().parent
@@ -113,19 +117,24 @@ PROVIDERS = {
     },
 }
 STATIC_FILES = {
+    "/vh2.html": ("vh2.html", "text/html"),
+    "/vh2-dashboard.js": ("vh2-dashboard.js", "text/javascript"),
     "/": ("index.html", "text/html"),
     "/index.html": ("index.html", "text/html"),
     "/style.css": ("style.css", "text/css"),
     "/app.js": ("app.js", "text/javascript"),
+    "/bundled-humans.js": ("bundled-humans.js", "text/javascript"),
+    "/human-package.js": ("human-package.js", "text/javascript"),
+    "/vh-life-schema.js": ("vh-life-schema.js", "text/javascript"),
+    "/vh-workspace.js": ("vh-workspace.js", "text/javascript"),
+    "/vh-assistant-ui.js": ("vh-assistant-ui.js", "text/javascript"),
+    "/vh-setup-ui.js": ("vh-setup-ui.js", "text/javascript"),
+    "/vh-workspace.css": ("vh-workspace.css", "text/css"),
+    "/vh2-horde-integration.js": ("vh2-horde-integration.js", "text/javascript"),
     "/video-worlds.js": ("video-worlds.js", "text/javascript"),
     "/presets.js": ("presets.js", "text/javascript"),
     "/boot-diagnostics.js": ("boot-diagnostics.js", "text/javascript"),
     "/policy-panic-world.js": ("policy-panic-world.js", "text/javascript"),
-    # Advertised built-in Virtual Humans. Source/development launches load
-    # these as sidecars; portable releases additionally inline them so the
-    # public archive cannot accidentally omit either definition.
-    "/ashlyn-reynolds-human.js": ("ashlyn-reynolds-human.js", "text/javascript"),
-    "/jane-harlow-human.js": ("jane-harlow-human.js", "text/javascript"),
     "/labs-embedded.js": ("labs-embedded.js", "text/javascript"),
     "/labs-embedded-worker.js": ("labs-embedded-worker.js", "text/javascript"),
     "/labs-needle.js": ("labs-needle.js", "text/javascript"),
@@ -135,6 +144,7 @@ STATIC_FILES = {
     "/labs-ui.js": ("labs-ui.js", "text/javascript"),
     "/labs-guide.js": ("labs-guide.js", "text/javascript"),
     "/help-system.js": ("help-system.js", "text/javascript"),
+    "/Ashlyn%20Reynolds.horde_human": ("Ashlyn Reynolds.horde_human", "application/json"),
     "/multiplayer.js": ("multiplayer.js", "text/javascript"),
     "/multiplayer-engine.js": ("multiplayer-engine.js", "text/javascript"),
     "/rpg-mechanics.js": ("rpg-mechanics.js", "text/javascript"),
@@ -153,6 +163,7 @@ STATIC_FILES = {
 # Serve only these explicit public trees; never expose arbitrary files from the
 # application directory through the localhost bridge.
 STATIC_MEDIA_ROOTS = (
+    ("/world-packs/", APP_DIR / "world-packs"),
     ("/assets/bundled/", APP_DIR / "assets" / "bundled"),
     ("/assets/worlds/", APP_DIR / "assets" / "worlds"),
 )
@@ -412,6 +423,7 @@ class AlwaysOnRuntime:
         human["simulation"] = {"companion": state["companion"], "messages": state["messages"],
                                "experience": snapshot.get("experience", {})}
         human["allowOpening"] = bool(state.get("openingDueAt"))
+        human["handoff"] = state.get("handoff")
         human["pendingIds"] = state["pendingIds"]
         human["replyIds"] = state["replyIds"]
         human["present"] = state["present"]
@@ -422,6 +434,8 @@ class AlwaysOnRuntime:
             human["hasSpoken"] = True
         elif not state["available"]:
             human["messageDueAt"] = 0
+        elif state.get("handoff"):
+            human["messageDueAt"] = now_ms
         elif state.get("openingDueAt"):
             human["messageDueAt"] = state["openingDueAt"]
         elif state.get("followupDueAt"):
@@ -470,10 +484,11 @@ class AlwaysOnRuntime:
                 # The user may reopen Horde Studio while a provider request is
                 # already in flight. The browser immediately regains authority;
                 # discarding this late result prevents a duplicated reply.
-                if not lease_reclaimed and not agency_paused and self.enabled and live is not None and decision == kind and text:
+                handoff_expired = bool(kind == "message" and human.get("handoff") and int(time.time()*1000) >= human["handoff"]["at"])
+                if not lease_reclaimed and not agency_paused and not handoff_expired and self.enabled and live is not None and decision == kind and text:
                     event_id = f"always_{secrets.token_hex(12)}"
                     consumed = list(human.get("replyIds") or []) if kind == "message" else []
-                    snapshot = self._simulation(human, now_ms, {"state": result.get("state") or {}, "text": text} if kind == "message" else None) if human.get("simulation") else None
+                    snapshot = self._simulation(human, now_ms, {"state": result.get("state") or {}, "text": text, "handoffKey": (human.get("handoff") or {}).get("key", "")} if kind == "message" else None) if human.get("simulation") else None
                     if snapshot:
                         for message in human["simulation"]["messages"]:
                             if message.get("id") in consumed:
@@ -574,6 +589,124 @@ class AlwaysOnRuntime:
 
 
 always_on_runtime = AlwaysOnRuntime()
+
+# Lazy creation keeps ordinary VH1 launches free of a new writable database.
+vh2_service = None
+vh2_service_lock = threading.Lock()
+
+def vh2_note_image_acceptance(config, result):
+    """Report acceptance only when the tool returns identifiable provider jobs."""
+    callback = config.get('_on_provider_accepted')
+    if not callable(callback) or result.get('isError'):
+        return
+    data = mcp_result_data(result)
+    if data.get('error') or data.get('unlim_choice'):
+        return
+    provider = config.get('provider')
+    if provider == 'magnific':
+        jobs = data.get('creations') or ([data['creation']] if isinstance(data.get('creation'), dict) else [])
+        field = 'identifier'
+    elif provider == 'higgsfield':
+        jobs = data.get('results') or data.get('jobs') or []
+        field = 'id'
+    else:
+        return
+    if not isinstance(jobs, list):
+        return
+    ids = []
+    failed = {'failed', 'error', 'cancelled', 'canceled', 'rejected', 'nsfw', 'ip_detected'}
+    for job in jobs:
+        if not isinstance(job, dict) or job.get('error') or str(job.get('status', '')).lower() in failed:
+            continue
+        ident = job.get(field)
+        if type(ident) not in (str, int, float):
+            continue
+        if isinstance(ident, float) and not math.isfinite(ident):
+            continue
+        ident = str(ident).strip()
+        if not ident or len(ident) > 300 or re.search(r'\s|://|^data:', ident, re.I):
+            continue
+        if ident not in ids:
+            ids.append(ident)
+        if len(ids) >= 20:
+            break
+    if ids:
+        try:
+            callback(ids)
+        except Exception:
+            # Acceptance telemetry is auxiliary. Its failure must never lose
+            # the paid result or trigger a second generation submission.
+            pass
+
+
+def vh2_background_image(config, key, body):
+    import vh2_workers, vh2_image_adapters
+    provider = config.get('provider', 'openrouter')
+    if provider not in ('magnific', 'higgsfield'):
+        return vh2_workers.image_transport(config, key, body)
+    # Nothing in this phase submits image generation. Preserve an actionable
+    # failure rather than claiming that the paid submission is uncertain.
+    stage = 'loading the provider tool catalog'
+    try:
+        tool = next((t for t in list_tools(provider) if t['name'] == config['tool']), None)
+        if not tool:
+            raise RejectedOutput('Configured MCP image tool is no longer available. Choose another image tool.')
+        stage = 'validating image settings'
+        arguments = vh2_image_adapters.mcp_arguments(config, body, tool)
+        stage = 'uploading and registering reference images'
+        prepare = prepare_magnific_references if provider == 'magnific' else prepare_higgsfield_references
+        progress = config.get('_on_reference_progress')
+        arguments = prepare(arguments, on_progress=progress) if callable(progress) else prepare(arguments)
+    except Exception as error:
+        raise RejectedOutput('Image not submitted while '+stage+': ' + vh2_image_adapters.safe_error_detail(error, (key,))) from None
+    try:
+        result = call_tool(provider, config['tool'], arguments)
+        vh2_note_image_acceptance(config, result)
+        result = wait_magnific_image(result) if provider == 'magnific' else wait_higgsfield_image(result)
+        return result_image(result)[0]
+    except RejectedOutput as error:
+        raise RejectedOutput(vh2_image_adapters.safe_error_detail(error, (key,))) from None
+    except Exception as error:
+        raise UnknownOutcome('Image result not confirmed: ' + vh2_image_adapters.safe_error_detail(error, (key,)) + ' No automatic resubmission.') from None
+
+
+def vh2_photo_preview(service, world_id, photo_id):
+    """Compile the service's current image request without changing or sending it."""
+    import vh2_workers
+    with service.connect() as db:
+        db.execute('BEGIN')
+        revision, state = service.read(db, world_id)
+        provider = vh2_workers.current(db, state.get('integration', {}).get('providerScope'))
+        if not provider:
+            raise ValueError('Choose an image provider and model in image settings first.')
+        config = json.loads(provider['config'])
+        capture = db.execute('SELECT snapshot FROM photo_jobs WHERE id=? AND world_id=?', (photo_id, world_id)).fetchone()
+        if not capture:
+            raise ValueError('Unknown photo capture.')
+        photo = next((p for p in state.get('photos', []) if p['id'] == photo_id), None) or __import__('vh2_library').get(db, world_id, 'photo', photo_id)
+        request, _, references = vh2_workers.compile_image(db, world_id, state, json.loads(capture['snapshot']), config, photo)
+        model = config['model']
+        if model == 'provider default':
+            arguments = config.get('arguments', {})
+            arguments = arguments.get('params', arguments)
+            if isinstance(arguments, dict):
+                model = next((arguments[k] for k in ('model', 'model_id', 'modelId', 'model_name', 'mode') if isinstance(arguments.get(k), str) and arguments[k]), model)
+        # Never expose provider keys, input bytes or arbitrary native arguments.
+        return {'provider': config.get('provider', 'openrouter'), 'model': model,
+                'prompt': request['prompt'], 'referenceAssetIds': references,
+                'providerVersion': provider['id'], 'revision': revision}
+
+
+def get_vh2_service():
+    global vh2_service
+    with vh2_service_lock:
+        if vh2_service is None:
+            vh2_service = WorldService(CONFIG_DIR / "vh2-worlds.sqlite", always_on_runtime._node_path(), APP_DIR)
+            vh2_service.image_executor=vh2_background_image
+            vh2_service.route_executor=lambda body:maps_request("route",body)
+            vh2_service.start()
+        return vh2_service
+
 
 
 class MultiplayerRuntime:
@@ -1242,7 +1375,8 @@ def maps_settings_status():
     ors_saved = bool(settings.get("orsKey"))
     return {"configured": bool(maps_key()), "source": "settings" if saved else "environment" if maps_key() else "none",
             "provider": settings.get("provider", "google"), "orsConfigured": bool(maps_key("openrouteservice")),
-            "orsSource": "settings" if ors_saved else "environment" if maps_key("openrouteservice") else "none"}
+            "orsSource": "settings" if ors_saved else "environment" if maps_key("openrouteservice") else "none",
+            "usage": vh_maps_budget.usage(CONFIG_DIR)}
 
 
 def update_maps_settings(body):
@@ -1295,7 +1429,7 @@ def openroute_request(action, body):
         if not query or len(query) > 300:
             raise ValueError("Enter a place and city (maximum 300 characters).")
         url = "https://api.heigit.org/pelias/v1/search?" + urllib.parse.urlencode({"text": query, "size": 5})
-        status, _, result = json_request(url, "GET", headers, timeout=12)
+        status, _, result = vh_maps_budget.request(CONFIG_DIR, "openrouteservice", action, lambda: json_request(url, "GET", headers, timeout=12))
     elif action == "route":
         profiles = {"WALK": "foot-walking", "BICYCLE": "cycling-regular", "DRIVE": "driving-car", "RIDESHARE": "driving-car"}
         mode = body.get("mode", "WALK")
@@ -1303,7 +1437,7 @@ def openroute_request(action, body):
             raise ValueError("openrouteservice does not support transit here. Use authored transit times or select Google explicitly.")
         coords = [maps_coordinates(body.get("originCoordinates")), maps_coordinates(body.get("destinationCoordinates"))]
         url = "https://api.heigit.org/openrouteservice/v2/directions/" + profiles[mode] + "/json"
-        status, _, result = json_request(url, "POST", headers, {"coordinates": coords, "instructions": False, "geometry": False}, timeout=12)
+        status, _, result = vh_maps_budget.request(CONFIG_DIR, "openrouteservice", action, lambda: json_request(url, "POST", headers, {"coordinates": coords, "instructions": False, "geometry": True}, timeout=12))
     else:
         raise ValueError("Unknown maps operation.")
     if status >= 400:
@@ -1324,8 +1458,18 @@ def openroute_request(action, body):
         summary = route.get("summary", {})
         duration, distance = summary.get("duration"), summary.get("distance")
         if isinstance(duration, (int, float)) and 0 < duration <= 86400 and isinstance(distance, (int, float)) and distance >= 0:
-            routes.append({"duration": f"{duration}s", "distanceMeters": distance})
+            routes.append({"duration": f"{duration}s", "distanceMeters": distance, "geometry": route.get("geometry")})
     return {"provider": "openrouteservice", "attribution": attribution, "routes": routes}
+
+
+def google_route_endpoint(body, side):
+    coordinates = maps_coordinates(body[side + "Coordinates"]) if body.get(side + "Coordinates") is not None else None
+    if coordinates is not None:
+        return {"location": {"latLng": {"latitude": coordinates[1], "longitude": coordinates[0]}}}
+    place_id = body.get(side)
+    if not isinstance(place_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,300}", place_id):
+        raise ValueError("Choose a place or enter valid coordinates for each route endpoint.")
+    return {"placeId": place_id}
 
 
 def google_maps_request(action, body):
@@ -1339,20 +1483,20 @@ def google_maps_request(action, body):
             raise ValueError("Enter a place and city (maximum 300 characters).")
         url = "https://places.googleapis.com/v1/places:searchText"
         payload = {"textQuery": query, "pageSize": 5}
-        fields = "places.id,places.displayName,places.formattedAddress"
+        fields = "places.id,places.displayName,places.formattedAddress,places.location"
     elif action == "route":
-        origin, destination = str(body.get("origin", "")), str(body.get("destination", ""))
+        origin, destination = google_route_endpoint(body, "origin"), google_route_endpoint(body, "destination")
         mode = body.get("mode", "WALK")
-        if not all(re.fullmatch(r"[A-Za-z0-9_-]{1,300}", v) for v in (origin, destination)):
-            raise ValueError("Select both Google places first.")
         if mode not in {"WALK", "DRIVE", "BICYCLE", "TRANSIT"}:
             raise ValueError("Unsupported travel mode.")
         url = "https://routes.googleapis.com/directions/v2:computeRoutes"
-        payload = {"origin": {"placeId": origin}, "destination": {"placeId": destination}, "travelMode": mode}
-        fields = "routes.duration,routes.distanceMeters"
+        payload = {"origin": origin, "destination": destination, "travelMode": mode}
+        fields = "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline"
     else:
         raise ValueError("Unknown Maps operation.")
-    status, _, result = json_request(url, "POST", {"X-Goog-Api-Key": key, "X-Goog-FieldMask": fields}, payload, timeout=12)
+    status, _, result = vh_maps_budget.request(CONFIG_DIR, "google", action, lambda: json_request(url, "POST", {"X-Goog-Api-Key": key, "X-Goog-FieldMask": fields}, payload, timeout=12))
+    if status == 429:
+        raise ValueError("Google Maps rate limit reached (429). Calls are paused for at least 60 seconds. Use saved travel estimates or check the provider quota.")
     if status >= 400:
         raise ValueError(f"Google Maps request failed ({status}). Check API enablement, billing and key restrictions.")
     return result
@@ -1646,15 +1790,15 @@ def list_tools(provider_id: str) -> list[dict[str, Any]]:
     raise RuntimeError("The MCP tool catalog exceeded the pagination limit.")
 
 
-def call_tool(provider_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def call_tool(provider_id: str, name: str, arguments: dict[str, Any], timeout: int = 300) -> dict[str, Any]:
     ensure_mcp(provider_id)
     result, _ = mcp_post(provider_id, {
         "jsonrpc": "2.0", "id": secrets.randbelow(1_000_000),
         "method": "tools/call", "params": {"name": name, "arguments": arguments},
-    }, 300)
+    }, timeout)
     if result.get("isError"):
         text = " ".join(str(item.get("text", "")) for item in result.get("content", []) if isinstance(item, dict))
-        raise RuntimeError(text or "The MCP image tool reported a failure.")
+        raise RejectedOutput(text or "The MCP tool reported a failure.")
     return result
 
 
@@ -1685,10 +1829,77 @@ def mcp_generated_values(value: Any):
             yield from mcp_generated_values(child)
 
 
-def prepare_higgsfield_references(arguments: dict[str, Any]) -> dict[str, Any]:
+REFERENCE_UPLOAD_TIMEOUT = 30
+
+
+def reference_upload_progress(callback, provider, index, total, stage, attempt=1, detail=''):
+    if not callable(callback):
+        return
+    label = provider.title() + ' reference ' + str(index) + ' of ' + str(total)
+    messages = {'requesting_upload': 'Requesting an upload slot', 'uploading_reference': 'Uploading',
+                'retrying_reference': 'Retrying upload with a fresh slot', 'confirming_reference': 'Registering',
+                'reference_ready': 'Ready'}
+    try:
+        callback({'stage': stage, 'index': index, 'total': total, 'attempt': attempt,
+                  'message': messages.get(stage, stage) + ': ' + label + ('. ' + detail if detail else '')})
+    except Exception:
+        pass  # Progress reporting cannot change upload/submission semantics.
+
+
+def upload_reference_bytes(provider, content, mime, index, total, create_slot, confirm, on_progress=None):
+    """Retry only a transient binary upload, once, using an entirely new slot."""
+    from vh2_image_adapters import safe_error_detail
+    used_urls = set()
+    label = provider.title() + ' reference ' + str(index) + ' of ' + str(total)
+    for attempt in (1, 2):
+        stage = 'requesting an upload slot'
+        try:
+            reference_upload_progress(on_progress, provider, index, total, 'requesting_upload', attempt)
+            url, ident = create_slot()
+            if not isinstance(url, str) or not url.startswith('https://') or not ident:
+                raise ValueError('Provider returned an invalid reference upload slot.')
+            if url in used_urls:
+                raise ValueError('Provider returned the same upload URL; it will not be reused. Try again later.')
+            used_urls.add(url)
+            stage = 'uploading image bytes'
+            reference_upload_progress(on_progress, provider, index, total, 'uploading_reference', attempt,
+                                      str(max(1, round(len(content) / 1024))) + ' KB')
+            transient = False
+            try:
+                status, _, _ = http_request(url, method='PUT', headers={'Content-Type': mime}, body=content,
+                                            timeout=REFERENCE_UPLOAD_TIMEOUT)
+                if 200 <= status < 300:
+                    failure = None
+                else:
+                    failure = RuntimeError('HTTP ' + str(status))
+                    transient = status in {408, 429, 500, 502, 503, 504}
+            except (TimeoutError, ConnectionError, urllib.error.URLError, OSError) as error:
+                failure = error
+                transient = True
+            if failure is not None:
+                if transient and attempt == 1:
+                    reference_upload_progress(on_progress, provider, index, total, 'retrying_reference', 2,
+                                              'No image generation has been submitted.')
+                    continue
+                if isinstance(failure, TimeoutError) or isinstance(failure, urllib.error.URLError) and isinstance(failure.reason, TimeoutError):
+                    raise RuntimeError('Timed out after ' + str(REFERENCE_UPLOAD_TIMEOUT) + ' seconds on attempt ' + str(attempt) + '.')
+                raise failure
+            stage = 'registering the uploaded reference'
+            reference_upload_progress(on_progress, provider, index, total, 'confirming_reference', attempt)
+            result = confirm(ident)
+            reference_upload_progress(on_progress, provider, index, total, 'reference_ready', attempt)
+            return result
+        except Exception as error:
+            raise RuntimeError(label + ' upload failed while ' + stage + ': ' + safe_error_detail(error)
+                               + ' No image generation was submitted.') from None
+
+
+def prepare_higgsfield_references(arguments: dict[str, Any], on_progress=None) -> dict[str, Any]:
     arguments = json.loads(json.dumps(arguments))
     params = arguments.get("params", arguments)
-    for media in params.get("medias", []):
+    medias = params.get("medias", [])
+    available = None
+    for index, media in enumerate(medias, 1):
         value = media.get("value", "")
         if not isinstance(value, str) or not value.startswith("data:"):
             continue
@@ -1698,40 +1909,44 @@ def prepare_higgsfield_references(arguments: dict[str, Any]) -> dict[str, Any]:
         content = base64.b64decode(match[2], validate=True)
         if not content or len(content) > 20 * 1024 * 1024:
             raise ValueError("Reference must be between 1 byte and 20 MiB.")
-        available = {tool["name"] for tool in list_tools("higgsfield")}
+        if available is None:
+            available = {tool["name"] for tool in list_tools("higgsfield")}
         def operation(name):
             return next((key for key in (name, "higgsfield_" + name) if key in available), None)
         upload, confirm = operation("media_upload"), operation("media_confirm")
         if not upload or not confirm:
             raise RuntimeError("This Higgsfield connection does not advertise local reference upload. No generation was submitted.")
-        slot = mcp_result_data(call_tool("higgsfield", upload, {
-            "filename": "identity-reference." + match[1].split("/")[1], "content_type": match[1], "method": "upload_url"
-        }))
-        entries = slot.get("uploads") or []
-        if not entries or slot.get("error"):
-            raise RuntimeError("Higgsfield did not provide a reference upload slot.")
-        entry = entries[0]
-        url, media_id = entry.get("upload_url", ""), entry.get("media_id", "")
-        if not url.startswith("https://") or not media_id:
-            raise RuntimeError("Higgsfield returned an invalid reference upload slot.")
-        status, _, _ = http_request(url, method="PUT", headers={"Content-Type": match[1]}, body=content)
-        if not 200 <= status < 300:
-            raise RuntimeError("Higgsfield reference upload failed; no generation was submitted.")
-        confirmed = mcp_result_data(call_tool("higgsfield", confirm, {"media_id": media_id, "type": "image"}))
-        if confirmed.get("error") or not any(item.get("media_id") == media_id for item in confirmed.get("results", [])):
-            raise RuntimeError("Higgsfield did not confirm the reference; no generation was submitted.")
-        media["value"] = media_id
+        def create_slot():
+            slot = mcp_result_data(call_tool("higgsfield", upload, {
+                "filename": "reference-" + str(index) + "." + match[1].split("/")[1], "content_type": match[1], "method": "upload_url"
+            }, timeout=REFERENCE_UPLOAD_TIMEOUT))
+            entries = slot.get("uploads") or []
+            if not entries or slot.get("error"):
+                raise RuntimeError("Higgsfield did not provide a reference upload slot.")
+            return entries[0].get("upload_url", ""), entries[0].get("media_id", "")
+        def register(media_id):
+            confirmed = mcp_result_data(call_tool("higgsfield", confirm, {"media_id": media_id, "type": "image"}, timeout=REFERENCE_UPLOAD_TIMEOUT))
+            if confirmed.get("error") or not any(item.get("media_id") == media_id and not item.get('error') and str(item.get('status', '')).lower() not in {'failed','error','rejected','canceled','cancelled'} for item in confirmed.get("results", [])):
+                raise RuntimeError("Higgsfield did not confirm the uploaded reference.")
+            return media_id
+        media["value"] = upload_reference_bytes('higgsfield', content, match[1], index, len(medias), create_slot, register, on_progress)
     return arguments
 
 
-def prepare_magnific_references(arguments: dict[str, Any]) -> dict[str, Any]:
+def prepare_magnific_references(arguments: dict[str, Any], on_progress=None) -> dict[str, Any]:
     arguments = json.loads(json.dumps(arguments))
-    for reference in arguments.get("references", []):
+    references = arguments.get("references", [])
+    for index, reference in enumerate(references, 1):
         value = reference.get("identifier", "")
         if reference.get("type") != "image" or not isinstance(value, str):
             continue
         if value.startswith("https://"):
-            uploaded = mcp_result_data(call_tool("magnific", "creations_upload_image", {"url": value}))
+            reference_upload_progress(on_progress, 'magnific', index, len(references), 'uploading_reference')
+            try:
+                uploaded = mcp_result_data(call_tool("magnific", "creations_upload_image", {"url": value}, timeout=REFERENCE_UPLOAD_TIMEOUT))
+            except Exception as error:
+                from vh2_image_adapters import safe_error_detail
+                raise RuntimeError('Magnific reference '+str(index)+' of '+str(len(references))+' upload failed while importing its URL: '+safe_error_detail(error)+'. No image generation was submitted.') from None
         elif value.startswith("data:"):
             match = re.fullmatch(r"data:(image/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)", value)
             if not match:
@@ -1739,16 +1954,19 @@ def prepare_magnific_references(arguments: dict[str, Any]) -> dict[str, Any]:
             content = base64.b64decode(match[2], validate=True)
             if not content or len(content) > 25 * 1024 * 1024:
                 raise ValueError("Magnific references must be between 1 byte and 25 MiB.")
-            slot = mcp_result_data(call_tool("magnific", "creations_request_upload", {"mimeType": match[1]}))
-            if slot.get("uploads"):
-                slot = slot["uploads"][0]
-            url, path = slot.get("proxyUploadUrl", ""), slot.get("path", "")
-            if not url.startswith("https://") or not path or slot.get("error"):
-                raise RuntimeError("Magnific did not return a valid reference upload slot; generation was not submitted.")
-            status, _, _ = http_request(url, method="PUT", headers={"Content-Type": match[1]}, body=content)
-            if not 200 <= status < 300:
-                raise RuntimeError("Magnific reference upload failed; generation was not submitted.")
-            uploaded = mcp_result_data(call_tool("magnific", "creations_finalize_upload", {"path": path, "visible": False}))
+            def create_slot():
+                slot = mcp_result_data(call_tool("magnific", "creations_request_upload", {"mimeType": match[1]}, timeout=REFERENCE_UPLOAD_TIMEOUT))
+                if slot.get("error"):
+                    raise RuntimeError("Magnific did not return a reference upload slot.")
+                if slot.get("uploads"):
+                    slot = slot["uploads"][0]
+                return slot.get("proxyUploadUrl", ""), slot.get("path", "")
+            def register(path):
+                uploaded = mcp_result_data(call_tool("magnific", "creations_finalize_upload", {"path": path, "visible": False}, timeout=REFERENCE_UPLOAD_TIMEOUT))
+                if not uploaded.get('identifier') or uploaded.get('error') or uploaded.get('errorCount'):
+                    raise RuntimeError('Magnific did not register the uploaded reference.')
+                return uploaded
+            uploaded = upload_reference_bytes('magnific', content, match[1], index, len(references), create_slot, register, on_progress)
         else:
             continue  # Already a provider creation identifier.
         identifier = uploaded.get("identifier")
@@ -1782,7 +2000,7 @@ def magnific_creation_fields(result: dict[str, Any]) -> dict[str, Any]:
 def wait_magnific_image(result: dict[str, Any]) -> dict[str, Any]:
     data = mcp_result_data(result)
     if data.get("error"):
-        raise RuntimeError(str(data["error"]))
+        raise RejectedOutput(str(data["error"]))
     creations = data.get("creations") or ([data["creation"]] if data.get("creation") else [])
     identifiers = [item["identifier"] for item in creations if isinstance(item, dict) and item.get("identifier")]
     if not identifiers:
@@ -1793,7 +2011,8 @@ def wait_magnific_image(result: dict[str, Any]) -> dict[str, Any]:
         creation = magnific_creation_fields(call_tool("magnific", "creations_get", {"creationIdentifier": identifiers[0]}))
         status = str(creation.get("status", "")).lower()
         if creation.get("error") or status in {"failed", "error", "cancelled", "canceled", "rejected"}:
-            raise RuntimeError(f"Magnific creation {identifiers[0]} failed. Check the provider for details.")
+            detail = creation.get("error") or status
+            raise RejectedOutput(f"Magnific creation {identifiers[0]} failed: {detail}")
         url = creation.get("url")
         if isinstance(url, str) and url.startswith("https://") and status not in {"pending", "queued", "processing", "in_progress", "generating"}:
             return {"url": url}
@@ -1802,9 +2021,17 @@ def wait_magnific_image(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def wait_higgsfield_image(result: dict[str, Any]) -> dict[str, Any]:
+    def reject_failed_jobs(data):
+        jobs = data.get("results") or data.get("jobs") or []
+        failed = {"failed", "error", "canceled", "cancelled", "rejected", "nsfw", "ip_detected"}
+        if jobs and all(isinstance(job, dict) and str(job.get("status", "")).lower() in failed for job in jobs):
+            details = "; ".join(str(job.get("error") or job.get("message") or job["status"]) for job in jobs[:3])
+            raise RejectedOutput("Higgsfield image failed: " + details)
+
     data = mcp_result_data(result)
     if data.get("error") or data.get("unlim_choice"):
-        raise RuntimeError(str(data.get("error") or data["unlim_choice"].get("message") or "Choose a billing balance in the tool settings."))
+        raise RejectedOutput(str(data.get("error") or data["unlim_choice"].get("message") or "Choose a billing balance in the tool settings."))
+    reject_failed_jobs(data)
     jobs = data.get("results") or []
     pending = [job for job in jobs if isinstance(job, dict) and job.get("id") and job.get("status") not in {"completed", "failed", "canceled", "nsfw", "ip_detected"}]
     if not pending:
@@ -1818,8 +2045,9 @@ def wait_higgsfield_image(result: dict[str, Any]) -> dict[str, Any]:
             "jobs": [{"index": index, "job_id": job["id"]} for index, job in enumerate(pending[:8])], "timeout_seconds": 15
         }))
         if data.get("error"):
-            raise RuntimeError(str(data["error"]))
+            raise RejectedOutput(str(data["error"]))
         if data.get("all_terminal"):
+            reject_failed_jobs(data)
             return data
         time.sleep(min(2, max(0.25, float(data.get("poll_after_seconds") or 1))))
     raise RuntimeError("Generation is still pending at Higgsfield. Check the provider before resubmitting.")
@@ -2111,6 +2339,10 @@ def _fal_video_request(model: str, body: dict[str, Any], prompt: str, image_url:
                        duration: int, resolution: str, aspect_ratio: str,
                        seed: int) -> tuple[str, dict[str, Any], int, str]:
     """Translate Horde's stable video contract to one documented Fal model schema."""
+    if reference_image_urls and model not in {"minimax/h3-max", "alibaba/wan-3.0"}:
+        raise ValueError("This renderer cannot accept multiple reference assets; choose a reference-to-video model.")
+    if len(reference_image_urls) > (12 if model == "minimax/h3-max" else 10):
+        raise ValueError("Too many reference images for this video model.")
     if model == "minimax/h3-max":
         if reference_image_urls:
             endpoint = f"{model}/reference-to-video"
@@ -2202,7 +2434,7 @@ def generate_fal_video(body: dict[str, Any], on_model: Any = None) -> dict[str, 
         if len(image_url) > 12 * 1024 * 1024:
             raise ValueError("The continuity frame exceeds the 12 MB safety limit.")
     reference_image_urls = body.get("referenceImageDataUrls") if isinstance(body.get("referenceImageDataUrls"), list) else []
-    reference_image_urls = [str(value or "").strip() for value in reference_image_urls[:4] if str(value or "").strip()]
+    reference_image_urls = [str(value or "").strip() for value in reference_image_urls if str(value or "").strip()]
     if sum(len(value) for value in reference_image_urls) > 24 * 1024 * 1024:
         raise ValueError("The combined video references exceed the 24 MB request limit.")
     for value in reference_image_urls:
@@ -2402,10 +2634,19 @@ def delete_fal_videos(body: dict[str, Any]) -> dict[str, Any]:
 
 HOTAPI_VIDEO_RENDERERS = {
     "minimax-h3-spicy",
+    "seedance-2.0-mini-spicy",
     "seedance-2.0-fast-spicy",
     "seedance-2.0-spicy",
     "seedance-2.5-spicy",
+    "berry-1.0-spicy",
+    "berry-1.0-turbo-spicy",
+    "berry-1.0-pro-spicy",
+    "berry-1.0-pro-turbo-spicy",
+    "wan-2.7-spicy",
+    "wan-2.2-spicy",
 }
+
+HOTAPI_REFERENCE_LIMITS = {model: (30 if model == "seedance-2.5-spicy" else 9 if model.startswith("seedance-") else 10) for model in HOTAPI_VIDEO_RENDERERS if model.startswith(("seedance-", "berry-"))}
 
 
 def safe_hotapi_url(value: Any, *, api: bool = False) -> str:
@@ -2548,34 +2789,41 @@ def download_hotapi_video(url: str, media_id: str) -> tuple[Path, int]:
 
 def _hotapi_video_request(model: str, prompt: str, image_url: str, duration: int,
                           resolution: str, aspect_ratio: str, seed: int,
-                          uploaded_image_url: str = "") -> tuple[str, dict[str, Any], int, str]:
+                          uploaded_image_url: str = "", reference_image_urls: list[str] | None = None) -> tuple[str, dict[str, Any], int, str]:
+    if model not in HOTAPI_VIDEO_RENDERERS:
+        raise ValueError("Unsupported HotAPI video model.")
+    refs = reference_image_urls or []
+    if refs and (model not in HOTAPI_REFERENCE_LIMITS or len(refs)>HOTAPI_REFERENCE_LIMITS[model]):
+        raise ValueError("This HotAPI model cannot accept that many references.")
+    quality = {"480P":"480p", "768P":"720p", "720P":"720p", "1080P":"1080p", "2K":"2k", "4K":"4k"}.get(resolution, "480p")
+    if model.startswith("wan-"):
+        if not image_url:raise ValueError("Wan requires a starting image; this is an image-to-video model.")
+        actual_duration = (5 if duration<=6 else 8) if model=='wan-2.2-spicy' else max(2,min(15,duration))
+        quality = ("720p" if quality!='480p' else '480p') if model=='wan-2.2-spicy' else ('1080p' if quality=='1080p' else '720p')
+        payload={"prompt":prompt,"image_url":image_url,"duration_seconds":actual_duration,"resolution":quality,"seed":seed}
+        if model=='wan-2.7-spicy':payload['prompt_extend']=False
+        return f"https://api.hotapi.ai/v1/{model}",payload,actual_duration,quality
     if model == "minimax-h3-spicy":
-        compact_prompt = prompt if len(prompt) <= 2000 else prompt[:1400] + "\n\n" + prompt[-580:]
-        actual_resolution = "768p" if resolution in {"768P", "1080P"} else "480p"
-        payload: dict[str, Any] = {
-            "prompt": compact_prompt, "duration_seconds": max(5, min(15, duration)),
-            "resolution": actual_resolution,
-            "ratio": aspect_ratio if aspect_ratio in {"16:9", "9:16", "1:1"} else "16:9",
-            "seed": seed,
-        }
-        if image_url:
-            payload["image_url"] = image_url
-        return f"https://api.hotapi.ai/v1/{model}", payload, payload["duration_seconds"], actual_resolution
-
-    if model in {"seedance-2.0-fast-spicy", "seedance-2.0-spicy", "seedance-2.5-spicy"}:
-        maximum = 30 if model == "seedance-2.5-spicy" else 15
-        actual_duration = max(4, min(maximum, duration))
-        actual_resolution = "720p" if resolution in {"768P", "1080P"} else "480p"
-        mode = "image-to-video" if image_url else "text-to-video"
-        payload = {
-            "prompt": prompt[:12000], "duration_seconds": actual_duration,
-            "resolution": actual_resolution, "generate_audio": True, "seed": seed,
-        }
-        if image_url:
-            payload["image_url"] = uploaded_image_url
-        elif model == "seedance-2.5-spicy":
-            payload["ratio"] = aspect_ratio
-        return f"https://api.hotapi.ai/v1/{model}/{mode}", payload, actual_duration, actual_resolution
+        quality='768p' if quality=='720p' else quality if quality in ('480p','1080p') else '1080p'
+        payload={"prompt":prompt[:2000],"duration_seconds":max(5,min(15,duration)),"resolution":quality,"ratio":aspect_ratio if aspect_ratio in ('16:9','9:16','1:1') else '16:9',"seed":seed}
+        if image_url:payload['image_url']=image_url
+        return f"https://api.hotapi.ai/v1/{model}",payload,payload['duration_seconds'],quality
+    berry=model.startswith('berry-');pro=berry and '-pro-' in model
+    maximum=30 if berry or model=='seedance-2.5-spicy' else 15
+    actual_duration=max(2 if berry else 4,min(maximum,duration))
+    if pro:quality=quality if quality in ('1080p','2k','4k') else '1080p'
+    elif berry or model=='seedance-2.0-spicy':quality=quality if quality in ('480p','720p','1080p') else '1080p'
+    else:quality='480p' if quality=='480p' else '720p'
+    mode='reference-to-video' if refs else 'image-to-video' if image_url else 'text-to-video'
+    payload={"prompt":prompt[:12000],"duration_seconds":actual_duration,"resolution":quality,"generate_audio":True}
+    if model!='seedance-2.5-spicy':payload['seed']=seed
+    if refs:payload['reference_image_urls']=refs
+    elif image_url:payload['image_url']=uploaded_image_url or image_url
+    if berry:
+        payload['ratio']=aspect_ratio if aspect_ratio in ('16:9','4:3','1:1','3:4','9:16') else 'adaptive'
+        payload['prompt_extend']=False
+    elif model=='seedance-2.5-spicy':payload['ratio']=aspect_ratio
+    return f"https://api.hotapi.ai/v1/{model}/{mode}",payload,actual_duration,quality
     raise ValueError("That HotAPI spicy renderer is not supported by this Horde Studio build.")
 
 
@@ -2585,9 +2833,9 @@ def generate_hotapi_video(body: dict[str, Any], on_model: Any = None, on_task: A
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("A spicy shot prompt is required.")
-    duration = max(5, min(15, int(body.get("duration") or 5)))
+    duration = max(2, min(30, int(body.get("duration") or 5)))
     resolution = str(body.get("resolution") or "480P").upper()
-    if resolution not in {"480P", "768P", "1080P"}:
+    if resolution not in {"480P", "720P", "768P", "1080P", "2K", "4K"}:
         raise ValueError("Video resolution must be 480P, 768P or 1080P.")
     aspect_ratio = str(body.get("aspectRatio") or "16:9")
     if aspect_ratio not in {"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"}:
@@ -2598,14 +2846,22 @@ def generate_hotapi_video(body: dict[str, Any], on_model: Any = None, on_task: A
             r"^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$", image_data_url, re.I)):
         raise ValueError("The HotAPI continuity frame is invalid or exceeds 12 MB.")
     models: list[str] = []
-    requested = body.get("models") if isinstance(body.get("models"), list) else []
-    for raw in requested[:4] or ["minimax-h3-spicy"]:
+    requested = body.get("models") if isinstance(body.get("models"), list) else [body.get("model") or "minimax-h3-spicy"]
+    for raw in requested[:4]:
         model = str(raw or "").strip()
         if model in HOTAPI_VIDEO_RENDERERS and model not in models:
             models.append(model)
     if not models:
-        raise ValueError("Choose at least one supported HotAPI spicy renderer.")
+        raise ValueError("This bridge does not support the selected HotAPI renderer: " + ", ".join(str(value)[:100] for value in requested[:4]) + ". Restart Horde Studio to load adapter updates, then select a model from Video & Clips.")
+    references = body.get("referenceImageDataUrls", [])
+    if not isinstance(references, list) or len(references) > 30 or any(not isinstance(value, str) or not re.fullmatch(r"data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+", value, re.I) for value in references):
+        raise ValueError("HotAPI references must be up to thirty JPEG, PNG or WebP data URLs.")
+    if sum(map(len, references)) > 24 * 1024 * 1024:
+        raise ValueError("The combined video references exceed 24 MB.")
+    if references and any(model not in HOTAPI_REFERENCE_LIMITS or len(references)>HOTAPI_REFERENCE_LIMITS[model] for model in models):
+        raise ValueError("The selected HotAPI model cannot accept this reference count.")
     uploaded_image_url = ""
+    uploaded_references = []
     attempts: list[dict[str, str]] = []
     last_error: Any = None
     for model in models:
@@ -2614,10 +2870,13 @@ def generate_hotapi_video(body: dict[str, Any], on_model: Any = None, on_task: A
         if callable(on_model):
             on_model(model)
         try:
-            if image_data_url and model != "minimax-h3-spicy" and not uploaded_image_url:
+            if image_data_url and model.startswith(("seedance-", "berry-")) and not uploaded_image_url:
                 uploaded_image_url = hotapi_upload_image(image_data_url, key)
+            if references and not uploaded_references:
+                uploaded_references = [hotapi_upload_image(ref, key) for ref in references]
             endpoint, payload, actual_duration, actual_resolution = _hotapi_video_request(
-                model, prompt, image_data_url, duration, resolution, aspect_ratio, seed, uploaded_image_url)
+                model, prompt, image_data_url, duration, resolution, aspect_ratio, seed, uploaded_image_url, uploaded_references)
+            if "generate_audio" in payload:payload["generate_audio"] = body.get("generateAudio") is not False
             task = hotapi_json_request(endpoint, key, method="POST", payload=payload, timeout=90)
             task_id = str(task.get("id") or "")
             if not task_id:
@@ -3117,11 +3376,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def serve_video_file(self, target: Path) -> None:
+    def serve_video_file(self, target: Path, content_type: str = "video/mp4") -> None:
         try:
             size = target.stat().st_size
         except OSError:
-            self.respond(404, {"error": "Video Adventure clip not found."})
+            self.respond(404, {"error": "Video clip not found."})
             return
         start, end, status = 0, max(0, size - 1), 200
         requested = str(self.headers.get("Range") or "")
@@ -3143,7 +3402,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         length = max(0, end - start + 1)
         self.send_response(status)
         self.cors()
-        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "private, max-age=3600")
@@ -3198,8 +3457,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if target is None:
                 return False
         try:
-            if content_type == "video/mp4" and target.parent == VIDEO_WORLD_MEDIA_DIR:
-                self.serve_video_file(target)
+            if content_type in ("video/mp4", "video/webm"):
+                self.serve_video_file(target, content_type)
                 return True
             raw = target.read_bytes()
         except OSError:
@@ -3237,6 +3496,88 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             if self.serve_app_file(parsed.path):
                 return
+            if parsed.path.startswith("/vh2/"):
+                if not self.client_is_loopback():
+                    return self.respond(403, {"error": "VH2 world access is loopback-only."})
+                service = get_vh2_service()
+                query = urllib.parse.parse_qs(parsed.query)
+                world_id = query.get("worldId", [""])[0]
+                if parsed.path == '/vh2/photo-preview':
+                    return self.respond(200, vh2_photo_preview(service, world_id, query.get('id', [''])[0]))
+                if parsed.path in ('/vh2/photo-job','/vh2/photo-asset'):
+                    with service.connect() as db:
+                        service.read(db,world_id)
+                        ident=query.get('id',[''])[0]
+                        if parsed.path=='/vh2/photo-job':
+                            row=db.execute('SELECT snapshot FROM photo_jobs WHERE id=? AND world_id=?',(ident,world_id)).fetchone()
+                            if not row:return self.respond(404,{'error':'Unknown photo capture.'})
+                            return self.respond(200,json.loads(row['snapshot']))
+                        row=db.execute('SELECT mime,bytes FROM photo_assets WHERE id=? AND world_id=?',(ident,world_id)).fetchone()
+                        if not row:return self.respond(404,{'error':'Unknown photo asset.'})
+                        return self.respond_bytes(200,row['bytes'],row['mime'])
+                if parsed.path == "/vh2/backup":
+                    import vh2_backup
+                    return self.respond_bytes(200,vh2_backup.export(service,world_id),"application/gzip")
+                if parsed.path == "/vh2/library":
+                    import vh2_library
+                    import vh2_social
+                    kind=query.get("kind",["photo"])[0]
+                    if kind not in ("photo","post"):raise ValueError("Invalid media kind.")
+                    if query.get("id"):
+                        with service.connect() as db:
+                            _,snapshot=service.read(db,world_id)
+                            item=vh2_library.get(db,world_id,kind,query["id"][0])
+                            if kind=='post' and item:item=vh2_social.persona_post(item,snapshot,query.get('personaId',[None])[0])
+                            return self.respond(200,{"item":item})
+                    result=vh2_library.page(service,world_id,kind,int(query.get("before",["0"])[0]))
+                    if kind=='post':
+                        with service.connect() as db:_,snapshot=service.read(db,world_id)
+                        result['items']=[vh2_social.persona_post(p,snapshot,query.get('personaId',[None])[0]) for p in result['items']]
+                    return self.respond(200,result)
+                if parsed.path == "/vh2/transcript":
+                    import vh2_transcript
+                    return self.respond(200, vh2_transcript.page(service,world_id,int(query.get("before",["0"])[0]),persona_id=query.get('personaId',[None])[0]))
+                if parsed.path == "/vh2/agency-pause":
+                    import vh2_controls
+                    return self.respond(200,vh2_controls.settings(service))
+                if parsed.path == "/vh2/status":
+                    return self.respond(200, service.status())
+                if parsed.path == "/vh2/world-packs":
+                    import vh2_world_packs
+                    ident=query.get("id",[""])[0]
+                    return self.respond(200,vh2_world_packs.detail(service,ident) if ident else vh2_world_packs.library(service))
+                if parsed.path == "/vh2/projection":
+                    return self.respond(200, service.projection(world_id,query.get('personaId',[None])[0]))
+                if parsed.path == "/vh2/kernel-checkpoint":
+                    return self.respond(200, service.kernel_checkpoint(query.get("id", [""])[0]))
+                if parsed.path == "/vh2/entities":
+                    return self.respond(200, service.entity_projection(world_id))
+                if parsed.path == "/vh2/checkpoints":
+                    return self.respond(200, {"checkpoints": service.checkpoints()})
+                if parsed.path == "/vh2/checkpoint/source":
+                    source = service.checkpoint_source(query.get("id", [""])[0])
+                    return self.respond_bytes(200, source.encode("utf-8"), "application/json")
+                if parsed.path == "/vh2/provider-jobs":
+                    import vh2_workers
+                    return self.respond(200,{"jobs":vh2_workers.status(service,world_id)})
+                if parsed.path == "/vh2/ticketmaster-provider":
+                    import vh2_ticketmaster
+                    return self.respond(200,vh2_ticketmaster.settings(service,scope=query.get("scope",[None])[0]))
+                if parsed.path == "/vh2/flight-provider":
+                    import vh2_flights
+                    return self.respond(200,vh2_flights.settings(service,scope=query.get("scope",[None])[0]))
+                if parsed.path == "/vh2/image-provider":
+                    import vh2_workers
+                    return self.respond(200,vh2_workers.settings(service,scope=query.get("scope",[None])[0]))
+                if parsed.path == "/vh2/dialogue-provider":
+                    return self.respond(200, service.dialogue_provider.status())
+                if parsed.path == "/vh2/dialogue-jobs":
+                    return self.respond(200, {"jobs": service.dialogue.list(world_id)})
+                if parsed.path == "/vh2/context":
+                    return self.respond(200, service.context(world_id,query.get('personaId',[None])[0]))
+                if parsed.path == "/vh2/events":
+                    return self.respond(200, {"events": service.events(world_id, max(0,int(query.get("after", ["0"])[0])))})
+                return self.respond(404, {"error": "Unknown VH2 endpoint."})
             if parsed.path == "/maps/settings":
                 if not self.client_is_loopback():
                     return self.respond(403, {"error": "Maps settings are loopback-only."})
@@ -3244,7 +3585,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if parsed.path == "/health":
                 return self.respond(200, {"ok": True, "service": "Horde Studio MCP Bridge", "version": 2,
                                           "build": BRIDGE_BUILD, "appInstance": APP_INSTANCE_ID,
-                                          "capabilities": {"magnificReferenceImport": 1},
+                                          "capabilities": {"magnificReferenceImport": 1, "hotapiVideoModels": sorted(HOTAPI_VIDEO_RENDERERS), "hotapiVideoReferences": HOTAPI_REFERENCE_LIMITS, "hotapiReferenceUpload": 1},
                                           "alwaysOn": always_on_runtime.status(),
                                           "multiplayer": {"running": bool(multiplayer_runtime.server),
                                                           "port": multiplayer_runtime.port,
@@ -3296,6 +3637,97 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return self.respond(403, {"error": "Origin not allowed."})
         try:
             parsed_path = urllib.parse.urlparse(self.path).path
+            if parsed_path in {"/vh2/migration/preview", "/vh2/migration/checkpoint"}:
+                if not self.client_is_loopback():
+                    return self.respond(403, {"error": "VH2 migration is loopback-only."})
+                body = self.read_json()
+                if parsed_path.endswith("preview"):
+                    return self.respond(200, inspect_archive(body.get("sourceText")))
+                try:
+                    return self.respond(200, get_vh2_service().checkpoint(body.get("sourceText"), body.get("expectedDigest")))
+                except VH2Conflict as error:
+                    return self.respond(409, {"error": str(error)})
+            if parsed_path == "/vh2/agency-pause":
+                if not self.client_is_loopback():return self.respond(403,{"error":"Agency control is loopback-only."})
+                import vh2_controls
+                return self.respond(200,vh2_controls.settings(get_vh2_service(),self.read_json().get('paused')))
+            if parsed_path == "/vh2/workspace/restore":
+                if not self.client_is_loopback():return self.respond(403,{"error":"Workspace restore is loopback-only."})
+                length=int(self.headers.get("Content-Length","0"))
+                if not 0<length<=256*1024*1024:raise ValueError("Workspace timeline data exceeds 256 MB.")
+                import vh2_backup
+                try:return self.respond(200,vh2_backup.restore_workspace(get_vh2_service(),json.loads(self.rfile.read(length))))
+                except VH2Conflict as error:return self.respond(409,{"error":str(error)})
+            if parsed_path == "/vh2/character/restore":
+                if not self.client_is_loopback():return self.respond(403,{'error':'Character restore is loopback-only.'})
+                import vh2_backup
+                length=int(self.headers.get('Content-Length','0'));binary=self.headers.get('Content-Type','').split(';',1)[0].strip().lower()=='application/zip'
+                limit=vh2_backup.MAX_CHARACTER_UPLOAD if binary else 256*1024*1024
+                if not 0<length<=limit:raise ValueError('Character life upload exceeds the supported limit.')
+                try:
+                    if binary:
+                        import tempfile
+                        # A real temporary file supports ZIP's seekable API on
+                        # Python 3.9 as well as newer runtimes, without buffering
+                        # the complete binary upload in memory.
+                        with tempfile.TemporaryFile() as upload:
+                            remaining=length
+                            while remaining:
+                                chunk=self.rfile.read(min(1024*1024,remaining))
+                                if not chunk:raise ValueError('Incomplete character life upload.')
+                                upload.write(chunk);remaining-=len(chunk)
+                            upload.seek(0);body=vh2_backup.read_character_package(upload)
+                    else:body=json.loads(self.rfile.read(length))
+                    return self.respond(200,vh2_backup.restore_character(get_vh2_service(),body))
+                except VH2Conflict as error:return self.respond(409,{'error':str(error)})
+            if parsed_path == "/vh2/restore":
+                if not self.client_is_loopback():return self.respond(403,{"error":"VH2 restore is loopback-only."})
+                length=int(self.headers.get("Content-Length","0"))
+                if not 0<length<=256*1024*1024:raise ValueError("Choose a world archive smaller than 256 MB.")
+                import vh2_backup
+                try:return self.respond(200,vh2_backup.restore(get_vh2_service(),self.rfile.read(length)))
+                except VH2Conflict as error:return self.respond(409,{"error":str(error)})
+            if parsed_path == "/vh2/open-flight-route":
+                if not self.client_is_loopback():return self.respond(403,{"error":"Travel setup is loopback-only."})
+                import vh2_open_airports
+                return self.respond(200,vh2_open_airports.route(get_vh2_service(),self.read_json()))
+            if parsed_path == "/vh2/feed-preview":
+                if not self.client_is_loopback():return self.respond(403,{"error":"Feed preview is loopback-only."})
+                import vh2_feed_discovery
+                return self.respond(200,vh2_feed_discovery.preview(self.read_json()))
+            if parsed_path == "/vh2/feed-discovery":
+                if not self.client_is_loopback():return self.respond(403,{"error":"Feed discovery is loopback-only."})
+                import vh2_feed_discovery
+                return self.respond(200,vh2_feed_discovery.discover(self.read_json()))
+            if parsed_path == "/vh2/ticketmaster-provider":
+                if not self.client_is_loopback():return self.respond(403,{"error":"VH2 settings are loopback-only."})
+                import vh2_ticketmaster
+                return self.respond(200,vh2_ticketmaster.settings(get_vh2_service(),self.read_json()))
+            if parsed_path == "/vh2/flight-provider":
+                if not self.client_is_loopback():return self.respond(403,{"error":"VH2 settings are loopback-only."})
+                import vh2_flights
+                return self.respond(200,vh2_flights.settings(get_vh2_service(),self.read_json()))
+            if parsed_path == "/vh2/image-provider":
+                if not self.client_is_loopback():return self.respond(403,{"error":"VH2 settings are loopback-only."})
+                import vh2_workers
+                return self.respond(200,vh2_workers.settings(get_vh2_service(),self.read_json()))
+            if parsed_path == "/vh2/dialogue-provider":
+                if not self.client_is_loopback():
+                    return self.respond(403, {"error": "VH2 settings are loopback-only."})
+                body=self.read_json()
+                provider=get_vh2_service().dialogue_provider
+                return self.respond(200, provider.disable(body['disableScope']) if 'disableScope' in body else provider.save(body))
+            if parsed_path == "/vh2/world-packs":
+                if not self.client_is_loopback():return self.respond(403,{"error":"World library is loopback-only."})
+                import vh2_world_packs
+                return self.respond(200,vh2_world_packs.library(get_vh2_service(),self.read_json()))
+            if parsed_path == "/vh2/command":
+                if not self.client_is_loopback():
+                    return self.respond(403, {"error": "VH2 world access is loopback-only."})
+                try:
+                    return self.respond(200, get_vh2_service().command(self.read_json()))
+                except VH2Conflict as error:
+                    return self.respond(409, {"error": str(error)})
             if parsed_path == "/maps/settings":
                 if not self.client_is_loopback():
                     return self.respond(403, {"error": "Maps settings are loopback-only."})
@@ -3529,6 +3961,8 @@ def main() -> None:
     app_url = f"http://{HOST}:{PORT}/"
     listen_info = f"{LISTEN_HOST}:{PORT}" if LISTEN_HOST != HOST else str(PORT)
     print(f"Horde Studio bridge listening on {listen_info}")
+    if (CONFIG_DIR / "vh2-worlds.sqlite").exists():
+        get_vh2_service()
     print(f"Open in browser: {app_url}")
     print(f"OAuth callback: {CALLBACK_URL}")
     print(f"Credentials: {AUTH_FILE} (owner-only)")
@@ -3541,6 +3975,8 @@ def main() -> None:
         print("\nStopping Horde Studio…")
     finally:
         always_on_runtime.stop()
+        if vh2_service is not None:
+            vh2_service.close()
         multiplayer_runtime.shutdown()
         server.server_close()
 

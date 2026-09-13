@@ -8,9 +8,10 @@
     <title>Horde Studio | Elite AI Roleplay</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link id="horde-fonts" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="preload" as="style">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=20260908-reply-cleanup">
+    <link rel="stylesheet" href="style.css?v=20260913-v18-storage">
+    <link rel="stylesheet" href="vh-workspace.css?v=20260913-v18-storage">
 </head>
 <body>
 <div id="app">
@@ -25,7 +26,7 @@
             </button>
             <button class="nav-item" data-view="companions" id="nav-companions-btn">
                 <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0116 0v2"/></svg>
-                Virtual Human
+                Virtual Humans 2.0
             </button>
             <button class="nav-item" data-view="worlds" id="nav-worlds-btn">
                 <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zM2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
@@ -275,9 +276,9 @@
                         </div>
                         <div id="video-world-spicy-renderers" class="video-world-renderer-group hidden">
                             <strong>Spicy path · HotAPI</strong>
-                            <label class="form-field"><span>Primary spicy renderer</span><select id="video-world-spicy-primary" class="form-select"><option value="minimax-h3-spicy">MiniMax H3 Spicy · best value · $0.08/s</option><option value="seedance-2.0-fast-spicy">Seedance 2.0 Fast Spicy · slower · $0.112/s</option><option value="seedance-2.0-spicy">Seedance 2.0 Spicy · premium · $0.14/s</option><option value="seedance-2.5-spicy">Seedance 2.5 Spicy · slowest/premium · $0.206/s</option></select></label>
-                            <label class="form-field"><span>Spicy fallback</span><select id="video-world-spicy-fallback" class="form-select"><option value="seedance-2.0-fast-spicy">Seedance 2.0 Fast Spicy · $0.112/s</option><option value="minimax-h3-spicy">MiniMax H3 Spicy · $0.08/s</option><option value="seedance-2.0-spicy">Seedance 2.0 Spicy · $0.14/s</option><option value="seedance-2.5-spicy">Seedance 2.5 Spicy · $0.206/s</option><option value="">None</option></select></label>
-                            <label class="form-field"><span>Second spicy fallback</span><select id="video-world-spicy-fallback-2" class="form-select"><option value="">None</option><option value="minimax-h3-spicy">MiniMax H3 Spicy · $0.08/s</option><option value="seedance-2.0-fast-spicy">Seedance 2.0 Fast Spicy · $0.112/s</option><option value="seedance-2.0-spicy">Seedance 2.0 Spicy · $0.14/s</option><option value="seedance-2.5-spicy">Seedance 2.5 Spicy · $0.206/s</option></select></label>
+                            <label class="form-field"><span>Primary spicy renderer</span><select id="video-world-spicy-primary" class="form-select"><option value="minimax-h3-spicy">MiniMax H3 Spicy</option><option value="seedance-2.0-mini-spicy">Seedance 2.0 Mini Spicy</option><option value="seedance-2.0-fast-spicy">Seedance 2.0 Fast Spicy</option><option value="seedance-2.0-spicy">Seedance 2.0 Spicy</option><option value="seedance-2.5-spicy">Seedance 2.5 Spicy</option><option value="berry-1.0-spicy">Berry 1.0 Spicy</option><option value="berry-1.0-turbo-spicy">Berry 1.0 Turbo Spicy</option><option value="berry-1.0-pro-spicy">Berry 1.0 Pro Spicy</option><option value="berry-1.0-pro-turbo-spicy">Berry 1.0 Pro Turbo Spicy</option><option value="wan-2.7-spicy">Wan 2.7 Spicy</option><option value="wan-2.2-spicy">Wan 2.2 Spicy</option></select></label>
+                            <label class="form-field"><span>Spicy fallback</span><select id="video-world-spicy-fallback" class="form-select"><option value="">None</option><option value="minimax-h3-spicy">MiniMax H3 Spicy</option><option value="seedance-2.0-mini-spicy">Seedance 2.0 Mini Spicy</option><option value="seedance-2.0-fast-spicy">Seedance 2.0 Fast Spicy</option><option value="seedance-2.0-spicy">Seedance 2.0 Spicy</option><option value="seedance-2.5-spicy">Seedance 2.5 Spicy</option><option value="berry-1.0-spicy">Berry 1.0 Spicy</option><option value="berry-1.0-turbo-spicy">Berry 1.0 Turbo Spicy</option><option value="berry-1.0-pro-spicy">Berry 1.0 Pro Spicy</option><option value="berry-1.0-pro-turbo-spicy">Berry 1.0 Pro Turbo Spicy</option><option value="wan-2.7-spicy">Wan 2.7 Spicy</option><option value="wan-2.2-spicy">Wan 2.2 Spicy</option></select></label>
+                            <label class="form-field"><span>Second spicy fallback</span><select id="video-world-spicy-fallback-2" class="form-select"><option value="">None</option><option value="minimax-h3-spicy">MiniMax H3 Spicy</option><option value="seedance-2.0-mini-spicy">Seedance 2.0 Mini Spicy</option><option value="seedance-2.0-fast-spicy">Seedance 2.0 Fast Spicy</option><option value="seedance-2.0-spicy">Seedance 2.0 Spicy</option><option value="seedance-2.5-spicy">Seedance 2.5 Spicy</option><option value="berry-1.0-spicy">Berry 1.0 Spicy</option><option value="berry-1.0-turbo-spicy">Berry 1.0 Turbo Spicy</option><option value="berry-1.0-pro-spicy">Berry 1.0 Pro Spicy</option><option value="berry-1.0-pro-turbo-spicy">Berry 1.0 Pro Turbo Spicy</option><option value="wan-2.7-spicy">Wan 2.7 Spicy</option><option value="wan-2.2-spicy">Wan 2.2 Spicy</option></select></label>
                             <p class="video-world-helper">HotAPI adds no platform refusal layer, but upstream behavior can still vary. Seedance 2.0 and 2.5 generate synchronized audio and preserve continuity; they cost more and commonly take longer. Spicy routes are for stories involving consenting adults.</p>
                         </div>
                         <label class="form-field"><span>Resolution</span><select id="video-world-resolution" class="form-select"><option value="480P">480p · economical</option><option value="768P">768p / 720p · higher fidelity</option></select></label>
@@ -2190,8 +2191,8 @@
                 <header class="vh-hero landing-hero">
                     <div class="vh-hero-copy landing-hero-copy">
                         <span class="vh-eyebrow">Persistent human simulation</span>
-                        <h1>Virtual Human</h1>
-                        <p>Build deeply authored people whose moods, memories, relationships, routines and private lives continue between conversations.</p>
+                        <h1>Virtual Humans 2.0</h1>
+                        <p>People with their own routines, memories and lives. Pick up a conversation or create someone new.</p>
                     </div>
                     <div class="landing-actions">
                         <button id="open-vh-clips-btn" class="btn vh-clips-launch" type="button">
@@ -2200,30 +2201,20 @@
                             <span class="vh-clips-launch-arrow" aria-hidden="true">›</span>
                         </button>
                         <button id="import-companion-btn" class="btn btn-ghost">Import Human</button>
-                        <input id="import-companion-input" type="file" hidden accept=".horde_human,.json,application/json">
+                        <input id="import-companion-input" type="file" hidden accept=".zip,.horde_human,.json,application/json">
                         <button id="create-new-companion-btn" class="btn btn-primary vh-create-btn">+ New Virtual Human</button>
                     </div>
                 </header>
                 <div class="vh-toolbar landing-toolbar">
                     <label class="vh-search">
                         <svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
-                        <input id="vh-search" type="search" placeholder="Search by name, work or personality">
+                        <input id="vh-search" aria-label="Search Virtual Humans" type="search" placeholder="Search by name, work or personality">
                     </label>
                     <div class="vh-summary" aria-live="polite">
                         <span><strong id="vh-total-count">0</strong> <span id="vh-human-unit">humans</span></span>
                         <span><strong id="vh-available-count">0</strong> available</span>
                     </div>
                 </div>
-                <section id="included-humans-section" class="vh-included-section hidden" aria-labelledby="included-humans-title">
-                    <div class="vh-included-heading">
-                        <div>
-                            <span class="vh-eyebrow">Included with Horde Studio</span>
-                            <h2 id="included-humans-title">Built-in humans</h2>
-                        </div>
-                        <p>These originals always remain available as clean templates. Restore one at any time without touching an existing copy.</p>
-                    </div>
-                    <div id="included-humans-grid" class="vh-included-grid"></div>
-                </section>
                 <div id="companions-grid" class="vh-grid"></div>
             </div>
             <div id="vh-clips-discovery-backdrop" class="vh-clips-discovery-backdrop hidden">
@@ -2242,7 +2233,7 @@
             <div class="studio-wrap">
                 <div class="studio-nav">
                     <div class="vh-studio-brand">
-                        <strong>Virtual Human Studio</strong>
+                        <strong>Virtual Humans 2.0</strong>
                         <span id="cs-studio-human-label">New human</span>
                     </div>
                     <div class="studio-tabs">
@@ -2250,17 +2241,18 @@
                         <button class="companion-studio-tab" data-tab="cs-identity">Identity</button>
                         <button class="companion-studio-tab" data-tab="cs-chat-style">Chat style</button>
                         <button class="companion-studio-tab" data-tab="cs-mind">Inner Life</button>
-                        <button class="companion-studio-tab" data-tab="cs-life">Active Life</button>
+                        <button class="companion-studio-tab" data-tab="cs-life">Life &amp; world</button>
                         <button class="companion-studio-tab" data-tab="cs-social">Social Media</button>
                         <button class="companion-studio-tab" data-tab="cs-video">Video &amp; Clips</button>
                         <button class="companion-studio-tab" data-tab="cs-models">AI &amp; Models</button>
                         <button class="companion-studio-tab" data-tab="cs-voice">Photos &amp; Voice</button>
                     </div>
                     <div class="studio-nav-actions">
+                        <button type="button" class="btn btn-ghost" onclick="vhOpenWorkspace('overview', state.editingCompanionId)">Life workspace</button>
                         <button id="save-companion-btn" class="btn btn-success btn-full">Save Virtual Human</button>
                         <button id="open-companion-chat-btn" class="btn btn-ghost btn-full" style="color:var(--accent);">💬 Open Chat</button>
                         <button id="export-companion-btn" class="btn btn-ghost btn-full" title="Export a clean template or the complete portable human">Export Human</button>
-                        <button id="close-companion-studio-btn" class="btn btn-ghost btn-full">← Virtual Human</button>
+                        <button id="close-companion-studio-btn" class="btn btn-ghost btn-full">← Virtual Humans 2.0</button>
                         <button id="delete-companion-btn" class="btn btn-danger btn-full">Delete Virtual Human</button>
                     </div>
                 </div>
@@ -2276,20 +2268,21 @@
                             <details class="creator-advanced-card"><summary>Optional media &amp; voice</summary><div><button type="button" data-companion-studio-target="cs-social">Social Media</button><button type="button" data-companion-studio-target="cs-video">Video &amp; Clips</button><button type="button" data-companion-studio-target="cs-voice">Photos &amp; Voice</button></div></details>
                         </div>
                     </div>
-                    <div id="tab-cs-chat-style" class="studio-panel hidden"><div id="cs-voice-builder" class="form-section"></div>
+                    <div id="tab-cs-chat-style" class="studio-panel hidden">
                         <div class="panel-header"><h2>Chat style</h2><p>Shape how this person participates in a conversation. Their feelings and situation still influence how they speak.</p></div>
                         <div class="form-body">
+                            <div id="cs-voice-builder" class="form-section"></div>
                             <div class="form-section"><label class="form-label" for="cs-texting-style">Writing voice</label>
-                                <textarea id="cs-texting-style" class="form-textarea" rows="3" placeholder="Mostly lowercase, dry humour, occasional fragments; more careful punctuation when upset."></textarea></div>
+                                <textarea id="cs-texting-style" class="form-textarea" rows="3" maxlength="500" placeholder="Mostly lowercase, dry humour, occasional fragments; more careful punctuation when upset."></textarea><p class="form-hint">Explain the overall voice in 1–3 sentences. Put sample messages in Example exchanges below.</p></div>
                             <div class="form-section"><label class="form-label" for="cs-chat-length">Usual reply length</label>
                                 <select id="cs-chat-length" class="form-select"><option value="adaptive">Adapt to the conversation</option><option value="brief">Usually brief</option><option value="expansive">More expressive</option></select></div>
                             <div class="form-section"><label class="form-label" for="cs-conversation-style">Conversational habits</label>
-                                <textarea id="cs-conversation-style" class="form-textarea" rows="4" placeholder="Offers her own opinions. Follows up on plans. Teases when comfortable. Shares small details from established activities; doesn't just comment on everything I say."></textarea></div>
+                                <textarea id="cs-conversation-style" class="form-textarea" rows="4" placeholder="Offers her own opinions. Follows up on plans. Teases when comfortable. Shares small details from established activities; doesn't just comment on everything I say."></textarea><p class="form-hint">Describe behaviour in plain sentences: how they start topics, respond, disagree and follow up. No dialogue labels needed here.</p></div>
                             <div class="form-section"><label class="form-label" for="cs-chat-examples">Example exchanges</label>
                                 <textarea id="cs-chat-examples" class="form-textarea" rows="6" placeholder="Player: cafe or park?&#10;Her: cafe. i need caffeine before i pretend to be outdoorsy&#10;&#10;Player: long day?&#10;Her: yeah. tell me something completely unrelated to work"></textarea>
-                                <p class="form-hint">Examples teach rhythm and voice. They are not added as memories or copied as scripted replies.</p></div>
+                                <p class="form-hint">Write 2–5 short exchanges. Use “Player:” and “Character:” on separate lines, with a blank line between exchanges. Include brief replies as well as fuller ones. Examples teach style; they are not memories or scripts.</p></div>
                             <div class="form-section"><label class="form-label" for="cs-chat-avoid">Habits to avoid</label>
-                                <textarea id="cs-chat-avoid" class="form-textarea" rows="3" placeholder="Repeating my message back, therapy language, a question at the end of every reply, constant compliments."></textarea></div>
+                                <textarea id="cs-chat-avoid" class="form-textarea" rows="3" placeholder="Repeating my message back, therapy language, a question at the end of every reply, constant compliments."></textarea><p class="form-hint">List unwanted habits or exact phrases, one per line. Explain what to avoid; do not write sample replies here.</p></div>
                         </div>
                     </div>
                     <!-- Identity -->
@@ -2708,8 +2701,8 @@
                     <div id="tab-cs-life" class="studio-panel hidden">
                         <div class="panel-header vh-life-page-header">
                             <span class="vh-eyebrow">Simulation</span>
-                            <h2>Active Life</h2>
-                            <p>Turn the authored person into a living week: where they go, who they see, what they wear, when they are available, and what can unexpectedly happen.</p>
+                            <h2>Life & everyday world</h2>
+                            <p>Set up their places, wardrobe and routines, or open the life they are living now.</p>
                         </div>
                         <div class="form-body">
                             <section class="vh-life-studio vh-life-dashboard">
@@ -2717,18 +2710,17 @@
                                     <div>
                                         <span class="vh-eyebrow">Life generator</span>
                                         <h3>A week that actually happens</h3>
-                                        <p class="form-hint">Uses Identity and Inner Life as source material, then creates a schedule, recurring places, supporting cast, wardrobe logic and grounded wildcard events.</p>
+                                        <p class="form-hint">Uses Identity and Inner Life as source material, then creates commitments, recurring places, supporting lives, wardrobe and configurable story pacing.</p>
                                     </div>
                                     <div class="vh-life-studio-actions">
-                                        <button id="cs-edit-life-btn" class="btn btn-ghost hidden" type="button">Edit active life</button>
                                         <button id="cs-start-life-manual-btn" class="btn btn-ghost" type="button">Start manually</button>
-                                        <button id="cs-initialize-life-btn" class="btn btn-primary" type="button">✦ Generate Active Life</button>
+                                        <button id="cs-initialize-life-btn" class="btn btn-primary" type="button">✦ Draft life setup</button>
                                     </div>
                                 </div>
                                 <div class="vh-life-model-config">
                                     <div>
                                         <label class="form-label" for="cs-life-builder-model">Generator model</label>
-                                        <p class="form-hint">Used only when generating or regenerating Active Life. It does not change the model used in chat.</p>
+                                        <p class="form-hint">Used to draft life setup and reviewed changes. Chat keeps its own model.</p>
                                     </div>
                                     <div class="searchable-dropdown-wrap vh-searchable-field">
                                         <input id="cs-life-builder-model" class="form-input" type="search" placeholder="Search models · blank uses conversation model" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="cs-life-builder-model-results" aria-expanded="false">
@@ -2743,21 +2735,16 @@
                                 </div>
                                 <div class="vh-life-options">
                                     <label class="vh-test-check">
-                                        <input id="cs-life-wildcards" type="checkbox" checked>
-                                        <span>Allow grounded wildcard events</span>
-                                    </label>
-                                    <label class="vh-test-check">
                                         <input id="cs-life-weather" type="checkbox" checked>
                                         <span>Use live local weather and daylight</span>
                                     </label>
                                 </div>
                                 <p id="cs-life-generator-status" class="form-hint" aria-live="polite">Generate with the selected model, or start manually with a local editable template. The simulator uses a simple fallback routine until either path is saved.</p>
-                                <div id="cs-life-editor" class="vh-life-editor hidden"></div>
                                 <div id="cs-life-overview" class="vh-life-overview hidden"></div>
-                                <details class="form-section"><summary>Recurring place references</summary>
-                                    <p class="form-hint">References belong to saved recurring locations. Add or rename locations in Places; use fixed room roles and the linked location selector here. Removing a card keeps the location and its routes. Photos combine the base identity, previous photo and matching room images. Generating a reference uses image-provider credits.</p>
-                                    <div id="cs-photo-locations"></div><button type="button" id="cs-photo-location-add" class="btn btn-ghost">Add place reference</button>
-                                </details>
+                                <section id="cs-legacy-place-references" class="vh-blueprint-place-photos" hidden>
+                                    <div id="cs-photo-locations"></div>
+                                    <button type="button" id="cs-photo-location-add" class="btn btn-ghost">Restore place photos</button>
+                                </section>
 
 <div id="cs-world-systems"></div>
                             </section>
@@ -2950,7 +2937,7 @@
                                     <div>
                                         <span class="vh-eyebrow">Before the player</span>
                                         <h3>Starting profile</h3>
-                                        <p class="form-hint">These are authored history, not shared history. New timelines receive a dated copy, while the human never pretends the player was part of it.</p>
+                                        <p class="form-hint">Posts and clips from before this life began. New lives receive this starting profile; new persona chats share the same existing feed.</p>
                                     </div>
                                     <div class="vh-social-seed-actions">
                                         <button id="cs-social-generate-seed" class="btn btn-primary" type="button">✦ Generate 10 posts</button>
@@ -2964,6 +2951,7 @@
                                     <span id="cs-social-seed-status" class="form-hint" aria-live="polite">Add posts manually, or use the conversation model to draft an editable profile.</span>
                                 </div>
                                 <div id="cs-social-seed-list" class="vh-social-seed-list"></div>
+                                <section id="cs-starter-clips" class="vh-starter-clips" aria-label="Starter clips"></section>
                             </section>
                         </div>
                     </div>
@@ -2977,9 +2965,10 @@
                             <section class="vh-video-hero-card">
                                 <div><h3>Clips permission</h3><p class="form-hint">Clips are never autonomous and never silently billed. Requests become an in-character proposal, then wait for a separate Generate click.</p></div>
                                 <button id="cs-video-enabled" class="vh-social-feed-toggle" type="button" aria-pressed="false"><span class="vh-social-feed-toggle-dot"></span><span id="cs-video-enabled-label">Clips off</span></button>
+                                <button id="cs-video-starter-clips" class="btn btn-ghost" type="button">Manage starter clips</button>
                             </section>
                             <div class="vh-social-behavior-grid">
-                                <label class="form-field"><span>Video provider</span><select id="cs-video-provider" class="form-select"><option value="openrouter">OpenRouter</option><option value="evolink">EvoLink</option><option value="wavespeed">WaveSpeed</option><option value="fal">Fal</option></select></label>
+                                <label class="form-field"><span>Video provider</span><select id="cs-video-provider" class="form-select"><option value="openrouter">OpenRouter</option><option value="evolink">EvoLink</option><option value="wavespeed">WaveSpeed</option><option value="fal">Fal</option><option value="hotapi">HotAPI</option></select></label>
                                 <label class="form-field"><span>Reference-capable model</span><select id="cs-video-model" class="form-select"></select><small id="cs-video-model-status" class="form-hint">Choose a provider to load its video catalog.</small></label>
                                 <label class="form-field"><span>Fallback model</span><select id="cs-video-fallback-model" class="form-select"><option value="">No automatic fallback</option></select><small class="form-hint">Fal only. Retries the same scene and identity reference.</small></label>
                                 <label class="form-field"><span>Second fallback</span><select id="cs-video-fallback-model-2" class="form-select"><option value="">None</option></select></label>
@@ -2997,12 +2986,11 @@
                     <div id="tab-cs-models" class="studio-panel hidden">
                         <div class="panel-header vh-models-header">
                             <div>
-                                <span class="vh-eyebrow">Runtime</span>
-                                <h2>AI &amp; Models</h2>
-                                <p>Choose how this virtual human thinks. The conversation model expresses and records immediate feelings. A private observer adds evidence-backed memory and understanding after the reply.</p>
+                                <span class="vh-eyebrow">AI connection</span>
+                                <h2>Choose their AI</h2>
+                                <p>Choose a provider and a model for replies. You can adjust memory and response behavior in advanced settings.</p>
                             </div>
                             <div class="vh-model-header-actions">
-                                <button id="cs-unlock-all-params" class="btn btn-ghost" type="button" title="Show every control even when the provider catalog does not advertise it.">🔓 Unlock all parameters</button>
                                 <button id="cs-refresh-text-models" class="btn btn-ghost" type="button">↻ Refresh catalog</button>
                             </div>
                         </div>
@@ -3059,6 +3047,10 @@
                                 <input id="cs-text-model-custom" class="form-input" type="text" placeholder="provider/model-id">
                             </section>
 
+                            <details class="vh-model-advanced">
+                                <summary>Advanced AI settings <span>Memory, reasoning &amp; response behavior</span></summary>
+                                <div class="vh-model-advanced-body">
+                                <button id="cs-unlock-all-params" class="btn btn-ghost" type="button" title="Show every control even when the provider catalog does not advertise it.">🔓 Unlock all parameters</button>
                             <section class="vh-ai-config-section">
                                 <div class="vh-ai-config-heading">
                                     <div>
@@ -3221,6 +3213,9 @@
                                     </label>
                                 </div>
                             </section>
+
+                                </div>
+                            </details>
 
                             <section class="vh-runtime-map" aria-label="Virtual Human model responsibilities">
                                 <div>
@@ -3468,7 +3463,7 @@
                                 <article class="vh-creation-method active">
                                     <span>Recommended</span>
                                     <h3>Create from notes with AI</h3>
-                                    <p>Give it facts, fragments, contradictions and a vibe. It will fill the gaps while preserving what you wrote.</p>
+                                    <p>Describe the person and where they live. AI connects their personality, homes, friends, clothes and everyday choices in one reviewed draft.</p>
                                 </article>
                                 <article class="vh-creation-method">
                                     <span>Manual</span>
@@ -3481,7 +3476,7 @@
                                 <div>
                                     <div class="person-builder-kicker">CREATE FROM NOTES WITH AI</div>
                                     <h3>What do you know about them?</h3>
-                                    <p class="form-hint">The builder preserves every fact you provide, fills only the gaps, and gives the person a life that can actually drive the simulator.</p>
+                                    <p class="form-hint">One brief → a person and a playable world. Review the assumptions, start their life, then fine-tune anything later.</p>
                                 </div>
                             </div>
                             <div class="form-section">
@@ -3506,7 +3501,7 @@
                                     </select>
                                 </div>
                             </div>
-                            <button id="cs-build-person-btn" class="btn btn-primary btn-full person-builder-generate">✨ Build this human</button>
+                            <button id="cs-build-person-btn" class="btn btn-primary btn-full person-builder-generate">Build person &amp; world</button>
                             <div id="cs-builder-status" class="form-hint" style="margin-top:10px;" aria-live="polite">Nothing is sent until you press Build.</div>
                             <div id="cs-builder-result" class="builder-preview-wrap hidden" style="margin-top:16px;">
                                 <div class="builder-preview-header">
@@ -3526,11 +3521,15 @@
             </div>
         </section>
 
+        <section id="vh-workspace-view" class="view hidden">
+          <header class="vh-workspace-head"><div><span class="vh-eyebrow">Human workspace</span><h1 id="vh-workspace-name">Your human</h1><p id="vh-workspace-life"></p></div></header>
+          <div class="vh-workspace-layout"><nav id="vh-workspace-nav" aria-label="Human workspace"></nav><div class="vh-workspace-main"><header class="vh-workspace-section-head"><div><h2 id="vh-workspace-title">Overview</h2><p id="vh-workspace-description"></p></div><label class="vh-workspace-search">Find a setting or feature<input type="search" id="vh-workspace-search" placeholder="Try RSS, bible, routes, memory…"></label></header><div id="vh-workspace-feedback" role="status" aria-live="polite"></div><div id="vh-workspace-overview"></div><div id="vh-workspace-special"></div><div id="vh2-chat-controls"></div></div></div>
+        </section>
         <!-- ────────── COMPANION CHAT (the actual texting thread) ────────── -->
         <section id="companion-chat-view" class="view hidden">
             <dialog id="cc-gift-dialog" class="companion-gift-dialog"><button type="button" id="cc-gift-close" class="btn btn-ghost" aria-label="Close gifts">Close</button><div id="cc-life-actions"></div></dialog>
             <div class="companion-chat-header">
-                <button id="companion-chat-back-btn" class="companion-header-btn" title="Back to Virtual Human" aria-label="Back to Virtual Human">‹</button>
+                <button id="companion-chat-back-btn" class="companion-header-btn" title="Back to Virtual Humans 2.0" aria-label="Back to Virtual Humans 2.0">‹</button>
                 <div class="companion-chat-avatar-wrap">
                     <div class="companion-chat-avatar" id="cc-avatar"></div>
                     <span id="cc-presence-dot" class="companion-presence-dot"></span>
@@ -3603,6 +3602,7 @@
                     </div>
                 </details>
             </div>
+            <div id="vh-chat-system" class="vh-chat-system" role="status" aria-live="polite"></div>
             <div class="companion-chat-context">
                 <label class="companion-persona-picker" for="cc-persona-select">Your profile
                     <select id="cc-persona-select" aria-label="Your active persona for this chat"></select>
@@ -3800,7 +3800,7 @@
                 <p class="form-hint">The rate fields estimate spending and enforce each Video Adventure's session limit; Fal remains the billing authority. Your key is sent only to Horde Studio's local bridge, never embedded in a Video Adventure or backup.</p>
             </details>
             <details class="settings-provider-card settings-provider-card-wide" data-provider="hotapi">
-                <summary><span class="settings-provider-mark">HOT</span><span><strong>HotAPI</strong><small>Opt-in spicy video · Video Adventures</small></span><span class="settings-provider-state">Configure</span></summary>
+                <summary><span class="settings-provider-mark">HOT</span><span><strong>HotAPI</strong><small>Video Adventures &amp; Virtual Human clips</small></span><span class="settings-provider-state">Configure</span></summary>
                 <label class="form-label" for="global-hotapi-key">API key</label>
                 <input type="password" id="global-hotapi-key" class="form-input" placeholder="hk_live_..." autocomplete="off">
                 <button id="test-hotapi-conn-btn" class="btn btn-ghost" type="button">Test HotAPI connection</button>
@@ -3858,25 +3858,7 @@
             </details>
             <details class="settings-disclosure-card" id="maps-settings-card">
                 <summary class="settings-disclosure-summary"><span><small>Real locations</small><strong>Maps &amp; places</strong></span></summary>
-                <div class="settings-disclosure-body">
-                    <label class="form-label" for="global-maps-provider">Place search &amp; routing provider</label>
-                    <select class="form-select" id="global-maps-provider"><option value="google">Google Maps</option><option value="openrouteservice">openrouteservice (free key)</option></select>
-                    <p class="form-hint">Provider selection applies to search, previews and automatic journey estimates. There is no automatic fallback to another provider.</p>
-                    <label class="form-label" for="global-openroute-key">openrouteservice API key</label>
-                    <input id="global-openroute-key" type="password" class="form-input" autocomplete="off" spellcheck="false" placeholder="Paste your HeiGIT / openrouteservice key">
-                    <button id="save-openroute-key" type="button" class="btn btn-primary">Save openrouteservice key</button>
-                    <button id="remove-openroute-key" type="button" class="btn btn-ghost">Remove openrouteservice key</button>
-                    <p id="openroute-key-status" class="form-hint" aria-live="polite">Open this panel to check configuration.</p>
-                    <p class="form-hint">Walking, cycling and driving routes; transit uses your authored times unless you explicitly select Google. <a href="https://account.heigit.org/" target="_blank" rel="noopener noreferrer">Get a free API key</a> · <a href="https://account.heigit.org/info/plans" target="_blank" rel="noopener noreferrer">Usage limits</a></p>
-                    <label class="form-label" for="global-google-maps-key">Google Maps API key</label>
-                    <input id="global-google-maps-key" type="password" class="form-input" autocomplete="off" spellcheck="false" placeholder="Paste a new key to save or replace it">
-                    <p class="form-hint">Enable Places API (New) and Routes API in your Google project. Billing is required. This key is saved by your local launcher, outside browser backups. Saving does not call Google.</p>
-                    <button id="save-google-maps-key" class="btn btn-primary" type="button">Save Maps key</button>
-                    <button id="remove-google-maps-key" class="btn btn-ghost" type="button">Remove saved key</button>
-                    <button id="refresh-google-maps-key" class="btn btn-ghost" type="button">Check setup</button>
-                    <p id="google-maps-key-status" class="form-hint" aria-live="polite">Check setup to see whether a key is configured.</p>
-                    <p class="form-hint">Use this under VH Studio → Active Life → Recurring places. <a href="https://developers.google.com/maps/documentation/routes/get-api-key" target="_blank" rel="noopener noreferrer">Google setup instructions</a></p>
-                </div>
+                <div class="settings-disclosure-body"><p>Connect place search and travel estimates. Also available directly in Virtual Humans → Life → Maps &amp; places.</p><button id="open-maps-setup" type="button" class="btn btn-primary">Manage Maps &amp; places</button></div>
             </details>
             <div id="cloud-key-storage-block" class="settings-security-row">
                 <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:0.8rem; color:var(--text-2); cursor:pointer;">
@@ -5194,23 +5176,28 @@
 <script src="boot-diagnostics.js"></script>
 <script src="presets.js"></script>
 <script src="policy-panic-world.js"></script>
-<script src="ashlyn-reynolds-human.js?v=20260814-ashlyn-clips-v1"></script>
-<script src="jane-harlow-human.js?v=20260814-bundled-humans-v1"></script>
     <script src="labs-needle.js?v=20260822-v161" data-horde-needle-adapter="true"></script>
 <script src="labs-embedded.js?v=20260810-pip-conversation-v2"></script>
 <script src="labs-core.js?v=20260822-v161"></script>
 <script src="labs-tasks.js?v=20260822-v161"></script>
 <script src="labs-guide.js?v=20260822-v161"></script>
-    <script src="help-system.js?v=20260908-reply-cleanup"></script>
+    <script src="help-system.js?v=20260913-v18-storage"></script>
 <script src="labs-ui.js?v=20260822-v161"></script>
 <script src="rpg-mechanics.js?v=20260823-v166-rpg-release"></script>
 <script src="multiplayer-engine.js?v=20260902-v171"></script>
 <script src="multiplayer.js?v=20260902-v171"></script>
-<script src="video-worlds.js?v=20260902-v171"></script>
-    <script src="vh-conversation-engine.js?v=20260908-reply-cleanup"></script>
-    <script src="vh-activity-engine.js?v=20260908-reply-cleanup"></script>
-    <script src="vh-world-engine.js?v=20260908-reply-cleanup"></script>
-    <script src="vh-simulation-core.js?v=20260908-reply-cleanup"></script>
-    <script src="app.js?v=20260908-reply-cleanup"></script>
+<script src="video-worlds.js?v=20260912-consolidated-life"></script>
+    <script src="vh-conversation-engine.js?v=20260910-vh2-history"></script>
+    <script src="vh-activity-engine.js?v=20260912-consolidated-life"></script>
+    <script src="vh-world-engine.js?v=20260912-wardrobe-colors"></script>
+    <script src="vh-simulation-core.js?v=20260912-wardrobe-colors"></script>
+    <script src="vh-life-schema.js?v=20260913-v18-storage"></script>
+    <script src="vh2-horde-integration.js?v=20260913-v18-storage"></script>
+    <script src="vh-workspace.js?v=20260913-v18-storage"></script>
+    <script src="vh-assistant-ui.js?v=20260912-self-recovery"></script>
+    <script src="vh-setup-ui.js?v=20260912-self-recovery"></script>
+    <script src="bundled-humans.js?v=20260913-v18-storage"></script>
+    <script src="human-package.js?v=20260913-v18-storage"></script>
+    <script src="app.js?v=20260913-v18-storage"></script>
 </body>
 </html>

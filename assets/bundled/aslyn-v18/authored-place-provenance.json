@@ -1,0 +1,256 @@
+{
+  "format": "horde-bundled-reference-overlay",
+  "version": 1,
+  "characterName": "Aslyn Jonas",
+  "generationMode": "built-in imagegen",
+  "references": [
+    {
+      "entityId": "ashburn_jonas_home",
+      "path": "assets/bundled/aslyn-v18/locations-v3/ashburn_jonas_home.png",
+      "sha256": "882387a1e742b11c6204a7699f0b1eb959355e6497b5b69704d431c51508470c",
+      "prompt": "Use case: photorealistic-natural. Asset type: persistent environment reference for a fictional human-life simulation. Generate exactly one standalone natural photograph, 1536x1024 pixels, landscape 3:2. Single coherent frame, realistic geometry and materials, eye-level 28mm lens, no fisheye, enough open foreground to place a person in a future photograph. Quiet unoccupied location: no people, human silhouettes or faces in photographs, no readable personal information, no logos, watermark, title, collage, split view or inset. Authentic everyday southern Georgia regional atmosphere; not a real private address or verified business interior. Primary request: Exterior of the fictional Jonas family home on the rural edge of Ashburn, Georgia: a LARGE, well-maintained single-story red-brick ranch on six acres, belonging to a family whose regional agricultural-supply business has been profitable for twenty years. Long, substantial ranch footprint with a low charcoal shingle roof, broad covered front porch, white trim, neat foundation shrubs, comfortable porch chairs, paved driveway leading to a side garage, one clean recent-model unbranded pickup parked well to the side. Expansive mown green lawn, mature pecan and pine trees, flat rural land and a distant agricultural field beyond the yard; no mountains. Full house visible at a modest three-quarter angle, grounded and comfortably prosperous, never a shack or poverty-coded dwelling, not a mansion or plantation. Bright humid late-afternoon daylight with soft cloud-filtered shadows. Landscape establishes spacious six-acre grounds without looking like a real-estate drone photo.",
+      "referenceDescription": "Fictional Jonas family home outside Ashburn: a large, well-kept single-story red-brick ranch with a broad covered porch, white trim, charcoal roof, paved drive and side garage, set on spacious mown grounds with mature trees and flat farmland beyond. Comfortable established agricultural-business household; exterior continuity reference.",
+      "provenance": {
+        "kind": "fictional",
+        "note": "Generated fictional setting anchored to the authored character background. Ashburn regional context only; no real private address, household interior or business premises verified.",
+        "sources": [
+          "https://cityofashburn.net/about-the-city-of-ashburn/",
+          "https://exploregeorgia.org/city/ashburn"
+        ],
+        "checkedAt": "2026-09-13"
+      }
+    },
+    {
+      "entityId": "ashburn_colton_home",
+      "path": "assets/bundled/aslyn-v18/locations-v3/ashburn_colton_home.png",
+      "sha256": "88840d84324ecec7938f36ea5fd3fe7e5d98b87c9f3dd61e9084d626fb6664ad",
+      "prompt": "Use case: photorealistic-natural. Asset type: persistent environment reference for a fictional human-life simulation. Generate exactly one standalone natural photograph, 1536x1024 pixels, landscape 3:2. Single coherent frame, realistic geometry and materials, eye-level 28mm lens, no fisheye, enough open foreground to place a person in a future photograph. Quiet unoccupied location: no people, human silhouettes or faces in photographs, no readable personal information, no logos, watermark, title, collage, split view or inset. Authentic everyday southern Georgia regional atmosphere; not a real private address or verified business interior. Primary request: Interior of a modest, comfortable fictional living room in Ashburn, Georgia, belonging to Colton, a twenty-year-old auto mechanic with a pickup truck. A practical small-house common room: worn-in charcoal fabric sofa, wooden coffee table with a plain mug and a vehicle-maintenance magazine closed with no legible title, small television switched off on a simple wood console, a tan work jacket draped over one dining chair by a compact kitchen opening. Clean lived-in room, off-white walls, warm medium-brown floor, ceiling fan, daylight through blinds and leafy southern yard visible at the window. Practical and personal rather than a staged luxury rental. No invented partner, family portraits, or bedroom scene. View from the doorway across the room, comfortable space available beside the sofa.",
+      "referenceDescription": "Fictional common room at Colton’s Ashburn residence: charcoal sofa, wooden coffee table, simple television console, off-white walls, ceiling fan and a compact kitchen opening, with a work jacket and modest signs of a mechanic’s everyday home life.",
+      "provenance": {
+        "kind": "fictional",
+        "note": "Generated fictional setting anchored to the authored character background. Ashburn regional context only; no real private address, household interior or business premises verified.",
+        "sources": [
+          "https://cityofashburn.net/about-the-city-of-ashburn/",
+          "https://exploregeorgia.org/city/ashburn"
+        ],
+        "checkedAt": "2026-09-13"
+      }
+    },
+    {
+      "entityId": "ashburn_kaylee_home",
+      "path": "assets/bundled/aslyn-v18/locations-v3/ashburn_kaylee_home.png",
+      "sha256": "6bdba3b07bfc04c14295345b7f8db2fb8fb705fa0027aecb6d363ecee06628ff",
+      "prompt": "Use case: photorealistic-natural. Asset type: persistent environment reference for a fictional human-life simulation. Generate exactly one standalone natural photograph, 1536x1024 pixels, landscape 3:2. Single coherent frame, realistic geometry and materials, eye-level 28mm lens, no fisheye, enough open foreground to place a person in a future photograph. Quiet unoccupied location: no people, human silhouettes or faces in photographs, no readable personal information, no logos, watermark, title, collage, split view or inset. Authentic everyday southern Georgia regional atmosphere; not a real private address or verified business interior. Primary request: Interior of a modest, cozy fictional living room shared by young hair stylist Kaylee and her unnamed boyfriend in Ashburn, Georgia. A comfortable small rental common room with a sage-green sofa, soft cream throw, small dark wood coffee table with two ordinary mugs, thrifted side table, houseplants by the window, warm cream walls, simple shelf and a compact dining nook. A few restrained pink and dark accents suggest Kaylee's personal taste, not a neon salon or themed room. Light everyday clutter, a closed tote on a dining chair, tidy but clearly lived in, natural morning daylight, ceiling fan. No wedding or couple portraits, no names or readable personal text, no assumptions about who the boyfriend is. Eye-level corner view showing an open sitting area.",
+      "referenceDescription": "Fictional shared Ashburn home for Kaylee and her unnamed boyfriend: a cozy small living room with a sage sofa, cream throw, dark wood coffee table, two mugs, houseplants, warm neutral walls and restrained pink accents; no identity claim about the boyfriend.",
+      "provenance": {
+        "kind": "fictional",
+        "note": "Generated fictional setting anchored to the authored character background. Ashburn regional context only; no real private address, household interior or business premises verified.",
+        "sources": [
+          "https://cityofashburn.net/about-the-city-of-ashburn/",
+          "https://exploregeorgia.org/city/ashburn"
+        ],
+        "checkedAt": "2026-09-13"
+      }
+    },
+    {
+      "entityId": "ashburn_cody_home",
+      "path": "assets/bundled/aslyn-v18/locations-v3/ashburn_cody_home.png",
+      "sha256": "f898d363a050e91d21d2fd61f702da05df3f88dbf68c399a2678a7cad7771e26",
+      "prompt": "Use case: photorealistic-natural. Asset type: persistent environment reference for a fictional human-life simulation. Generate exactly one standalone natural photograph, 1536x1024 pixels, landscape 3:2. Single coherent frame, realistic geometry and materials, eye-level 28mm lens, no fisheye, enough open foreground to place a person in a future photograph. Quiet unoccupied location: no people, human silhouettes or faces in photographs, no readable personal information, no logos, watermark, title, collage, split view or inset. Authentic everyday southern Georgia regional atmosphere; not a real private address or verified business interior. Primary request: Interior of Cody Jonas’s fictional separate residence in Ashburn, Georgia. He is a twenty-three-year-old worker in his prosperous family’s agricultural-supply business, practical and settled in his habits, owns a muddy truck. Show a modest but comfortable common living room: tan leather sofa, sturdy oak coffee table, slate-blue armchair, simple media cabinet with a switched-off TV, boots neatly placed on a washable mat by the back door, baseball cap on a hook, small adjoining dining table. Neutral walls, warm wood-look floor, daylight through a window overlooking a green flat yard. Calm, personal and functional rather than a luxury showroom. Do not imply Hannah or anybody else lives here; no couple photos, no extra person, no family-photo faces. Three-quarter room view and clear foreground.",
+      "referenceDescription": "Fictional separate home for Cody in Ashburn: practical living room with tan leather sofa, oak table, slate-blue armchair and simple media cabinet, work boots by the door and a green yard beyond. No cohabitation with Hannah is established.",
+      "provenance": {
+        "kind": "fictional",
+        "note": "Generated fictional setting anchored to the authored character background. Ashburn regional context only; no real private address, household interior or business premises verified.",
+        "sources": [
+          "https://cityofashburn.net/about-the-city-of-ashburn/",
+          "https://exploregeorgia.org/city/ashburn"
+        ],
+        "checkedAt": "2026-09-13"
+      }
+    },
+    {
+      "entityId": "ashburn_local_cafe",
+      "path": "assets/bundled/aslyn-v18/locations-v3/ashburn_local_cafe.png",
+      "sha256": "b1183cd9a1ba0f1448b881fb33e3724c052c1af4369a021fc3e7b490d1db79c8",
+      "prompt": "Use case: photorealistic-natural. Asset type: persistent environment reference for a fictional human-life simulation. Generate exactly one standalone natural photograph, 1536x1024 pixels, landscape 3:2. Single coherent frame, realistic geometry and materials, eye-level 28mm lens, no fisheye, enough open foreground to place a person in a future photograph. Quiet unoccupied location: no people, human silhouettes or faces in photographs, no readable personal information, no logos, watermark, title, collage, split view or inset. Authentic everyday southern Georgia regional atmosphere; not a real private address or verified business interior. Primary request: Interior of a fictional affordable locally owned cafe in small-town Ashburn, south-central Georgia. Welcoming everyday meeting place: warm exposed-brick side wall, large front windows, a short wood service counter with espresso machine and small pastry case, compact two-person wooden tables, mismatched but sturdy chairs, cushioned bench along one wall. Natural daylight, modest potted greenery, honest slightly worn wood textures, clean operational space with mugs and equipment logically placed. Quiet between customers with all seats empty. Menu board may be blank or out of focus, no business name or logos, no tourist gimmicks. Eye-level wide view showing seating and counter, attractive but ordinary, plenty of clear walking room.",
+      "referenceDescription": "Fictional affordable Ashburn cafe with a wood counter, espresso machine, small pastry case, compact tables, sturdy chairs, cushioned bench, brick accents and broad front windows; ordinary welcoming local gathering space.",
+      "provenance": {
+        "kind": "fictional",
+        "note": "Generated fictional setting anchored to the authored character background. Ashburn regional context only; no real private address, household interior or business premises verified.",
+        "sources": [
+          "https://cityofashburn.net/about-the-city-of-ashburn/",
+          "https://exploregeorgia.org/city/ashburn"
+        ],
+        "checkedAt": "2026-09-13"
+      }
+    },
+    {
+      "entityId": "ashburn_auto_shop",
+      "path": "assets/bundled/aslyn-v18/locations-v3/ashburn_auto_shop.png",
+      "sha256": "5a132f5923b545036fa9615b0f54bf88f8fb75768b6755dbbae32f9c7bcad082",
+      "prompt": "Use case: photorealistic-natural. Asset type: persistent environment reference for a fictional human-life simulation. Generate exactly one standalone natural photograph, 1536x1024 pixels, landscape 3:2. Single coherent frame, realistic geometry and materials, eye-level 28mm lens, no fisheye, enough open foreground to place a person in a future photograph. Quiet unoccupied location: no people, human silhouettes or faces in photographs, no readable personal information, no logos, watermark, title, collage, split view or inset. Authentic everyday southern Georgia regional atmosphere; not a real private address or verified business interior. Primary request: Interior of the fictional Marsh family auto-repair shop in Ashburn, Georgia, Colton’s workplace. Functionally coherent two-bay independent shop: high open roller doors with flat green southern landscape outside, concrete floor showing light authentic workshop wear, neatly organized rolling tool cabinets, wall-mounted hoses, wheel-and-tire rack, parts shelf, and one ordinary unbranded pickup resting on the floor in a service bay with hood CLOSED. Visible small reception counter through a glazed interior office window. No active repair, no elevated vehicle, no instructional diagram, chemicals or hazardous process, no mechanics. Open unobstructed central bay leaves room for a future person photo. Daylight from bay doors mixed with practical overhead lighting, realistic modest family business, not abandoned or filthy.",
+      "referenceDescription": "Fictional Marsh family auto shop in Ashburn: two service bays, roller doors, concrete floor, organized tool cabinets and tire rack, an unbranded pickup parked on the floor and a small glazed reception office. Unoccupied workplace continuity reference.",
+      "provenance": {
+        "kind": "fictional",
+        "note": "Generated fictional setting anchored to the authored character background. Ashburn regional context only; no real private address, household interior or business premises verified.",
+        "sources": [
+          "https://cityofashburn.net/about-the-city-of-ashburn/",
+          "https://exploregeorgia.org/city/ashburn"
+        ],
+        "checkedAt": "2026-09-13"
+      }
+    },
+    {
+      "entityId": "ashburn_hair_salon",
+      "path": "assets/bundled/aslyn-v18/locations-v3/ashburn_hair_salon.png",
+      "sha256": "4d04117c738577b6bd0fc983d9f63092b7d131b543ae9c03b6c1432f211d30ba",
+      "prompt": "Use case: photorealistic-natural. Asset type: persistent environment reference for a fictional human-life simulation. Generate exactly one standalone natural photograph, 1536x1024 pixels, landscape 3:2. Single coherent frame, realistic geometry and materials, eye-level 28mm lens, no fisheye, enough open foreground to place a person in a future photograph. Quiet unoccupied location: no people, human silhouettes or faces in photographs, no readable personal information, no logos, watermark, title, collage, split view or inset. Authentic everyday southern Georgia regional atmosphere; not a real private address or verified business interior. Primary request: Interior of a fictional neighborhood hair salon in Ashburn, Georgia where Kaylee works. Modest, comfortable and functioning small salon: three black salon chairs at separate framed mirrors and light-wood styling stations, a pair of black wash basins toward the back, organized bottles with generic unreadable labels, trolley with closed drawers, neatly folded towels, small reception desk and two waiting chairs near the sunny storefront. Warm cream walls with muted blush accents and a few plants; practical tile or wood-look floor. Mirrors reflect only the empty coherent room, never a camera or human. All chairs unoccupied, equipment switched off, ordinary natural daytime lighting. Attractive local business rather than a luxury city spa, no brand or real business name.",
+      "referenceDescription": "Fictional Ashburn salon workplace for Kaylee: three black styling chairs and mirrors, light-wood stations, rear wash basins, organized products and towels, a small reception and waiting area, warm cream and muted blush colors.",
+      "provenance": {
+        "kind": "fictional",
+        "note": "Generated fictional setting anchored to the authored character background. Ashburn regional context only; no real private address, household interior or business premises verified.",
+        "sources": [
+          "https://cityofashburn.net/about-the-city-of-ashburn/",
+          "https://exploregeorgia.org/city/ashburn"
+        ],
+        "checkedAt": "2026-09-13"
+      }
+    },
+    {
+      "entityId": "ashburn_agricultural_supply",
+      "path": "assets/bundled/aslyn-v18/locations-v3/ashburn_agricultural_supply.png",
+      "sha256": "55bdd2b0c8e3e68fa29a94bc04f6fb98bae287e9036d4343e9bca45ce4e81a71",
+      "prompt": "Use case: photorealistic-natural. Asset type: persistent environment reference for a fictional human-life simulation. Generate exactly one standalone natural photograph, 1536x1024 pixels, landscape 3:2. Single coherent frame, realistic geometry and materials, eye-level 28mm lens, no fisheye, enough open foreground to place a person in a future photograph. Quiet unoccupied location: no people, human silhouettes or faces in photographs, no readable personal information, no logos, watermark, title, collage, split view or inset. Authentic everyday southern Georgia regional atmosphere; not a real private address or verified business interior. Primary request: Photorealistic interior wide view of the fictional Jonas Agricultural Supply business in Ashburn, south-central Georgia. A substantial successful regional family company serving row-crop farms, operating for more than twenty years. Frame a practical customer service area and working office in the foreground with a sturdy wood-laminate service counter, desk, computer screen asleep and organized paperwork with no readable personal data; through a wide open connecting doorway, clearly visible orderly warehouse shelves, sealed generic agricultural-supply sacks and cartons on pallets, a small farm-implement display and a wide roll-up loading door letting in daylight. Concrete floors and utilitarian metal structure, signs of routine use but clean and maintained, believable transition between office and warehouse, no luxury showroom. No people, active machinery, exposed chemicals, labels naming hazardous materials, instructional diagrams, real logo or business address. Flat rural Georgia landscape hinted through loading door. Clear foreground for later character photography.",
+      "referenceDescription": "Fictional Jonas Agricultural Supply workplace in Ashburn: practical service counter and office connected to an orderly warehouse with pallet shelving, sealed generic farm-supply sacks and cartons, equipment display and daylight from the loading door. Established successful family business.",
+      "provenance": {
+        "kind": "fictional",
+        "note": "Generated fictional setting anchored to the authored character background. Ashburn regional context only; no real private address, household interior or business premises verified.",
+        "sources": [
+          "https://cityofashburn.net/about-the-city-of-ashburn/",
+          "https://exploregeorgia.org/city/ashburn"
+        ],
+        "checkedAt": "2026-09-13"
+      }
+    },
+    {
+      "entityId": "megan_dorm",
+      "path": "assets/bundled/aslyn-v18/locations-v3/megan_dorm.png",
+      "sha256": "8bc6ff1934f920f69e6b232ffd857088a5581fc91e6f74d269db85e8aac1976d",
+      "prompt": "Use case: photorealistic-natural.\nAsset type: reusable fictional housing environment reference for a life simulation.\nCreate exactly one landscape image, 1536 by 1024 pixels. A single natural eye-level 28mm camera photograph looking into a believable, modest student home in Tempe, Arizona. Unoccupied, no people or animals, no human photographs or faces on screens or artwork. A legible continuous room layout with usable floor and seating space for future character photos, straight verticals and natural perspective. Ordinary rental finishes, real fabric texture, slight wear, lived-in everyday details, moderate clutter without filth. Subtle strong Arizona daylight filtered by blinds or curtains, with a glimpse of neutral stucco outside where appropriate. Balanced realistic exposure, gentle shadow detail, no dramatic cinema grade. No luxury showroom, architectural sales render, CGI sheen, excessive staging, fisheye, montage, collage, floor plan, labels, captions, watermark, logos, legible lettering or addresses. This is an invented private interior, not a documentary representation of a real person's home or an exact university room.\n\nPrimary request: Megan's private fictional ASU-inspired campus residence room. Megan is a 20-year-old student whose social style is carefully presented and Instagram-curated. Show one modest single-occupant dorm room with exactly one twin XL bed, simple pale wood dorm furniture, cream and muted lavender bedding with a slightly rumpled corner, one compact desk with a closed laptop and a few notebooks, an inexpensive small vanity mirror and organized makeup beside the desk, a neat clothes rail with a few casual garments, an everyday backpack and water bottle. A small abstract art print and a modest faux plant make it personally curated. Plain off-white painted walls and ordinary vinyl tile flooring, standard window with white blinds. Daytime, natural, tidy enough for a photo but clearly actually used. No second bed, no other occupant implied, no university insignia. Keep the room genuinely small and affordable.",
+      "referenceDescription": "Fictional private ASU-inspired student residence room: one twin XL bed with cream and muted lavender bedding, plain wood dorm furniture, compact study desk and a small organized vanity area. Curated but affordable and lived in; window blinds soften Tempe daylight.",
+      "provenance": {
+        "mode": "built-in imagegen",
+        "tool": "image_gen.imagegen",
+        "fictional": true,
+        "sourceContext": "Authored place descriptions and resident traits in assets/bundled/aslyn-v18/character.json. Furnishing details are fictional reference art direction, not claims about actual private housing.",
+        "editPrompt": "Use case: precise-object-edit. Edit this existing environment reference photograph with exactly one local cleanup. On the left wall above the bed, replace every small photo postcard with a simple muted geometric color-swatch card, containing only abstract shapes and no people, faces, silhouettes, letters, landmarks or photographs. Preserve the larger abstract framed print. Preserve the room layout, every piece of furniture and object outside that target, colors, materials, Arizona daylight, camera position, composition and realistic texture. No people or faces anywhere. Do not redesign the interior. Output one 1536x1024 image.",
+        "visuallyInspected": true,
+        "inspection": "Single unoccupied natural interior, plausible Tempe student housing, distinct layout and furnishings, no prominent labels or identifying addresses. Background photo details removed where present.",
+        "width": 1536,
+        "height": 1024,
+        "bytes": 2385636,
+        "savedAt": "2026-09-12T23:19:36.733013+00:00"
+      }
+    },
+    {
+      "entityId": "tyler_shared_house",
+      "path": "assets/bundled/aslyn-v18/locations-v3/tyler_shared_house.png",
+      "sha256": "8b40d0728e7906fd0e021dd5a9dc87c88258a65bb5db9b808df976ec152c7151",
+      "prompt": "Use case: photorealistic-natural.\nAsset type: reusable fictional housing environment reference for a life simulation.\nCreate exactly one landscape image, 1536 by 1024 pixels. A single natural eye-level 28mm camera photograph looking into a believable, modest student home in Tempe, Arizona. Unoccupied, no people or animals, no human photographs or faces on screens or artwork. A legible continuous room layout with usable floor and seating space for future character photos, straight verticals and natural perspective. Ordinary rental finishes, real fabric texture, slight wear, lived-in everyday details, moderate clutter without filth. Subtle strong Arizona daylight filtered by blinds or curtains, with a glimpse of neutral stucco outside where appropriate. Balanced realistic exposure, gentle shadow detail, no dramatic cinema grade. No luxury showroom, architectural sales render, CGI sheen, excessive staging, fisheye, montage, collage, floor plan, labels, captions, watermark, logos, legible lettering or addresses. This is an invented private interior, not a documentary representation of a real person's home or an exact university room.\n\nPrimary request: Tyler's fictional shared-house living room near campus, shared by the four already established male housemates in the story. Tyler is a 21-year-old kinesiology junior who enjoys relaxed social gatherings. Show an ordinary low-rise Arizona rental common room with a worn charcoal three-seat sofa and one mismatched brown armchair, a scuffed secondhand wood coffee table with two game controllers, a remote and reusable water bottles, a simple television stand with the television screen off, a foam roller and a pair of modest dumbbells tucked beside a low shelf, plain-spined anatomy study books and a backpack, a hoodie casually draped over a chair. Off-white walls, everyday neutral ceramic tile, a compact open kitchen just glimpsed in the background. Sun filtered through broad white blinds, warm lamp in a corner. Lived-in, casually untidy, not dirty or a party aftermath. No fraternity symbols, real sports-team branding, luxury furnishings, bedroom, or people. Make it feel spacious enough for friends to sit together but still a modest rental house.",
+      "referenceDescription": "Fictional shared student-house common room near campus: worn charcoal sofa, mismatched chair, basic television stand, game controllers, a foam roller and modest study clutter. Neutral tile, off-white walls and bright Arizona window light; casual common space for the established four housemates.",
+      "provenance": {
+        "mode": "built-in imagegen",
+        "tool": "image_gen.imagegen",
+        "fictional": true,
+        "sourceContext": "Authored place descriptions and resident traits in assets/bundled/aslyn-v18/character.json. Furnishing details are fictional reference art direction, not claims about actual private housing.",
+        "editPrompt": "Use case: precise-object-edit. Edit this existing environment reference photograph with exactly one local cleanup. Remove all papers, postcards, photographs and magnets from the refrigerator doors in the back kitchen, leaving clean plain stainless steel refrigerator doors with their existing light and reflections. Preserve the room layout, every piece of furniture and object outside that target, colors, materials, Arizona daylight, camera position, composition and realistic texture. No people or faces anywhere. Do not redesign the interior. Output one 1536x1024 image.",
+        "visuallyInspected": true,
+        "inspection": "Single unoccupied natural interior, plausible Tempe student housing, distinct layout and furnishings, no prominent labels or identifying addresses. Background photo details removed where present.",
+        "width": 1536,
+        "height": 1024,
+        "bytes": 2386826,
+        "savedAt": "2026-09-12T23:19:36.734831+00:00"
+      }
+    },
+    {
+      "entityId": "fictional_avery_lane_home",
+      "path": "assets/bundled/aslyn-v18/locations-v3/fictional_avery_lane_home.png",
+      "sha256": "c5251fa71d6268a9aa5385f9ab1cf8cb06b90dcf947b22c08670a4d77e549fc5",
+      "prompt": "Use case: photorealistic-natural.\nAsset type: reusable fictional housing environment reference for a life simulation.\nCreate exactly one landscape image, 1536 by 1024 pixels. A single natural eye-level 28mm camera photograph looking into a believable, modest student home in Tempe, Arizona. Unoccupied, no people or animals, no human photographs or faces on screens or artwork. A legible continuous room layout with usable floor and seating space for future character photos, straight verticals and natural perspective. Ordinary rental finishes, real fabric texture, slight wear, lived-in everyday details, moderate clutter without filth. Subtle strong Arizona daylight filtered by blinds or curtains, with a glimpse of neutral stucco outside where appropriate. Balanced realistic exposure, gentle shadow detail, no dramatic cinema grade. No luxury showroom, architectural sales render, CGI sheen, excessive staging, fisheye, montage, collage, floor plan, labels, captions, watermark, logos, legible lettering or addresses. This is an invented private interior, not a documentary representation of a real person's home or an exact university room.\n\nPrimary request: the common room in Avery Lane's separate fictional student apartment near south campus. Avery is a sociable 22-year-old student who likes casual coffee, swimming at public facilities and campus events. Create a friendly modest apartment interior with a simple muted terracotta two-seat sofa, a pale wood coffee table holding one ceramic coffee mug and a closed notebook, a basic compact dining table with two chairs, a small study desk under the window with a closed laptop, one healthy small plant, a reusable tote and a swimming bag with a folded blue towel by the entry. Everyday pale laminate flooring, cream walls, a standard short window with white blinds and sunlit neutral stucco beyond. Warm natural morning daylight; a cushion slightly out of place, a jacket on a hook, realistic minor wear. Keep the composition centered on the seating and open floor. No bed visible. Do not imply a roommate or family, and no private pool.",
+      "referenceDescription": "Avery's separate fictional student-apartment common room: a simple terracotta-toned sofa, pale wood furniture, a compact table and desk, coffee mug, swimming tote and towel near the entry. Friendly sunlit everyday space with a few plants and modest rental finishes.",
+      "provenance": {
+        "mode": "built-in imagegen",
+        "tool": "image_gen.imagegen",
+        "fictional": true,
+        "sourceContext": "Authored place descriptions and resident traits in assets/bundled/aslyn-v18/character.json. Furnishing details are fictional reference art direction, not claims about actual private housing.",
+        "editPrompt": null,
+        "visuallyInspected": true,
+        "inspection": "Single unoccupied natural interior, plausible Tempe student housing, distinct layout and furnishings, no prominent labels or identifying addresses. Background photo details removed where present.",
+        "width": 1536,
+        "height": 1024,
+        "bytes": 2750237,
+        "savedAt": "2026-09-12T23:19:36.737988+00:00"
+      }
+    },
+    {
+      "entityId": "fictional_noah_reed_home",
+      "path": "assets/bundled/aslyn-v18/locations-v3/fictional_noah_reed_home.png",
+      "sha256": "a90de6f6b8fa3a173fe6da252f1dec041f025b65cf743cf9d1b0dbf257b213b4",
+      "prompt": "Use case: photorealistic-natural.\nAsset type: reusable fictional housing environment reference for a life simulation.\nCreate exactly one landscape image, 1536 by 1024 pixels. A single natural eye-level 28mm camera photograph looking into a believable, modest student home in Tempe, Arizona. Unoccupied, no people or animals, no human photographs or faces on screens or artwork. A legible continuous room layout with usable floor and seating space for future character photos, straight verticals and natural perspective. Ordinary rental finishes, real fabric texture, slight wear, lived-in everyday details, moderate clutter without filth. Subtle strong Arizona daylight filtered by blinds or curtains, with a glimpse of neutral stucco outside where appropriate. Balanced realistic exposure, gentle shadow detail, no dramatic cinema grade. No luxury showroom, architectural sales render, CGI sheen, excessive staging, fisheye, montage, collage, floor plan, labels, captions, watermark, logos, legible lettering or addresses. This is an invented private interior, not a documentary representation of a real person's home or an exact university room.\n\nPrimary request: the common room of Noah Reed's separate fictional nearby apartment. Noah is a friendly 23-year-old recreation enthusiast who likes exercise, games and relaxed group plans. Show a practical reasonably tidy budget apartment living room with a compact slate-blue sofa, a simple light-gray woven rug, a low television stand and a dark switched-off television, two game controllers neatly placed beside it, a narrow shelf of ordinary games in plain unlettered boxes. A rolled exercise mat, foam roller and small weights are neatly stored in a basket near the wall; running shoes and a refillable water bottle near the entry. A basic small desk with a closed laptop occupies one corner. White walls, budget honey-tone laminate flooring, patio glass with a beige cotton curtain filtering bright Arizona daylight and a tiny glimpse of stucco. Realistic soft fabric creases and daily use, an uncluttered usable floor space. No gym showroom, invented team affiliation, bed, people, roommate or family cues.",
+      "referenceDescription": "Noah's separate fictional apartment common room: compact slate-blue sofa, television and games, neatly stored exercise mat and foam roller, running shoes and water bottle. Practical, fairly tidy student rental with laminate flooring and filtered Arizona light.",
+      "provenance": {
+        "mode": "built-in imagegen",
+        "tool": "image_gen.imagegen",
+        "fictional": true,
+        "sourceContext": "Authored place descriptions and resident traits in assets/bundled/aslyn-v18/character.json. Furnishing details are fictional reference art direction, not claims about actual private housing.",
+        "editPrompt": null,
+        "visuallyInspected": true,
+        "inspection": "Single unoccupied natural interior, plausible Tempe student housing, distinct layout and furnishings, no prominent labels or identifying addresses. Background photo details removed where present.",
+        "width": 1536,
+        "height": 1024,
+        "bytes": 2876013,
+        "savedAt": "2026-09-12T23:19:36.740556+00:00"
+      }
+    },
+    {
+      "entityId": "fictional_mira_chen_home",
+      "path": "assets/bundled/aslyn-v18/locations-v3/fictional_mira_chen_home.png",
+      "sha256": "2d94902641426602eaab05ad893f24aad5b6da06a258c6dd2b2dce7808c61724",
+      "prompt": "Use case: photorealistic-natural.\nAsset type: reusable fictional housing environment reference for a life simulation.\nCreate exactly one landscape image, 1536 by 1024 pixels. A single natural eye-level 28mm camera photograph looking into a believable, modest student home in Tempe, Arizona. Unoccupied, no people or animals, no human photographs or faces on screens or artwork. A legible continuous room layout with usable floor and seating space for future character photos, straight verticals and natural perspective. Ordinary rental finishes, real fabric texture, slight wear, lived-in everyday details, moderate clutter without filth. Subtle strong Arizona daylight filtered by blinds or curtains, with a glimpse of neutral stucco outside where appropriate. Balanced realistic exposure, gentle shadow detail, no dramatic cinema grade. No luxury showroom, architectural sales render, CGI sheen, excessive staging, fisheye, montage, collage, floor plan, labels, captions, watermark, logos, legible lettering or addresses. This is an invented private interior, not a documentary representation of a real person's home or an exact university room.\n\nPrimary request: the common room of Mira Chen's separate fictional nearby apartment. Mira is an art-minded 21-year-old student who enjoys sketching, familiar cafés and small gatherings. Show a quiet modest living room with a secondhand muted olive-green sofa, a small wood table bearing an open sketchbook with simple nonfigurative pencil marks, a jar of pencils, a ceramic café-style mug, a tidy stack of drawing paper and plain notebooks. A low thrifted bookcase and two inexpensive abstract geometric prints, with no faces or lettering, give it a subtly creative personal feeling. A small cactus in a pot by a standard window, cotton curtains filtering strong Arizona daylight into soft indirect light. Off-white walls, slightly worn beige floor tile and a simple flatweave rug. Carefully kept but not overly styled, a throw casually folded on the sofa arm. Include a bit of open floor and the entry to a small kitchen, no bedroom. Avoid glamorous studio decor, luxury loft scale, extra occupants or implied family.",
+      "referenceDescription": "Mira's separate fictional apartment common room: secondhand olive sofa, small wooden sketching table, pencils and abstract sketches, bookcase and ceramic mug. A quiet, carefully kept creative student space in soft filtered Arizona daylight.",
+      "provenance": {
+        "mode": "built-in imagegen",
+        "tool": "image_gen.imagegen",
+        "fictional": true,
+        "sourceContext": "Authored place descriptions and resident traits in assets/bundled/aslyn-v18/character.json. Furnishing details are fictional reference art direction, not claims about actual private housing.",
+        "editPrompt": null,
+        "visuallyInspected": true,
+        "inspection": "Single unoccupied natural interior, plausible Tempe student housing, distinct layout and furnishings, no prominent labels or identifying addresses. Background photo details removed where present.",
+        "width": 1536,
+        "height": 1024,
+        "bytes": 2805309,
+        "savedAt": "2026-09-12T23:19:36.743667+00:00"
+      }
+    },
+    {
+      "entityId": "fictional_eli_brooks_home",
+      "path": "assets/bundled/aslyn-v18/locations-v3/fictional_eli_brooks_home.png",
+      "sha256": "f0f5ac6028a049ba26135cbc9263227da69e72a51bfa35693e0629bd0b28406d",
+      "prompt": "Use case: photorealistic-natural.\nAsset type: reusable fictional housing environment reference for a life simulation.\nCreate exactly one landscape image, 1536 by 1024 pixels. A single natural eye-level 28mm camera photograph looking into a believable, modest student home in Tempe, Arizona. Unoccupied, no people or animals, no human photographs or faces on screens or artwork. A legible continuous room layout with usable floor and seating space for future character photos, straight verticals and natural perspective. Ordinary rental finishes, real fabric texture, slight wear, lived-in everyday details, moderate clutter without filth. Subtle strong Arizona daylight filtered by blinds or curtains, with a glimpse of neutral stucco outside where appropriate. Balanced realistic exposure, gentle shadow detail, no dramatic cinema grade. No luxury showroom, architectural sales render, CGI sheen, excessive staging, fisheye, montage, collage, floor plan, labels, captions, watermark, logos, legible lettering or addresses. This is an invented private interior, not a documentary representation of a real person's home or an exact university room.\n\nPrimary request: the common room of Eli Brooks's separate fictional nearby apartment. Eli is an outgoing 24-year-old local graduate student who likes live events and meeting friends for food. Create an unpretentious lived-in apartment with a worn tobacco-brown fabric sofa, a dark blue secondhand armchair, a plain low coffee table, and an ordinary open kitchenette in the background. A compact dining table with three mixed affordable chairs also works as a study surface; show a closed laptop, a small neatly gathered stack of study papers with no legible writing, a clean plate and a food container. A couple of small abstract live-performance-inspired art prints without performers, lettering or logos, a light jacket and backpack on hooks, a folded throw on the sofa. Off-white walls, ordinary beige tile flooring, warm late-afternoon Arizona daylight softened by roller blinds, a touch of exterior pale stucco through the window. Moderate plausible clutter, neither filthy nor a showroom. Keep the common space human-scale with usable seating and open floor, do not invent roommates, family, a profession or a music instrument.",
+      "referenceDescription": "Eli's separate fictional graduate-student apartment common room: worn brown sofa, a dark blue chair, compact dining table near an ordinary open kitchen, laptop and study papers. Sociable lived-in setting with moderate everyday clutter and warm Arizona afternoon light.",
+      "provenance": {
+        "mode": "built-in imagegen",
+        "tool": "image_gen.imagegen",
+        "fictional": true,
+        "sourceContext": "Authored place descriptions and resident traits in assets/bundled/aslyn-v18/character.json. Furnishing details are fictional reference art direction, not claims about actual private housing.",
+        "editPrompt": "Use case: precise-object-edit. Edit this existing environment reference photograph with exactly one local cleanup. Remove all tiny photographs, papers and magnets from the refrigerator doors in the back kitchen, leaving clean plain stainless steel refrigerator doors with their existing light and reflections. Preserve the room layout, every piece of furniture and object outside that target, colors, materials, Arizona daylight, camera position, composition and realistic texture. No people or faces anywhere. Do not redesign the interior. Output one 1536x1024 image.",
+        "visuallyInspected": true,
+        "inspection": "Single unoccupied natural interior, plausible Tempe student housing, distinct layout and furnishings, no prominent labels or identifying addresses. Background photo details removed where present.",
+        "width": 1536,
+        "height": 1024,
+        "bytes": 2362732,
+        "savedAt": "2026-09-12T23:19:36.746704+00:00"
+      }
+    }
+  ]
+}

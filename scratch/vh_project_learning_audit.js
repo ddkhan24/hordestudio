@@ -25,7 +25,8 @@ const learning=engine.normalize(); learning.learning=[{id:'draft',completed:4,mi
 const baseline=engine.normalize();
 const context={opportunities:options,seed:'same',dateKey:'day',weekday:0,midnight:start};
 engine.plan(learning,start+600*minute,context);engine.plan(baseline,start+600*minute,context);
-assert.equal(learning.goals[0].priority-baseline.goals[0].priority,6);
+assert.equal(engine.utility(learning.goals[0],learning,start+600*minute,{}).components.habit-engine.utility(baseline.goals[0],baseline,start+600*minute,{}).components.habit,6);
+assert.equal(learning.goals[0].priority,baseline.goals[0].priority,'learning changes utility, not the authored base preference');
 learning.learning[0].definitionKey=learning.goals[0].definitionKey;
 const before=learning.learning[0].completed;
 engine.advance(learning,start+631*minute,{availability:'asleep',energy:70});engine.advance(learning,start+632*minute,{availability:'asleep',energy:70});

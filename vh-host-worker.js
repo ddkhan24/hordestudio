@@ -23,6 +23,10 @@ function run(input) {
     const due = VHWorldEngine.connected(c) && !blockedMedia && ready.some(message => message.replyDueAt > 0 && message.replyDueAt <= now);
     VHConversationEngine.learnPlayerFacts(c.continuityRuntime,messages,c.continuityRuntime.playerPersonaId,now);
     const life = core.companionLifeState(c, now);
+    const transition=experience.realTimeLife?core.companionConversationTransition(c,messages,now):null;
+    const handoff=c.initiativeMode!=='off'&&VHWorldEngine.connected(c)&&!pending.length&&life.availability==='available'&&transition?.engaged&&transition.upcoming&&transition.upcoming.at>now&&transition.upcoming.key!==c.continuityRuntime.lastHandoffKey&&now-c.continuityRuntime.lastHandoffAttemptAt>60000?transition.upcoming:null;
+    const continuation=c.continuityRuntime.conversation;
+    const resume=c.initiativeMode!=='off'&&continuation?.status==='paused'&&continuation.resumeAfter>0&&continuation.resumeAfter<=now&&continuation.resumeReason;
     const affectCommitted = VHConversationEngine.hasAffect(input.commit?.state);
     if (input.commit?.state) {
         if (affectCommitted) core.applyCompanionMoodUpdate(c, input.commit.state, now);
@@ -33,14 +37,16 @@ function run(input) {
         VHWorldEngine.consent(c,input.commit.state.conversation?.giftConsent,ready,now);
         VHConversationEngine.enactChoice(c,input.commit.state.conversation?.choice,ready,now,{...life.situation,availability:life.availability},VHActivityEngine);
     }
+    if(input.commit?.text&&handoff&&input.commit.handoffKey===handoff.key){c.continuityRuntime.lastHandoffKey=handoff.key;c.continuityRuntime.lastHandoffAttemptAt=now;if(c.continuityRuntime.conversation.status!=='closed')c.continuityRuntime.conversation.status='paused';}
     const opening=c.lifeProfile?.world?.frame?.openerMode==='vh_first'&&c.initiativeMode!=='off'&&VHWorldEngine.connected(c)&&!c.continuityRuntime.originScenarioConsumedAt&&!messages.some(m=>!m.invalidated&&['user','companion'].includes(m.role));
     if(opening&&!c.lifeRuntime.world.openingAt)c.lifeRuntime.world.openingAt=now+(c.lifeProfile.world.frame.openingDelayMinutes??1)*60000;
     if(opening&&input.commit?.text)c.continuityRuntime.originScenarioConsumedAt=now;
+    if(resume&&input.commit?.text&&c.continuityRuntime.conversation.resumeAfter<=now){c.continuityRuntime.conversation.resumeAfter=0;if(c.continuityRuntime.conversation.status==='paused')c.continuityRuntime.conversation.status='active';}
     const followup=VHWorldEngine.pendingFollowup(c,now);
     if(input.commit?.text&&followup)followup.dueAt=now+3600000;
-    return { openingDueAt:opening&&!input.commit?.text?c.lifeRuntime.world.openingAt:0, followupDueAt: c.initiativeMode!=='off'&&followup&&followup.dueAt<=now?followup.dueAt:0, routeRequest: VHWorldEngine.routeRequest(c,now), companion: c, messages, affectCommitted, pendingIds: pending.map(message => message.id), replyIds: ready.map(message => message.id), due,
+    return { handoff:!input.commit?.text?handoff:null, openingDueAt:opening&&!input.commit?.text?c.lifeRuntime.world.openingAt:0, followupDueAt: resume&&!input.commit?.text?continuation.resumeAfter:c.initiativeMode!=='off'&&followup&&followup.dueAt<=now?followup.dueAt:0, routeRequest: VHWorldEngine.routeRequest(c,now), companion: c, messages, affectCommitted, pendingIds: pending.map(message => message.id), replyIds: ready.map(message => message.id), due,
         available: VHWorldEngine.connected(c) && (!experience.realTimeLife || life.availability === 'available'),
-        dialogueGuidance: (opening?'Initiate the first conversation without invented shared history. Authored opening: '+(c.lifeProfile.world.frame.openerScenario||c.startingScenario||'A natural introduction based on the public profile.')+'\n':'')+VHConversationEngine.playerFactsBrief(c.continuityRuntime,c.continuityRuntime.playerPersonaId)+'\n'+VHWorldEngine.brief(c) + '\n' + VHConversationEngine.dialogueGuidance(messages, now, c) + "\n" + VHConversationEngine.decisionBrief(VHConversationEngine.decisionContext(c,messages,now,{...life.situation,availability:life.availability})),
+        dialogueGuidance: (handoff?VHConversationEngine.handoffBrief(handoff)+'\n':'')+(resume?`Return to the unfinished conversation if still relevant: ${continuation.topic}. ${continuation.openQuestion||''} Reason to return: ${continuation.resumeReason}.\n`:'')+(opening?'Initiate the first conversation without invented shared history. Authored opening: '+(c.lifeProfile.world.frame.openerScenario||c.startingScenario||'A natural introduction based on the public profile.')+'\n':'')+VHConversationEngine.playerFactsBrief(c.continuityRuntime,c.continuityRuntime.playerPersonaId)+'\n'+VHWorldEngine.brief(c) + '\n' + VHConversationEngine.dialogueGuidance(messages, now, c) + "\n" + VHConversationEngine.decisionBrief(VHConversationEngine.decisionContext(c,messages,now,{...life.situation,availability:life.availability})),
         present: { projects: c.lifeRuntime?.activities?.projects || [], learning: c.lifeRuntime?.activities?.learning || [], activity: life.label, availability: life.availability, situation: life.situation,
             receptiveness: VHConversationEngine.receptiveness(c, { ...life.situation, availability: life.availability, now }),
             lingeringReaction: VHConversationEngine.reactionContext(c.continuityRuntime.conversation, now) },

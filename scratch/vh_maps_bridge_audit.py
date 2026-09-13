@@ -23,17 +23,21 @@ class MapsAudit(unittest.TestCase):
         with self.assertRaises(ValueError):bridge.update_maps_settings({'googleKey':'bad key'})
 
     @patch.dict(bridge.os.environ, {'GOOGLE_MAPS_API_KEY':'synthetic'})
-    @patch.object(bridge,'json_request',return_value=(200,{}, {'places':[{'id':'test'}]}))
+    @patch.object(bridge,'json_request',return_value=(200,{}, {'places':[{'id':'test','location':{'latitude':51.5,'longitude':-.1}}]}))
     def test_search(self,call):
-        self.assertEqual(bridge.google_maps_request('search',{'query':'gym in London'})['places'][0]['id'],'test')
+        result=bridge.google_maps_request('search',{'query':'gym in London'})['places'][0]
+        self.assertEqual(result['id'],'test')
+        self.assertEqual(result['location'],{'latitude':51.5,'longitude':-.1})
         args=call.call_args.args
         self.assertEqual(args[0],'https://places.googleapis.com/v1/places:searchText')
         self.assertEqual(args[3],{'textQuery':'gym in London','pageSize':5})
+        self.assertIn('places.location',args[2]['X-Goog-FieldMask'].split(','))
     @patch.dict(bridge.os.environ, {'GOOGLE_MAPS_API_KEY':'synthetic'})
     @patch.object(bridge,'json_request',return_value=(200,{}, {'routes':[]}))
     def test_route(self,call):
         bridge.google_maps_request('route',{'origin':'abc','destination':'def','mode':'TRANSIT'})
         self.assertEqual(call.call_args.args[3]['origin'],{'placeId':'abc'})
+        self.assertIn('routes.polyline.encodedPolyline',call.call_args.args[2]['X-Goog-FieldMask'])
         with self.assertRaises(ValueError): bridge.google_maps_request('route',{'origin':'https://evil','destination':'def'})
         self.assertEqual(call.call_count,1)
     @patch.dict(bridge.os.environ, {'GOOGLE_MAPS_API_KEY':''})
@@ -62,11 +66,13 @@ class MapsAudit(unittest.TestCase):
         self.assertTrue(call.call_args.args[0].startswith('https://api.heigit.org/pelias/v1/search?'))
         self.assertNotIn('ors_fixture',call.call_args.args[0]);self.assertEqual(call.call_args.args[2]['Authorization'],'ors_fixture')
     @patch.dict(bridge.os.environ, {'OPENROUTESERVICE_API_KEY':'ors_fixture'})
-    @patch.object(bridge,'json_request',return_value=(200,{}, {'routes':[{'summary':{'duration':600.5,'distance':1400}}]}))
+    @patch.object(bridge,'json_request',return_value=(200,{}, {'routes':[{'summary':{'duration':600.5,'distance':1400},'geometry':'_p~iF~ps|U_ulLnnqC_mqNvxq`@'}]}))
     def test_ors_route_profiles(self,call):
         for mode,profile in [('WALK','foot-walking'),('BICYCLE','cycling-regular'),('DRIVE','driving-car'),('RIDESHARE','driving-car')]:
             data=bridge.maps_request('route',{'provider':'openrouteservice','mode':mode,'originCoordinates':[8,49],'destinationCoordinates':[8.1,49.1]})
             self.assertEqual(data['routes'][0]['duration'],'600.5s')
+            self.assertTrue(call.call_args.args[3]['geometry'])
+            self.assertEqual(data['routes'][0]['geometry'],'_p~iF~ps|U_ulLnnqC_mqNvxq`@')
             self.assertEqual(call.call_args.args[0],f'https://api.heigit.org/openrouteservice/v2/directions/{profile}/json')
             self.assertEqual(call.call_args.args[3]['coordinates'],[[8,49],[8.1,49.1]])
     @patch.dict(bridge.os.environ, {'OPENROUTESERVICE_API_KEY':'ors_fixture'})

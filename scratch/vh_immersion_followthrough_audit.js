@@ -26,3 +26,9 @@ executable.lifeRuntime=core.normalizeCompanionLifeRuntime({});executable.continu
 core.advanceCompanionWorld(executable,at(480));core.advanceCompanionWorld(executable,at(511));
 assert(executable.lifeRuntime.activities.goals.some(g=>g.id.startsWith('world:recovery-action:')),'recovery decision must create an executable activity through the shared kernel');
 console.log('PASS recovery decision creates a real activity through the shared simulation kernel');
+// Replying occupies real time: it can delay departure and cause a late arrival.
+function journeyDuringChat(until){const c=person();c.lifeProfile.world.transport.enabled=true;c.lifeProfile.world.transport.delayChance=0;c.lifeProfile.weeklySchedule=[{id:'class',placeId:'gym',activity:'class',days:[2],startMinute:480,endMinute:500}];c.lifeProfile.travelLegs=[{from:'home',to:'gym',mode:'WALK',minutes:10,cost:0}];c.lifeRuntime.activities={conversationUntil:at(until)};return c;}
+const texting=journeyDuringChat(475);world.advance(texting,at(469),local,baseline);world.advance(texting,at(486),local,baseline);
+const arrival=texting.lifeRuntime.world.events.find(e=>e.kind==='arrival');assert.equal(arrival.lateMinutes,5);assert(texting.lifeRuntime.world.events.some(e=>e.kind==='departure_wait'));
+const missedChat=journeyDuringChat(510);world.advance(missedChat,at(469),local,baseline);world.advance(missedChat,at(501),local,baseline);assert(missedChat.lifeRuntime.world.events.some(e=>e.kind==='missed'));assert(!missedChat.lifeRuntime.world.journey);
+console.log('PASS attention delays departure, produces an actual late arrival, and records missed windows without teleporting');

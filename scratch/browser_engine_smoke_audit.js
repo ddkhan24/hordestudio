@@ -1,12 +1,11 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { chromium } = require(process.env.HORDE_PLAYWRIGHT_MODULE || 'playwright');
+const { chromium, launchOptions } = require('./browser_runtime').browserRuntime();
 const root = path.resolve(__dirname, '..');
 
 (async () => {
-    const browser = await chromium.launch({ headless: true,
-        ...(process.env.HORDE_BROWSER_EXECUTABLE ? { executablePath: process.env.HORDE_BROWSER_EXECUTABLE } : {}) });
+    const browser = await chromium.launch(launchOptions);
     try {
         const context = await browser.newContext();
         // Serve the real app without a server, provider traffic, or user data.
@@ -19,48 +18,101 @@ const root = path.resolve(__dirname, '..');
             }
             const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
                 '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml' }[path.extname(file)] || 'application/octet-stream';
-            return route.fulfill({ contentType: mime, body: fs.readFileSync(file) });
+            let body = fs.readFileSync(file);
+            if (url.pathname === '/scratch/fixtures/retired-vh-editors.js') {
+                // The current normalizer intentionally strips the retired
+                // wildcard deck. Display an empty historical fixture section
+                // without recreating its data or removed behavior.
+                body = body.toString('utf8')
+                    .replace('life.wildcardDeck.length', '(life.wildcardDeck || []).length')
+                    .replace('life.wildcardDeck.map', '(life.wildcardDeck || []).map');
+            }
+            return route.fulfill({ contentType: mime, body });
         });
         const page = await context.newPage();
         const errors = [];
         page.on('pageerror', error => errors.push(error.message));
         await page.goto('https://horde-engine.test/');
-        const ready = async () => page.waitForFunction(() => typeof companionAgencyTimer !== 'undefined' && !!companionAgencyTimer,
-            { timeout: 30000 });
+        const ready = async () => {
+            await page.waitForFunction(() => typeof companionAgencyTimer !== 'undefined' && !!companionAgencyTimer, { timeout: 30000 });
+            // Preserve historical data regression coverage without shipping retired UI.
+            await page.addScriptTag({url:'https://horde-engine.test/scratch/fixtures/retired-vh-editors.js'});
+            await page.evaluate(()=>{if(!document.getElementById('cs-life-editor')){const editor=document.createElement('div');editor.id='cs-life-editor';editor.className='vh-life-editor hidden';document.querySelector('#tab-cs-life .form-body').append(editor);}});
+        };
         await ready();
         assert.deepEqual(errors, []);
         console.log('PASS: full application initializes with revision-checked storage');
-        await page.evaluate(()=>{
-            window.originalMapsSettingsBridge=mcpBridgeRequest; window.mockMapsKey='';window.mockOrsKey='';window.mockMapsProvider='google';
-            mcpBridgeRequest=async(path,options={})=>{
-                if(path!=='/maps/settings') return window.originalMapsSettingsBridge(path,options);
-                if(options.body?.remove) window.mockMapsKey='';
-                else if(options.body?.googleKey) window.mockMapsKey=options.body.googleKey;
-                if(options.body?.orsKey)window.mockOrsKey=options.body.orsKey;
-                if(options.body?.removeOrs)window.mockOrsKey='';
-                if(options.body?.provider)window.mockMapsProvider=options.body.provider;
-                return {configured:!!window.mockMapsKey,source:window.mockMapsKey?'settings':'none',provider:window.mockMapsProvider,orsConfigured:!!window.mockOrsKey,orsSource:window.mockOrsKey?'settings':'none'};
-            };
+        // Model the local settings service outside the browser. Its responses
+        // expose configuration status only, never a provider credential.
+        let mockMapsKey = '', mockOrsKey = '', mockMapsProvider = 'google';
+        const mapsSettingsWrites = [];
+        await page.exposeFunction('fixtureMapsSettings', (options = {}) => {
+            const body = options.body || {};
+            if (options.method === 'POST') mapsSettingsWrites.push(body);
+            if (body.remove) mockMapsKey = '';
+            else if (body.googleKey) mockMapsKey = body.googleKey;
+            if (body.removeOrs) mockOrsKey = '';
+            else if (body.orsKey) mockOrsKey = body.orsKey;
+            if (body.provider) mockMapsProvider = body.provider;
+            return { configured: !!mockMapsKey, source: mockMapsKey ? 'settings' : 'none',
+                provider: mockMapsProvider, orsConfigured: !!mockOrsKey,
+                orsSource: mockOrsKey ? 'settings' : 'none' };
+        });
+        await page.evaluate(() => {
+            window.originalMapsSettingsBridge = mcpBridgeRequest;
+            mcpBridgeRequest = (path, options = {}) => path === '/maps/settings'
+                ? window.fixtureMapsSettings(options) : window.originalMapsSettingsBridge(path, options);
             showGlobalSettings(); activateSettingsSection('accounts');
         });
         await page.locator('#maps-settings-card summary').click();
-        await page.locator('#global-google-maps-key').fill('synthetic_maps_key');
-        await page.locator('#save-google-maps-key').click();
-        assert.match(await page.locator('#google-maps-key-status').textContent(),/saved on this device/);
-        assert.equal(await page.locator('#global-google-maps-key').inputValue(),'');
-        assert.equal(await page.evaluate(()=>JSON.stringify(state).includes('synthetic_maps_key')),false);
-        await page.locator('#remove-google-maps-key').click();
-        assert.match(await page.locator('#google-maps-key-status').textContent(),/No Maps key/);
-        await page.locator('#global-openroute-key').fill('synthetic_ors_key');
-        await page.locator('#save-openroute-key').click();
-        assert.equal(await page.locator('#global-maps-provider').inputValue(),'openrouteservice');
-        assert.equal(await page.locator('#global-openroute-key').inputValue(),'');
-        assert.match(await page.locator('#openroute-key-status').textContent(),/configured/);
-        assert.equal(await page.evaluate(()=>JSON.stringify(state).includes('synthetic_ors_key')),false);
-        await page.locator('#remove-openroute-key').click();
-        assert.match(await page.locator('#openroute-key-status').textContent(),/No openrouteservice key/);
+        await page.getByRole('button', { name: 'Manage Maps & places', exact: true }).click();
+        const mapsDialog = page.getByRole('dialog', { name: 'Maps & places', exact: true });
+        const provider = mapsDialog.getByLabel('Search & routing provider');
+        const mapsKey = mapsDialog.locator('input[name="key"]');
+        const mapsStatus = mapsDialog.getByRole('status');
+        const saveConnection = mapsDialog.getByRole('button', { name: 'Save connection', exact: true });
+        const removeConnection = mapsDialog.getByRole('button', { name: 'Remove selected provider’s saved key', exact: true });
+        const assertKeysAbsentFromBrowserState = async () => assert.equal(await page.evaluate(() => {
+            const browserState = JSON.stringify([state, Object.entries(localStorage), Object.entries(sessionStorage)]);
+            return ['synthetic_maps_key', 'synthetic_ors_key'].some(key => browserState.includes(key));
+        }), false);
 
-        await page.evaluate(()=>{hideGlobalSettings();mcpBridgeRequest=window.originalMapsSettingsBridge;delete window.originalMapsSettingsBridge;delete window.mockMapsKey;});
+        await provider.selectOption('google');
+        await mapsKey.fill('synthetic_maps_key');
+        await saveConnection.click();
+        await mapsStatus.filter({ hasText: 'Google Maps connection saved.' }).waitFor();
+        assert.equal(mockMapsKey, 'synthetic_maps_key');
+        assert.equal(await mapsKey.inputValue(), '');
+        assert.match(await mapsDialog.locator('[data-summary]').textContent(), /Google Maps · key saved/);
+        await assertKeysAbsentFromBrowserState();
+        await removeConnection.click();
+        await mapsStatus.filter({ hasText: 'Saved key removed.' }).waitFor();
+        assert.equal(mockMapsKey, '');
+        assert.match(await mapsDialog.locator('[data-summary]').textContent(), /Google Maps · key needed/);
+
+        await provider.selectOption('openrouteservice');
+        await mapsKey.fill('synthetic_ors_key');
+        await saveConnection.click();
+        await mapsStatus.filter({ hasText: 'openrouteservice connection saved.' }).waitFor();
+        assert.equal(mockOrsKey, 'synthetic_ors_key');
+        assert.equal(mockMapsProvider, 'openrouteservice');
+        assert.equal(await provider.inputValue(), 'openrouteservice');
+        assert.equal(await mapsKey.inputValue(), '');
+        assert.match(await mapsDialog.locator('[data-summary]').textContent(), /openrouteservice · key saved/);
+        await assertKeysAbsentFromBrowserState();
+        await removeConnection.click();
+        await mapsStatus.filter({ hasText: 'Saved key removed.' }).waitFor();
+        assert.equal(mockOrsKey, '');
+        assert.match(await mapsDialog.locator('[data-summary]').textContent(), /openrouteservice · key needed/);
+        assert.deepEqual(mapsSettingsWrites, [
+            { provider: 'google', googleKey: 'synthetic_maps_key' }, { remove: true },
+            { provider: 'openrouteservice', orsKey: 'synthetic_ors_key' }, { removeOrs: true }
+        ]);
+        await mapsDialog.getByRole('button', { name: 'Close', exact: true }).click();
+        await page.evaluate(() => {
+            hideGlobalSettings(); mcpBridgeRequest = window.originalMapsSettingsBridge;
+            delete window.originalMapsSettingsBridge;
+        });
         console.log('PASS: Maps settings save and remove through bridge without persisting the key in browser state');
 
         const fixture = await page.evaluate(async () => {
@@ -502,7 +554,31 @@ const root = path.resolve(__dirname, '..');
         assert.deepEqual(savedPlanner.person.contactWindows,[{days:[1,2,3,4,5],startMinute:1080,endMinute:1200}]);
         assert.deepEqual(errors, []);
         console.log('PASS: daily opportunity and supporting-person availability editor saves and survives reload');
-        await page.evaluate(()=>{hideGlobalSettings();const c=getCompanion('attention_fixture');openCompanionStudio(c.id);switchView('companionStudio');activateCompanionStudioTab('cs-life');renderCompanionWorldSystems(c);document.querySelectorAll('#cs-world-systems details').forEach(el=>el.open=true);});
+        await page.evaluate(()=>{hideGlobalSettings();const c=getCompanion('attention_fixture');openCompanionStudio(c.id);switchView('companionStudio');activateCompanionStudioTab('cs-life');renderCompanionLegacyWorldSystems(c,document.getElementById('cs-world-systems'));document.querySelectorAll('#cs-world-systems details').forEach(el=>el.open=true);});
+        await page.locator('[data-world-field="transport.goalTravel"]').check();
+        await page.waitForFunction(()=>getCompanion('attention_fixture').lifeProfile.world.transport.goalTravel===true);
+        await page.locator('[data-world-field="transport.maxOutingMinutes"]').fill('90');
+        await page.locator('[data-world-field="transport.maxOutingMinutes"]').press('Tab');
+        await page.waitForFunction(()=>getCompanion('attention_fixture').lifeProfile.world.transport.maxOutingMinutes===90);
+        await page.evaluate(()=>renderCompanionLegacyWorldSystems(getCompanion('attention_fixture'),document.getElementById('cs-world-systems')));
+        assert(await page.locator('[data-world-field="transport.goalTravel"]').isChecked());
+        assert.equal(await page.locator('[data-world-field="transport.maxOutingMinutes"]').inputValue(),'90');
+        await page.locator('[data-world-field="transport.goalTravel"]').uncheck();
+        console.log('PASS: unscheduled outing settings use the existing VH editor and survive rerender');
+        await page.evaluate(()=>{
+            const c=getCompanion('attention_fixture');window.savedRouteTestWorld=JSON.parse(JSON.stringify(c.lifeRuntime.world));
+            const now=c.lifeRuntime.lastSimulatedAt;
+            c.lifeRuntime.world.journey={id:'route-ui-test',from:'home',to:'park',toLabel:'Park',mode:'WALK',departedAt:now-300000,arrivesAt:now+300000,geometry:[[0,51],[0,51.01],[.01,51.01]]};
+            renderCompanionLegacyWorldSystems(c,document.getElementById('cs-world-systems'));
+        });
+        assert.equal(await page.locator('[data-vh-travel-progress] progress').getAttribute('value'),'0.5');
+        assert.match(await page.locator('[data-vh-travel-progress]').textContent(),/Position follows the saved route/);
+        await page.evaluate(()=>{const c=getCompanion('attention_fixture');delete c.lifeRuntime.world.journey.geometry;renderCompanionLegacyWorldSystems(c,document.getElementById('cs-world-systems'));});
+        assert.match(await page.locator('[data-vh-travel-progress]').textContent(),/Time estimate only/);
+        await page.evaluate(()=>{const c=getCompanion('attention_fixture');c.lifeRuntime.world=window.savedRouteTestWorld;delete window.savedRouteTestWorld;renderCompanionLegacyWorldSystems(c,document.getElementById('cs-world-systems'));});
+        console.log('PASS: existing VH transport panel renders route progress and explicit geometry fallback');
+
+
         await page.locator('[data-world-field="gifts.enabled"]').check();
         await page.locator('[data-world-field="gifts.mailAllowed"]').check();
         await page.locator('[data-world-field="gifts.cashAllowed"]').check();
@@ -664,6 +740,7 @@ const root = path.resolve(__dirname, '..');
         console.log('PASS: seven starter photos import through real button, completion clears, generated place reference and images survive reload');
         await page.evaluate(()=>{const c=getCompanion('attention_fixture');openCompanionStudio(c.id);switchView('companionStudio');activateCompanionStudioTab('cs-life');renderCompanionPhotoLocations(c);});
         await page.evaluate(()=>document.getElementById('close-modal-btn').click());
+        await page.evaluate(()=>vhBlueprintPlaces(getCompanion('attention_fixture')));
         await page.locator('[data-place-role]').evaluate(el=>{for(let p=el.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});
         await page.locator('[data-place-role]').selectOption('bedroom');
         await page.locator('[data-place-remove]').click();
@@ -677,6 +754,16 @@ const root = path.resolve(__dirname, '..');
         assert.equal(await page.locator('[data-photo-location="bedroom-fixture"]').count(),1);
         assert.equal(await page.locator('[data-place-label]').count(),0);
         console.log('PASS: removing a fixed-room reference survives reload and relinking uses its saved location ID');
+        await page.evaluate(()=>renderCompanionLegacyWorldSystems(getCompanion('attention_fixture'),document.getElementById('cs-world-systems')));
+        await page.locator('[data-kernel="needWeight"]').evaluate(el=>el.closest('details').open=true);
+        await page.locator('[data-kernel="needWeight"]').fill('1.7');
+        await page.locator('[data-kernel="needWeight"]').evaluate(el=>el.closest('details').setAttribute('data-kernel-panel',''));
+        await page.locator('[data-kernel-panel]').screenshot({path:'/tmp/vh-life-kernel-controls.png'});
+        await page.locator('[data-kernel="needWeight"]').dispatchEvent('change');
+        await page.evaluate(()=>saveState());await page.reload();await ready();
+        assert.equal(await page.evaluate(()=>{clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);return getCompanion('attention_fixture').lifeProfile.decisionPolicy.needWeight;}),1.7);
+        console.log('PASS: life decision controls persist through real browser reload');
+
         const photoSequence=await page.evaluate(async()=>{
             const c=getCompanion('attention_fixture'),timeline=getActiveCompanionTimeline(c.id),now=Date.now(),room=c.lifeProfile.places[0];
             room.referenceDisabled=false;room.photo=c.startingSocialPosts[0].photo;c.currentOutfit='Blue silk dress';c.photoDirection='Tilted candid framing';c.lifeRuntime.world.transportEnabled=false;c.lifeRuntime.temporarySituation={activity:'relaxing',availability:'available',placeId:room.id,placeLabel:room.label,outfit:'Blue silk dress',startedAt:now-1000,endsAt:now+600000};
@@ -686,6 +773,57 @@ const root = path.resolve(__dirname, '..');
         });
         assert.equal(photoSequence.requests.length,2);assert.equal(photoSequence.parent,'continuity-one');assert(photoSequence.requests[1].refs.includes(photoSequence.one));assert.match(photoSequence.requests[1].prompt,/exact same garments/);assert.match(photoSequence.requests[1].prompt,/Tilted candid framing/);
         console.log('PASS: queued follow-up photos use the completed previous image and retain dress continuity without duplicate generation');
+        await page.evaluate(()=>{hideGlobalSettings();const c=getCompanion('attention_fixture');c.lifeProfile.activityOptions=[...c.lifeProfile.activityOptions,{id:'prep-ui',label:'Pack notes',kind:'preparation'}];c.lifeProfile.weeklySchedule.push({id:'prep-class',activity:'Class',days:[2],startMinute:600,endMinute:660,placeId:c.lifeProfile.places[0].id});c.lifeProfile=normalizeCompanionLifeProfile(c.lifeProfile);openCompanionStudio(c.id);switchView('companionStudio');activateCompanionStudioTab('cs-life');renderCompanionLifeEditor(c);document.querySelector('[data-life-add="supply"]').click();});
+        await page.locator('[data-supply-label]').evaluate(el=>el.closest('details').open=true);
+        await page.locator('[data-supply-label]').fill('Packed notes');await page.locator('[data-supply-quantity]').fill('2');
+        const supplyId=await page.locator('[data-supply-row]').getAttribute('data-supply-row');
+        await page.locator('[data-life-opportunity]').last().locator('[data-supply-produces]').evaluate(el=>{for(let p=el.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});
+        await page.locator('[data-life-opportunity]').last().locator('[data-supply-produces]').fill('1');
+        await page.locator('[data-life-schedule]').last().locator('[data-supply-departure]').evaluate(el=>{for(let p=el.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});
+        await page.locator('[data-life-schedule]').last().locator('[data-supply-departure]').fill('1');
+        await page.locator('#cs-life-editor-save').click();await page.waitForFunction(()=>document.getElementById('cs-life-editor').classList.contains('hidden'));await page.reload();await ready();
+        const supplies=await page.evaluate(()=>{clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);const c=getCompanion('attention_fixture');return {catalog:c.lifeProfile.supplies,action:c.lifeProfile.activityOptions.find(x=>x.id==='prep-ui'),appointment:c.lifeProfile.weeklySchedule.find(x=>x.id==='prep-class')};});
+        assert.equal(supplies.catalog[0].label,'Packed notes');assert.equal(supplies.catalog[0].quantity,2);assert.equal(supplies.action.produces[supplyId],1);assert.equal(supplies.appointment.departureCosts[supplyId],1);
+        console.log('PASS: supply catalog, linked activity outputs and departure requirements survive editor save and reload');
+        await page.evaluate(()=>{hideGlobalSettings();const c=getCompanion('attention_fixture');openCompanionStudio(c.id);switchView('companionStudio');activateCompanionStudioTab('cs-life');renderCompanionLifeEditor(c);});
+        await page.locator('[data-add-preparation]').evaluate(el=>el.closest('details').open=true);
+        await page.locator('[data-preparation-template]').selectOption('prep-class');await page.locator('[data-add-preparation]').click();
+        await page.locator('[data-add-preparation]').evaluate(el=>el.closest('details').open=true);
+        await page.locator('[data-add-preparation]').evaluate(el=>el.closest('details').setAttribute('data-preparation-panel',''));
+        await page.locator('[data-preparation-panel]').screenshot({path:'/tmp/vh-preparation-panel.png'});
+        await page.locator('#cs-life-editor-save').click();await page.waitForFunction(()=>document.getElementById('cs-life-editor').classList.contains('hidden'));
+        assert(await page.evaluate(()=>{const c=getCompanion('attention_fixture'),supply=c.lifeProfile.supplies.find(x=>x.id.startsWith('ready_'));return supply?.quantity===0&&c.lifeProfile.weeklySchedule.find(b=>b.id==='prep-class').departureCosts[supply.id]===1&&c.lifeProfile.activityOptions.some(o=>o.produces[supply.id]===1&&o.durationMinutes===10);}));
+        console.log('PASS: linked preparation template creates an editable action and an unfulfilled departure requirement');
+        await page.evaluate(()=>{hideGlobalSettings();const c=getCompanion('attention_fixture');openCompanionStudio(c.id);switchView('companionStudio');activateCompanionStudioTab('cs-life');});
+        await page.evaluate(()=>renderCompanionLegacyWorldSystems(getCompanion('attention_fixture'),document.getElementById('cs-world-systems')));
+        await page.locator('[data-sleep-setting="windDownMinutes"]').evaluate(el=>el.closest('details').open=true);
+        await page.locator('[data-sleep-setting="windDownMinutes"]').fill('17');
+        await page.locator('[data-sleep-setting="windDownMinutes"]').dispatchEvent('change');
+        await page.locator('[data-sleep-setting="windDownMinutes"]').evaluate(el=>el.closest('details').setAttribute('data-sleep-panel',''));
+        await page.locator('[data-sleep-panel]').screenshot({path:'/tmp/vh-sleep-panel.png'});
+        await page.reload();await ready();
+        assert.equal(await page.evaluate(()=>{clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);return getCompanion('attention_fixture').lifeProfile.sleepPolicy.windDownMinutes;}),17);
+        console.log('PASS: sleep controls save and survive browser reload');
+        await page.evaluate(()=>{hideGlobalSettings();const c=getCompanion('attention_fixture');openCompanionStudio(c.id);switchView('companionStudio');activateCompanionStudioTab('cs-life');});
+        await page.evaluate(()=>renderCompanionLegacyWorldSystems(getCompanion('attention_fixture'),document.getElementById('cs-world-systems')));
+        await page.locator('[data-break-setting="intervalMinutes"]').evaluate(el=>el.closest('details').open=true);
+        await page.locator('[data-break-setting="intervalMinutes"]').fill('150');await page.locator('[data-break-setting="intervalMinutes"]').dispatchEvent('change');
+        await page.locator('[data-break-setting="foodAvailable"]').uncheck();
+        await page.locator('[data-break-setting="intervalMinutes"]').evaluate(el=>el.closest('details').setAttribute('data-break-panel',''));
+        await page.locator('[data-break-panel]').screenshot({path:'/tmp/vh-break-controls.png'});
+        await page.locator('[data-kernel="personalityWeight"]').evaluate(el=>el.closest('details').open=true);
+        await page.locator('[data-kernel="personalityWeight"]').fill('2');await page.locator('[data-kernel="personalityWeight"]').dispatchEvent('change');
+        await page.evaluate(()=>renderCompanionLifeEditor(getCompanion('attention_fixture')));
+        await page.locator('[data-break-allowed]').first().evaluate(el=>{for(let p=el.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});
+        await page.locator('[data-break-allowed]').first().uncheck();await page.locator('#cs-life-editor-save').click();await page.waitForFunction(()=>document.getElementById('cs-life-editor').classList.contains('hidden'));
+        await page.reload();await ready();
+        const gapSettings=await page.evaluate(()=>{clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);const c=getCompanion('attention_fixture');return {breaks:c.lifeProfile.breakPolicy,allowed:c.lifeProfile.weeklySchedule[0].breakAllowed,personality:c.lifeProfile.decisionPolicy.personalityWeight};});
+        assert.equal(gapSettings.breaks.intervalMinutes,150);assert.equal(gapSettings.breaks.foodAvailable,false);assert.equal(gapSettings.allowed,false);assert.equal(gapSettings.personality,2);
+        console.log('PASS: break policy, food access, appointment opt-out and personality influence persist through save/reload');
+
+
+
+
 
 
     } finally {

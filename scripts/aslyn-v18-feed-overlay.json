@@ -1,0 +1,71 @@
+{
+  "format": "horde-bundled-feed-overlay",
+  "version": 1,
+  "characterName": "Aslyn Jonas",
+  "posts": [
+    {
+      "id": "aslyn_v18_added_414f5f7197c338574f78f191",
+      "kind": "photo",
+      "text": "could stay up here all day ☀️",
+      "photo": "assets/bundled/aslyn-v18/feed-additions/414f5f7197c338574f78f191.png",
+      "visibility": "public",
+      "seedAgeDays": 15,
+      "sha256": "414f5f7197c338574f78f191bac7307de52c56563a326aa2daca107bb5e00767"
+    },
+    {
+      "id": "aslyn_v18_added_081db1f883a5c6725abfd077",
+      "kind": "photo",
+      "text": "ok but this top 🥺",
+      "photo": "assets/bundled/aslyn-v18/feed-additions/081db1f883a5c6725abfd077.png",
+      "visibility": "public",
+      "seedAgeDays": 12,
+      "sha256": "081db1f883a5c6725abfd07790fe2f266457328c44508eb75f01d5739e615654"
+    },
+    {
+      "id": "aslyn_v18_added_4739e469f0d1de1279127b83",
+      "kind": "photo",
+      "text": "went outside for once lol",
+      "photo": "assets/bundled/aslyn-v18/feed-additions/4739e469f0d1de1279127b83.png",
+      "visibility": "public",
+      "seedAgeDays": 10,
+      "sha256": "4739e469f0d1de1279127b83128a90ec3bfb1f9d91d1d9251da42de1a367ac46"
+    },
+    {
+      "id": "aslyn_v18_added_12d1b66615dbd254e893d687",
+      "kind": "photo",
+      "text": "my girl 💕",
+      "photo": "assets/bundled/aslyn-v18/feed-additions/12d1b66615dbd254e893d687.png",
+      "visibility": "public",
+      "seedAgeDays": 8,
+      "sha256": "12d1b66615dbd254e893d6878f8275098fa689786ba805b48aca789a52a50b50"
+    },
+    {
+      "id": "aslyn_v18_added_ae3d9417fa48c7d891c22fd9",
+      "kind": "photo",
+      "text": "too hot to do anything 😩",
+      "photo": "assets/bundled/aslyn-v18/feed-additions/ae3d9417fa48c7d891c22fd9.png",
+      "visibility": "public",
+      "seedAgeDays": 6,
+      "sha256": "ae3d9417fa48c7d891c22fd975fa1e679006e87dca0bb168e725fdf1e5122140"
+    },
+    {
+      "id": "aslyn_v18_added_b75cd4303cbb333c4bf62542",
+      "kind": "photo",
+      "text": "busy doing literally nothing",
+      "photo": "assets/bundled/aslyn-v18/feed-additions/b75cd4303cbb333c4bf62542.png",
+      "visibility": "public",
+      "seedAgeDays": 3,
+      "sha256": "b75cd4303cbb333c4bf6254218ad51c72d8b47a0bf5b9d5fff6aee8ebb08f63a"
+    },
+    {
+      "id": "aslyn_v18_added_2270019f26b5118307436da5",
+      "kind": "photo",
+      "text": "me n jordan 💕",
+      "photo": "assets/bundled/aslyn-v18/feed-additions/2270019f26b5118307436da5.png",
+      "visibility": "public",
+      "seedAgeDays": 1,
+      "sha256": "2270019f26b5118307436da560053b3b75dee69c9b406f45c1a1775e37952efd"
+    }
+  ],
+  "note": "User-supplied photos and authored captions. Relative dates are starter-profile chronology, not claims about real capture timestamps."
+}

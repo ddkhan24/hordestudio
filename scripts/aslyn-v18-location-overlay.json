@@ -1,0 +1,210 @@
+{
+  "format": "horde-bundled-location-overlay",
+  "version": 1,
+  "characterName": "Aslyn Jonas",
+  "places": [
+    {
+      "id": "home",
+      "set": {
+        "label": "Town Lake shared apartment",
+        "detail": "A fictional, lived-in three-bedroom apartment near Tempe Town Lake, shared by Aslyn, Jordan and Priya. Each has a private bedroom; they share the living room, modern kitchen and bathroom. White cabinets, pale quartz, light oak flooring in common areas and beige bedroom carpet. The saved map point is an approximate neighborhood anchor, not a verified private address or a unit at Norte Town Lake.",
+        "referenceDescription": "Fictional modern apartment near Tempe Town Lake: three separate private bedrooms for Aslyn, Jordan and Priya, with shared living room, kitchen and bathroom. Common areas have light oak flooring, white walls and white kitchen cabinets with pale quartz surfaces and stainless appliances. Living room has a gray sofa, blush-pink throw and navy cushion. Bedrooms have beige carpet and separate full-size beds. Bathroom has a white double vanity and tub-shower. A small balcony faces neighboring stucco apartments. Everyday student belongings make the home lived-in. Exterior and pool belong to a fictional well-maintained modern stucco complex; do not reproduce an exact Norte floor plan.",
+        "referenceAliases": "home, shared apartment, Town Lake apartment",
+        "googlePlaceId": ""
+      },
+      "provenance": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Existing coordinates remain an approximate neighborhood anchor."
+      }
+    },
+    {
+      "id": "apartment_pool",
+      "set": {
+        "label": "Town Lake apartment pool",
+        "detail": "The shared outdoor pool at the fictional apartment complex near Tempe Town Lake. A well-maintained pool deck, loungers, shade umbrellas and modern stucco buildings make this an easy place to cool off near home. Its saved marker is an approximate neighborhood anchor, not a verified Norte amenity.",
+        "referenceDescription": "A fictional well-maintained residential pool courtyard near Tempe Town Lake, with clear blue water, clean pale paving, simple loungers, shade umbrellas and modern light stucco apartment buildings with balconies. Hot Arizona daylight and sparse desert planting. The same fictional complex as Aslyn, Jordan and Priya's shared apartment; this is an inspired generated setting rather than a photograph of Norte's pool.",
+        "referenceAliases": "pool, apartment pool, home pool",
+        "googlePlaceId": ""
+      },
+      "provenance": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address."
+      }
+    },
+    {
+      "id": "dutch_bros",
+      "set": {
+        "label": "Dutch Bros on Rural Road",
+        "detail": "Dutch Bros at 1037 S Rural Rd near Lemon Street in Tempe. A drive-through and walk-up coffee stop near ASU. Aslyn usually comes for a cold sweet drink; the actual route determines how long it takes from home.",
+        "referenceDescription": "Public-place-inspired view of the Dutch Bros coffee shop at 1037 S Rural Rd, Tempe, by Lemon Street: compact coffee service building, pickup window, drive-through lane and canopies, shaded patio and bike rack. Use the real location and service layout as anchors, with generated incidental details. Do not label it University Drive or invent a sit-down cafe interior.",
+        "referenceAliases": "Dutch Bros, Rural Road coffee"
+      },
+      "provenance": {
+        "kind": "public_place_inspired",
+        "sources": [
+          "https://www.dutchbros.com/locations/az/tempe/1037-s.-rural-rd.",
+          "https://www.tempe.gov/home/showpublisheddocument/106432/638440395210000000"
+        ],
+        "note": "Exact business/address verified by the official shop page; pickup/drive-through/patio anchors supported by the city site plan. Generated visual interpretation, not a current site photograph."
+      }
+    },
+    {
+      "id": "target",
+      "set": {
+        "label": "Target Tempe Rio Salado",
+        "detail": "Target Tempe Rio Salado at 1800 E Rio Salado Pkwy, near Tempe Marketplace. Aslyn comes for toiletries, snacks and small impulse buys. The store includes Starbucks and CVS. This is the Rio Salado location, not a store on Rural Road.",
+        "referenceDescription": "Public-place-inspired Target shopping setting at Tempe Rio Salado, 1800 E Rio Salado Pkwy. Contemporary large-format retail entrance or everyday shopping aisles, red Target accents, carts and practical store lighting. Officially includes Starbucks and CVS. Exact current shelving, interior layout and exterior colors are not verified; generated details must not imply a photograph of the real store.",
+        "referenceAliases": "Target, Rio Salado Target, Tempe Marketplace Target"
+      },
+      "provenance": {
+        "kind": "public_place_inspired",
+        "sources": [
+          "https://www.target.com/sl/tempe-ne-target-store/2176"
+        ],
+        "note": "Exact store name/address and Starbucks/CVS services verified on the official store page; generated architecture and aisle details are illustrative."
+      }
+    }
+  ],
+  "rooms": [
+    {
+      "id": "room_living_room",
+      "set": {
+        "label": "Living room",
+        "description": "The shared living room of the fictional three-bedroom Town Lake apartment. White walls, light oak flooring and a sliding glass balcony door keep the room bright. A gray fabric sofa has a blush-pink throw and a navy cushion; Aslyn gravitates to the same end when she scrolls her phone. A low coffee table holds a vanilla candle, a few snack wrappers and whatever Jordan was studying. The TV sits opposite the sofa. The adjoining white kitchen and pale quartz surfaces are visible from the seating area. Student bags, charging cables and small everyday messes make it comfortable and lived-in. This common room is separate from all three private bedrooms."
+      },
+      "provenance": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      },
+      "placeId": "home"
+    },
+    {
+      "id": "room_kitchen",
+      "set": {
+        "label": "Kitchen",
+        "description": "A modern shared kitchen opening toward the apartment living room, with white cabinets, pale quartz countertops, a simple light backsplash and stainless appliances. Light oak flooring continues through the common areas. A microwave, kettle, cereal boxes and a drying rack sit on the counter. The fridge contains oat milk, a water pitcher, Priya's labeled meal-prep containers, shredded cheese and condiments; takeout magnets and a few notes collect on its door. Dishes and mugs occasionally accumulate by the sink. The fixed finishes are clean and modern, while three students' practical clutter gives the room its character."
+      },
+      "provenance": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      },
+      "placeId": "home"
+    },
+    {
+      "id": "room_bathroom",
+      "set": {
+        "label": "Shared bathroom",
+        "description": "The bathroom shared by Aslyn, Jordan and Priya, reached from the apartment common hall. A white double vanity with pale counters and a wide mirror provides space for three people's products. There is a tub-shower and a clean light shower curtain, with pale tile on the floor. Aslyn's purple toner, vanilla body wash, hair ties and makeup gather near one sink; Jordan groups her skincare neatly by the other, and Priya keeps her toiletries in a tidy bag. A small Bluetooth speaker, towels and hair tools make it an ordinary occupied student bathroom. It is a shared common room, not an ensuite or a divider between two shared bedrooms."
+      },
+      "provenance": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      },
+      "placeId": "home"
+    },
+    {
+      "id": "room_priya_bedroom",
+      "set": {
+        "label": "Priya's bedroom",
+        "description": "Priya's separate private bedroom in the three-bedroom Town Lake apartment. A full-size bed with a neatly made gray duvet sits beneath a window with white blinds. White walls and beige carpet match the other private bedrooms. A compact wooden desk holds a laptop, planner and cup of pens. Her clothes are organized inside a closed closet; a storage cube and yoga mat sit neatly beside it. A restrained geometric print and a small eucalyptus diffuser give it a quiet personal touch. The room is noticeably tidier than Aslyn's, and the others respect it as Priya's private space."
+      },
+      "provenance": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      },
+      "placeId": "home"
+    },
+    {
+      "id": "room_aslyn_jordan_bedroom",
+      "set": {
+        "label": "Aslyn's bedroom",
+        "description": "Aslyn's separate private bedroom in the three-bedroom Town Lake apartment. A full-size bed beside the window has rumpled blush-pink bedding, loose pillows and Mr. Potato, her stuffed manatee, near the headboard. White walls, white blinds and beige carpet match the other bedrooms. A small white nightstand is crowded with lip gloss, a water bottle, tangled chargers and hair ties. A full-length mirror leans where daylight is good for outfit photos. Clothes, shopping bags, makeup, dry shampoo and an overflowing laundry basket create her familiar uncurated mess. A warm bedside lamp makes the room cozy after dark. Jordan has her own separate bedroom."
+      },
+      "provenance": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction. The historical combined room ID is retained for reference continuity, not as a shared-bedroom premise."
+      },
+      "placeId": "home"
+    },
+    {
+      "id": "zone:df9432fe-2de3-4ebe-82a0-c0e8a5f8b23f",
+      "set": {
+        "label": "Jordan's bedroom",
+        "description": "Jordan's separate private bedroom in the three-bedroom Town Lake apartment. A full-size bed with a navy comforter, white sheets and simple pillows sits against one wall. White walls, white blinds and beige carpet match the other bedrooms. Her compact nursing-study desk holds textbooks, handwritten flashcards, highlighters, a laptop, a water bottle and a practical lamp; a backpack hangs from the chair. A few photos of friends sit above the desk. A hoodie, charging cable and partly open closet keep it recognizably lived-in, though she groups her cosmetics and clothes more neatly than Aslyn does. Warm desk and bedside lamps soften the room in the evening."
+      },
+      "provenance": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      },
+      "placeId": "home"
+    }
+  ],
+  "authoredTextReplacements": [
+    {
+      "field": "socialWorld",
+      "old": "Lives in a two-bedroom off-campus apartment near Tempe with her high school friend",
+      "new": "Lives with two roommates in a fictional three-bedroom apartment near Tempe Town Lake, each with a private bedroom and shared common rooms: her high school friend"
+    }
+  ],
+  "referenceReplacementPlan": {
+    "strategy": "Archive prior place and room reference revisions, then register new generated images as approved references under the same stable entity IDs. Do not rewrite old media to look newly verified.",
+    "keepExistingPlaceIds": [
+      "jordans_car"
+    ],
+    "generatedFolder": "locations-v2",
+    "placeFiles": {
+      "home": "home-exterior.png",
+      "apartment_pool": "pool.png",
+      "dutch_bros": "dutch-bros.png",
+      "target": "target.png",
+      "memorial_union": "memorial-union.png",
+      "campus": "asu-campus.png",
+      "local_social": "mill-avenue.png"
+    },
+    "roomFiles": {
+      "room_living_room": "living-room.png",
+      "room_kitchen": "kitchen.png",
+      "room_bathroom": "bathroom.png",
+      "room_priya_bedroom": "priya-bedroom.png",
+      "room_aslyn_jordan_bedroom": "aslyn-bedroom.png",
+      "zone:df9432fe-2de3-4ebe-82a0-c0e8a5f8b23f": "jordan-bedroom.png"
+    }
+  },
+  "notes": [
+    "The user chose three separate private bedrooms. The home and pool are fictional nearby settings; Norte public imagery supplies neighborhood design inspiration only.",
+    "Retain every entity ID, room-parent link, map coordinate, recorded route and historical capture. The existing home/pool map point is an approximate neighborhood anchor. Clear the inaccurate real-property Google Place IDs.",
+    "The overlay edits authored descriptions only. It cannot change life history, approve references, contact providers or generate images."
+  ]
+}

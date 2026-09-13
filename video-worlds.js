@@ -10,7 +10,7 @@
     const ASPECTS = new Set(['21:9', '16:9', '4:3', '1:1', '3:4', '9:16']);
     const VIEWPOINTS = new Set(['third_person', 'first_person']);
     const VIDEO_RENDERERS = new Set(['minimax/h3-max', 'alibaba/wan-3.0', 'alibaba/wan-3.0-prime', 'fal-ai/ltx-2.3/fast']);
-    const SPICY_VIDEO_RENDERERS = new Set(['minimax-h3-spicy', 'seedance-2.0-fast-spicy', 'seedance-2.0-spicy', 'seedance-2.5-spicy']);
+    const SPICY_VIDEO_RENDERERS = new Set(['minimax-h3-spicy', 'seedance-2.0-mini-spicy', 'seedance-2.0-fast-spicy', 'seedance-2.0-spicy', 'seedance-2.5-spicy', 'berry-1.0-spicy', 'berry-1.0-turbo-spicy', 'berry-1.0-pro-spicy', 'berry-1.0-pro-turbo-spicy', 'wan-2.7-spicy', 'wan-2.2-spicy']);
     const CONTENT_ROUTES = new Set(['standard', 'standard_then_spicy', 'spicy_first']);
     const REFERENCE_STRATEGIES = new Set(['auto', 'direct', 'keyframe']);
     const REFERENCE_KEYFRAME_COST = 0.08;
@@ -22,9 +22,16 @@
     });
     const SPICY_RENDERER_LABELS = Object.freeze({
         'minimax-h3-spicy': 'MiniMax H3 Spicy',
+        'seedance-2.0-mini-spicy': 'Seedance 2.0 Mini Spicy',
         'seedance-2.0-fast-spicy': 'Seedance 2.0 Fast Spicy',
         'seedance-2.0-spicy': 'Seedance 2.0 Spicy',
-        'seedance-2.5-spicy': 'Seedance 2.5 Spicy'
+        'seedance-2.5-spicy': 'Seedance 2.5 Spicy',
+        'berry-1.0-spicy': 'Berry 1.0 Spicy',
+        'berry-1.0-turbo-spicy': 'Berry 1.0 Turbo Spicy',
+        'berry-1.0-pro-spicy': 'Berry 1.0 Pro Spicy',
+        'berry-1.0-pro-turbo-spicy': 'Berry 1.0 Pro Turbo Spicy',
+        'wan-2.7-spicy': 'Wan 2.7 Spicy',
+        'wan-2.2-spicy': 'Wan 2.2 Spicy'
     });
     const VISUAL_PRESETS = [
         ['adult_2d', '2D adult animation', 'Bold adult television animation, graphic shapes, expressive acting, clean linework and limited but intentional motion.'],
@@ -238,9 +245,13 @@
 
     function rendererRate(renderer, resolution) {
         if (renderer === 'minimax-h3-spicy') return resolution === '768P' ? 0.12 : 0.08;
-        if (renderer === 'seedance-2.0-fast-spicy') return resolution === '768P' ? 0.24 : 0.112;
+        if (renderer === 'seedance-2.0-mini-spicy') return resolution === '768P' ? 0.06 : 0.03;
+        if (renderer === 'seedance-2.0-fast-spicy') return resolution === '768P' ? 0.113 : 0.053;
         if (renderer === 'seedance-2.0-spicy') return resolution === '768P' ? 0.304 : 0.14;
         if (renderer === 'seedance-2.5-spicy') return resolution === '768P' ? 0.462 : 0.206;
+        if(renderer.startsWith('berry-'))return renderer.includes('-pro-turbo-')?0.52:renderer.includes('-pro-')?0.36:renderer.includes('-turbo-')?(resolution==='768P'?0.28:0.136):(resolution==='768P'?0.20:0.10);
+        if(renderer==='wan-2.7-spicy')return 0.26;
+        if(renderer==='wan-2.2-spicy')return resolution==='768P'?0.16:0.08;
         if (renderer === 'alibaba/wan-3.0') return resolution === '768P' ? 0.10 : 0.05;
         if (renderer === 'alibaba/wan-3.0-prime') return resolution === '768P' ? 0.14 : 0.068;
         if (renderer === 'fal-ai/ltx-2.3/fast') return 0.06;
@@ -271,6 +282,8 @@
 
     function rendererDuration(renderer, duration) {
         const requested = clamp(duration, 1, 30, 5);
+        if(renderer==='wan-2.2-spicy')return requested<=6?5:8;
+        if(SPICY_VIDEO_RENDERERS.has(renderer))return Math.max(renderer.startsWith('berry-')||renderer==='wan-2.7-spicy'?2:renderer.startsWith('seedance-')?4:5,Math.min(renderer.startsWith('berry-')||renderer==='seedance-2.5-spicy'?30:15,requested));
         if (renderer !== 'fal-ai/ltx-2.3/fast') return requested;
         return [6, 8, 10, 12, 14, 16, 18, 20]
             .reduce((nearest, option) => Math.abs(option - requested) < Math.abs(nearest - requested) ? option : nearest, 6);

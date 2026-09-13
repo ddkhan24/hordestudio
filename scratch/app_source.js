@@ -34,6 +34,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const app = fs.readFileSync(path.join(__dirname, '..', 'vh-simulation-core.js'), 'utf8') + '\n'
+    + fs.readFileSync(path.join(__dirname, '..', 'vh-life-schema.js'), 'utf8') + '\n'
     + fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
 
 /**
@@ -316,9 +317,13 @@ function resolveDependencies(seeds, options = {}) {
  * so a test can reach a helper it never named without the suite listing it.
  */
 function buildContext(vm, seeds, context = {}, options = {}) {
+    context.HordeHumanPackage ||= require('../human-package.js');
+    context.Blob ||= Blob;
+    context.crypto ||= require('node:crypto').webcrypto;
     context.VHWorldEngine ||= require('../vh-world-engine.js');
     context.VHActivityEngine ||= require('../vh-activity-engine.js');
     context.VHConversationEngine ||= require('../vh-conversation-engine.js');
+    context.HordeHumanPackage ||= require('../human-package.js');
     const resolved = resolveDependencies(seeds, {
         provided: Object.keys(context),
         exclude: options.exclude || []

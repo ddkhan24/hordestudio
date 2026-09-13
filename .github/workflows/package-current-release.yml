@@ -24,6 +24,8 @@ jobs:
         run: |
           tag=$(git tag --sort=-v:refname | head -n 1)
           test -n "$tag"
+          git checkout --detach "$tag"
+          node scripts/check-engine.js
           ./scripts/build-portable.sh "${tag#v}"
           gh release upload "$tag" \
             "dist/Horde-Studio-${tag}-portable.zip#Horde Studio portable app" \

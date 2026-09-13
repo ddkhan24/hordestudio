@@ -80,10 +80,6 @@ const COMPANION_LIFE_AVAILABILITY = Object.freeze(['available', 'busy', 'private
 
 const COMPANION_PLACE_KINDS = Object.freeze(['home', 'work', 'study', 'social', 'errand', 'outdoor', 'transit', 'other']);
 
-const COMPANION_WILDCARD_CATEGORIES = Object.freeze([
-    'inconvenience', 'social', 'work', 'family', 'health', 'money', 'travel', 'opportunity', 'conflict', 'delight'
-]);
-
 function normalizeCompanionLifePlace(raw, index = 0) {
     const place = isPlainObject(raw) ? raw : {};
     const label = String(place.label || place.name || '').trim().slice(0, 160);
@@ -92,6 +88,8 @@ function normalizeCompanionLifePlace(raw, index = 0) {
         label,
         photo: typeof place.photo === 'string' ? place.photo : '',
         referenceDisabled: place.referenceDisabled===true,
+        encounterScope: ['nearby','area'].includes(place.encounterScope)?place.encounterScope:(place.kind==='home'?'nearby':'area'),
+        noticeMinutes: livingClamp(Number.isFinite(Number(place.noticeMinutes))?Number(place.noticeMinutes):2,0,120),
         parentPlaceId: String(place.parentPlaceId||'').slice(0,80),
         referenceRole: ['bedroom','bathroom','kitchen','living room','home exterior','gym','work','campus'].includes(place.referenceRole)?place.referenceRole:'',
         referenceAliases: String(place.referenceAliases||'').slice(0,500),
@@ -127,6 +125,8 @@ function normalizeCompanionSocialPerson(raw, index = 0) {
             endMinute: livingClamp(Number(window?.endMinute) || 0, 0, 1440)
         })).filter(window => window.days.length && window.endMinute > window.startMinute),
         description: String(person.description || '').trim().slice(0, 500),
+        appearance: String(person.appearance || person.visualDescription || '').trim().slice(0, 2000),
+        age: person.age !== '' && person.age != null && Number.isFinite(Number(person.age)) && Number(person.age) >= 0 && Number(person.age) <= 120 ? Number(person.age) : null,
         currentTension: String(person.currentTension || '').trim().slice(0, 400),
         knowsPlayer: person.knowsPlayer === true,
         playerContext: String(person.playerContext || '').trim().slice(0, 400)
@@ -199,11 +199,14 @@ function normalizeCompanionScheduleBlock(raw, index = 0) {
     if (endMinute === startMinute) endMinute = Math.min(1440, startMinute + 60);
     const activity = String(block.activity || '').trim().slice(0, 240);
     return {
+        ...VHWorldEngine.calendarFields(block),
         id: String(block.id || livingId('vh_schedule', `${activity}|${days.join(',')}|${startMinute}|${index}`)).slice(0, 100),
         days,
         startMinute,
         endMinute,
         activity,
+        breakAllowed:block.breakAllowed!==false,
+        departureCosts:VHActivityEngine.resources(block.departureCosts),
         effects: VHActivityEngine.effects(block.effects, block.availability, block.withIds?.length > 0),
         placeId: String(block.placeId || '').trim().slice(0, 80),
         placeLabel: String(block.placeLabel || '').trim().slice(0, 160),
@@ -216,45 +219,34 @@ function normalizeCompanionScheduleBlock(raw, index = 0) {
     };
 }
 
-function normalizeCompanionWildcard(raw, index = 0) {
-    const event = isPlainObject(raw) ? raw : {};
-    const label = String(event.label || '').trim().slice(0, 240);
-    return {
-        id: String(event.id || livingId('vh_wildcard', label || index)).slice(0, 100),
-        label,
-        category: COMPANION_WILDCARD_CATEGORIES.includes(event.category) ? event.category : 'inconvenience',
-        weight: livingClamp(Number(event.weight) || 1, 0.05, 10),
-        minGapDays: livingClamp(Math.round(Number(event.minGapDays) || 5), 1, 90),
-        durationMinutes: livingClamp(Math.round(Number(event.durationMinutes) || 90), 15, 1440),
-        availability: COMPANION_LIFE_AVAILABILITY.includes(event.availability) ? event.availability : 'busy',
-        placeLabel: String(event.placeLabel || '').trim().slice(0, 160),
-        initiativeHook: String(event.initiativeHook || '').trim().slice(0, 400),
-        consequences: String(event.consequences || '').trim().slice(0, 500)
-    };
-}
-
 function normalizeCompanionLifeProfile(raw) {
     const life = isPlainObject(raw) ? raw : {};
+    const supplyIds=new Set();
+    // Match the reviewed life-proposal contract. Smaller legacy display limits
+    // silently discarded accepted authoring, including on later reloads.
+    const description = value => Array.from(String(value || '').trim()).slice(0, 4000).join('');
     return {
         version: 1,
         world: VHWorldEngine.config(life.world),
         initializedAt: Number.isFinite(life.initializedAt) ? life.initializedAt : 0,
         seed: String(life.seed || '').slice(0, 100),
-        fashionSense: String(life.fashionSense || '').trim().slice(0, 1200),
-        grooming: String(life.grooming || '').trim().slice(0, 600),
-        foodHabits: String(life.foodHabits || '').trim().slice(0, 800),
-        mediaHabits: String(life.mediaHabits || '').trim().slice(0, 800),
-        moneyPattern: String(life.moneyPattern || '').trim().slice(0, 800),
-        healthRoutine: String(life.healthRoutine || '').trim().slice(0, 800),
-        digitalLife: String(life.digitalLife || '').trim().slice(0, 800),
-        seasonalVariation: String(life.seasonalVariation || '').trim().slice(0, 800),
+        fashionSense: description(life.fashionSense),
+        grooming: description(life.grooming),
+        foodHabits: description(life.foodHabits),
+        mediaHabits: description(life.mediaHabits),
+        moneyPattern: description(life.moneyPattern),
+        healthRoutine: description(life.healthRoutine),
+        digitalLife: description(life.digitalLife),
+        seasonalVariation: description(life.seasonalVariation),
+        ...(Array.isArray(life.personalCalendar)?{personalCalendar:life.personalCalendar.filter(r=>r&&typeof r==='object').slice(0,200).map(r=>Object.fromEntries(['id','title','date','kind','recurrence','personId','reminderDays','notes','source','enabled'].filter(k=>r[k]!==undefined).map(k=>[k,r[k]])))}:{}),
         workweekDays: (Array.isArray(life.workweekDays) ? life.workweekDays : [1, 2, 3, 4, 5])
             .map(Number).filter(day => Number.isInteger(day) && day >= 0 && day <= 6).slice(0, 7),
         places: (Array.isArray(life.places) ? life.places : []).map(normalizeCompanionLifePlace)
-            .filter(place => place.label).slice(0, 48),
-        travelLegs: (Array.isArray(life.travelLegs) ? life.travelLegs : []).slice(0, 100).map(leg => ({
+            .filter(place => place.label).slice(0, 550),
+        travelLegs: (Array.isArray(life.travelLegs) ? life.travelLegs : []).slice(0, 5100).map(leg => ({
             from: String(leg.from || '').slice(0,80), to: String(leg.to || '').slice(0,80),
             source: String(leg.source || '').slice(0,160),
+            geometry: VHWorldEngine.routeGeometry(leg.geometry),
             cost: livingClamp(Number(leg.cost) || 0, 0, 100000),
             mode: ['WALK','DRIVE','BICYCLE','TRANSIT','RIDESHARE'].includes(leg.mode) ? leg.mode : 'WALK',
             minutes: livingClamp(Math.round(Number(leg.minutes) || 0), 0, 360)
@@ -263,11 +255,13 @@ function normalizeCompanionLifeProfile(raw) {
             .filter(person => person.name).slice(0, 30),
         wardrobe: (Array.isArray(life.wardrobe) ? life.wardrobe : []).map(normalizeCompanionWardrobeLook)
             .filter(look => look.items).slice(0, 30),
+        supplies:(Array.isArray(life.supplies)?life.supplies:[]).filter(x=>x&&/^[a-z][a-z0-9_]{0,39}$/.test(x.id)&&!['constructor','prototype'].includes(x.id)&&!supplyIds.has(x.id)&&supplyIds.add(x.id)).slice(0,30).map(x=>({id:x.id,label:String(x.label||x.id).slice(0,80),quantity:livingClamp(x.quantity,0,10000)})),
+        sleepPolicy:VHActivityEngine.sleepPolicy(life.sleepPolicy),
+        breakPolicy:VHActivityEngine.breakPolicy(life.breakPolicy),
+        decisionPolicy: VHActivityEngine.policy(life.decisionPolicy),
         activityOptions: VHActivityEngine.normalizeOpportunities(life.activityOptions),
         weeklySchedule: (Array.isArray(life.weeklySchedule) ? life.weeklySchedule : []).map(normalizeCompanionScheduleBlock)
-            .filter(block => block.activity && block.days.length).slice(0, 160),
-        wildcardDeck: (Array.isArray(life.wildcardDeck) ? life.wildcardDeck : []).map(normalizeCompanionWildcard)
-            .filter(event => event.label).slice(0, 40)
+            .filter(block => block.activity && block.days.length).slice(0, 160)
     };
 }
 
@@ -291,7 +285,6 @@ function normalizeCompanionEnvironment(raw) {
 
 function normalizeCompanionLifeRuntime(raw, socialCircle = []) {
     const runtime = isPlainObject(raw) ? raw : {};
-    const active = isPlainObject(runtime.activeWildcard) ? runtime.activeWildcard : null;
     const pending = isPlainObject(runtime.pendingInitiative) ? runtime.pendingInitiative : null;
     const temporary = isPlainObject(runtime.temporarySituation) ? runtime.temporarySituation : null;
     return {
@@ -299,20 +292,6 @@ function normalizeCompanionLifeRuntime(raw, socialCircle = []) {
         lastSimulatedAt: Number.isFinite(runtime.lastSimulatedAt) ? runtime.lastSimulatedAt : Date.now(),
         currentSituationKey: String(runtime.currentSituationKey || '').slice(0, 240),
         lastLabsBeatAt: Number.isFinite(runtime.lastLabsBeatAt) ? runtime.lastLabsBeatAt : 0,
-        lastWildcardAt: Number.isFinite(runtime.lastWildcardAt) ? runtime.lastWildcardAt : 0,
-        processedWildcardDays: (Array.isArray(runtime.processedWildcardDays) ? runtime.processedWildcardDays : [])
-            .map(value => String(value).slice(0, 20)).filter(Boolean).slice(-45),
-        activeWildcard: active ? {
-            id: String(active.id || '').slice(0, 100),
-            label: String(active.label || '').trim().slice(0, 240),
-            category: COMPANION_WILDCARD_CATEGORIES.includes(active.category) ? active.category : 'inconvenience',
-            startedAt: Number.isFinite(active.startedAt) ? active.startedAt : 0,
-            endsAt: Number.isFinite(active.endsAt) ? active.endsAt : 0,
-            availability: COMPANION_LIFE_AVAILABILITY.includes(active.availability) ? active.availability : 'busy',
-            placeLabel: String(active.placeLabel || '').trim().slice(0, 160),
-            initiativeHook: String(active.initiativeHook || '').trim().slice(0, 400),
-            consequences: String(active.consequences || '').trim().slice(0, 500)
-        } : null,
         pendingInitiative: pending ? {
             text: String(pending.text || '').trim().slice(0, 500),
             createdAt: Number.isFinite(pending.createdAt) ? pending.createdAt : 0,
@@ -683,6 +662,9 @@ function companionSetDecisionEvidence(companion, raw) {
 function normalizeCompanionHumanDynamics(raw, nowMs = Date.now()) {
     const dynamics = isPlainObject(raw) ? raw : {};
     return {
+        sleep:VHActivityEngine.normalizeSleep(dynamics.sleep),
+        illnessSeverity: livingClamp(Number(dynamics.illnessSeverity)||0,0,100),
+        heatDiscomfort: Number.isFinite(dynamics.heatDiscomfort)?livingClamp(dynamics.heatDiscomfort,0,100):null,
         hunger: livingClamp(Number.isFinite(Number(dynamics.hunger)) ? Number(dynamics.hunger) : 30, 0, 100),
         energy: livingClamp(Number.isFinite(Number(dynamics.energy)) ? Number(dynamics.energy) : 70, 0, 100),
         stress: livingClamp(Number.isFinite(Number(dynamics.stress)) ? Number(dynamics.stress) : 22, 0, 100),
@@ -794,10 +776,30 @@ function decayCompanionMood(companion, nowMs) {
     const HALF_LIFE_MS = 4 * 60 * 60 * 1000;
     const retained = Math.pow(0.5, elapsed / HALF_LIFE_MS);
     const settle = (current, base) => base + (current - base) * retained;
-    companion.mood.valence = livingClamp(Math.round(settle(companion.mood.valence, companion.moodBaseline.valence)), -100, 100);
+    companion.mood.valence = livingClamp(Math.round(settle(companion.mood.valence, companion.moodBaseline.valence-(companion.humanDynamics?.sleep?.irritability||0)*.2)), -100, 100);
     companion.mood.arousal = livingClamp(Math.round(settle(companion.mood.arousal, companion.moodBaseline.arousal)), -100, 100);
     companion.mood.lastUpdated = nowMs;
     return companion.mood;
+}
+
+function normalizeCompanionRelationshipDimensions(dynamics = {}, startingRelationship = 0, knownBeforeDays = 0) {
+    dynamics = isPlainObject(dynamics) ? dynamics : {};
+    startingRelationship = livingClamp(Number(startingRelationship) || 0, -100, 100);
+    return {
+            trust: livingClamp(dynamics.trust == null ? Math.max(0, startingRelationship) : dynamics.trust, -100, 100),
+            warmth: livingClamp(dynamics.warmth == null ? startingRelationship : dynamics.warmth, -100, 100),
+            attraction: livingClamp(dynamics.attraction == null ? 0 : dynamics.attraction, -100, 100),
+            resentment: livingClamp(dynamics.resentment == null ? Math.max(0, -startingRelationship) : dynamics.resentment, 0, 100),
+            stability: livingClamp(dynamics.stability == null ? 50 : dynamics.stability, 0, 100),
+            familiarity: livingClamp(dynamics.familiarity == null ? Math.min(100, Number(knownBeforeDays || 0) * 2) : dynamics.familiarity, 0, 100),
+            respect: livingClamp(dynamics.respect == null ? Math.max(0, startingRelationship * 0.35) : dynamics.respect, -100, 100),
+            comfort: livingClamp(dynamics.comfort == null ? Math.max(0, startingRelationship * 0.4) : dynamics.comfort, 0, 100),
+            dependence: livingClamp(dynamics.dependence == null ? 0 : dynamics.dependence, 0, 100),
+            fear: livingClamp(dynamics.fear == null ? Math.max(0, -startingRelationship * 0.2) : dynamics.fear, 0, 100),
+            obligation: livingClamp(dynamics.obligation == null ? 0 : dynamics.obligation, 0, 100),
+            powerImbalance: livingClamp(dynamics.powerImbalance == null ? 0 : dynamics.powerImbalance, -100, 100),
+            compatibility: livingClamp(dynamics.compatibility == null ? 0 : dynamics.compatibility, -100, 100)
+            };
 }
 
 function companionRelationshipDeltaCap(update, field, requested) {
@@ -937,6 +939,7 @@ function companionAppraisalEmotionDeltas(companion, rawAppraisal) {
 }
 
 function advanceCompanionEmotionState(companion, nowMs = Date.now()) {
+    if(companion.__vh2View)return companion.emotionState;
     companion.emotionState = normalizeCompanionEmotionState(companion.emotionState, companion.mood, nowMs);
     const emotionState = companion.emotionState;
     const elapsedMs = Math.max(0, nowMs - emotionState.lastUpdated);
@@ -1066,7 +1069,21 @@ function applyCompanionEmotionUpdate(companion, update, nowMs = Date.now()) {
 }
 
 function companionSexualSystemActive(companion) {
-    return companion?.libidoEnabled === true && Number(companion?.age) >= 18;
+    return companion?.libidoEnabled === true && companionCurrentAge(companion) >= 18;
+}
+
+function companionCurrentAge(companion, person = companion) {
+    if (!person) return null;
+    const id = person === companion || person.id === companion?.id ? 'self' : person.id;
+    const records = companion?.vh2Calendar?.ages || {};
+    const value = Object.hasOwn(records, id) ? records[id].currentAge : person.age;
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 130 ? value : null;
+}
+
+function companionAgeConfirmationMatches(companion, person, recordedAge) {
+    const age = companionCurrentAge(companion, person);
+    if (age === null || age < 18 || !Number.isInteger(recordedAge) || recordedAge < 18) return false;
+    return Object.hasOwn(companion?.vh2Calendar?.ages || {}, person.id) ? recordedAge <= age : recordedAge === age;
 }
 
 function companionSexualFactors(companion) {
@@ -1105,13 +1122,12 @@ function companionSexualContext(companion, nowMs = Date.now()) {
 function companionAlcoholContext(companion, nowMs = Date.now()) {
     if (companion.alcoholPattern === 'none') return false;
     const situation = companionSituationAt(companion, nowMs);
-    const text = [situation.activity, situation.label, situation.placeLabel,
-        companion.lifeRuntime?.activeWildcard?.label,
-        companion.lifeRuntime?.activeWildcard?.consequences].join(' ').toLowerCase();
+    const text = [situation.activity, situation.label, situation.placeLabel].join(' ').toLowerCase();
     return /\b(?:drink|drinks|drinking|bar|pub|club|party|cocktail|wine|beer|liquor|booze|happy hour|wedding reception)\b/.test(text);
 }
 
 function advanceCompanionHumanDynamics(companion, nowMs = Date.now()) {
+    if(companion.__vh2View)return companion.humanDynamics;
     companion.humanDynamics = normalizeCompanionHumanDynamics(companion.humanDynamics, nowMs);
     const quantum = 5 * 60 * 1000;
     // Match online ticks during catch-up rather than applying the final
@@ -1131,6 +1147,22 @@ function advanceCompanionHumanDynamicsStep(companion, nowMs) {
     const elapsedMs = Math.max(0, nowMs - dynamics.lastUpdated);
     if (elapsedMs < 5 * 60 * 1000) return dynamics;
     const hours = Math.min(72, elapsedMs / (60 * 60 * 1000));
+    if(companion.lifeProfile?.initializedAt&&companion.lifeProfile.sleepPolicy?.enabled!==false){
+        const local=companionLocalMinuteInfo(companion,nowMs),[bedHour,wakeHour]=COMPANION_SLEEP_HOURS[companion.sleepArchetype]||COMPANION_SLEEP_HOURS.normal;
+        const base=companionBaseSituationAt(companion,nowMs,true,true);
+        const active=companion.lifeRuntime?.activities?.goals?.find(g=>g.status==='active');
+        const recent=Number(companion.continuityRuntime?.lastExchangeAt)||0;
+        const engaged=recent>0&&nowMs-recent<3*60000||(companion.lifeRuntime?.activities?.conversationUntil||0)>nowMs;
+        const place=companion.lifeProfile.places.find(p=>p.id===base.placeId);
+        const restingPlace=place?.kind==='home'||['bedroom'].includes(place?.referenceRole)||(!base.placeId&&['home','relaxing'].includes(base.activity));
+        const preferred=isCompanionAsleep(companion.sleepArchetype,local.hour);
+        const previousSleepStage=dynamics.sleep?.stage;
+        dynamics.sleep=VHActivityEngine.advanceSleep(dynamics.sleep,nowMs,{policy:companion.lifeProfile.sleepPolicy,energy:dynamics.energy,stress:dynamics.stress,hunger:dynamics.hunger,preferred,engaged,hoursUntilBed:(bedHour-local.hour-local.minute/60+24)%24,hoursSinceWake:(local.hour+local.minute/60-wakeHour+24)%24,hoursIntoSleep:(local.hour+local.minute/60-bedHour+24)%24,wasAsleep:preferred&&restingPlace&&!engaged&&base.availability==='available'&&!base.withNames?.length&&!companion.lifeRuntime?.world?.journey&&!active,
+            canRest:restingPlace&&base.availability==='available'&&!base.withNames?.length&&!companion.lifeRuntime?.world?.journey,
+            occupied:!!active&&!['recovery','leisure'].includes(active.kind),boring:active?.kind==='leisure'&&!engaged});
+        if(previousSleepStage&&previousSleepStage!==dynamics.sleep.stage&&['winding_down','asleep','waking'].includes(dynamics.sleep.stage))companionRecordContinuityEvent(companion,{type:'life_event',summary:({winding_down:'Started winding down because of tiredness.',asleep:'Fell asleep.',waking:'Woke up; still groggy.'})[dynamics.sleep.stage],createdAt:nowMs,perceivedAt:nowMs,dedupeKey:`sleep:${nowMs}:${dynamics.sleep.stage}`});
+    }
+    if(companion.lifeProfile?.sleepPolicy?.enabled===false)dynamics.sleep=null;
     const life = companionLifeState(companion, dynamics.lastUpdated);
     const asleep = life.availability === 'asleep';
     const effects = VHActivityEngine.effects(life.situation?.effects, life.availability,
@@ -1300,7 +1332,12 @@ function companionFixedOffsetDate(companion, atMs) {
     return new Date(atMs + Number(companion?.timezoneOffsetMinutes || 0) * 60 * 1000);
 }
 
+function companionClockProfileAt(companion,atMs){
+    const change=companion?.vh2Travel?.clockHistory?.filter(x=>x.at<=atMs).at(-1);
+    return change?.timeZone?{...companion,locationMode:'timezone',timezone:change.timeZone}:companion;
+}
 function companionLocalDateInfo(companion, atMs) {
+    companion=companionClockProfileAt(companion,atMs);
     if (companionUsesFixedTimezoneOffset(companion)) {
         const date = companionFixedOffsetDate(companion, atMs);
         return {
@@ -1330,6 +1367,7 @@ function companionLocalDateInfo(companion, atMs) {
 }
 
 function companionLocalMinuteInfo(companion, atMs) {
+    companion=companionClockProfileAt(companion,atMs);
     if (companionUsesFixedTimezoneOffset(companion)) {
         const date = companionFixedOffsetDate(companion, atMs);
         return {
@@ -1407,13 +1445,7 @@ function buildProceduralCompanionLifeProfile(companion, atMs = Date.now()) {
         { days: [day], startMinute: 720, endMinute: 1080, activity: active ? 'exercise, errands and unstructured personal time' : 'errands and unstructured personal time', placeId: active ? 'active_place' : 'local_social', availability: 'busy', flexibility: 'soft', outfitContext: active ? 'active' : 'home' },
         { days: [day], startMinute: 1080, endMinute: 1380, activity: social ? 'seeing friends or family' : 'a quiet evening at home', placeId: social ? 'local_social' : 'home', availability: 'available', flexibility: 'optional', outfitContext: social ? 'social' : 'home' }
     ));
-    const wildcardDeck = [
-        { label: 'their transport is delayed or breaks down at an inconvenient moment', category: 'travel', weight: 1, minGapDays: 9, durationMinutes: 120, availability: 'busy', placeLabel: 'in transit', initiativeHook: 'The disruption is annoying enough that they may mention it naturally.', consequences: 'Their immediate plan runs late.' },
-        { label: 'they get locked out and have to improvise', category: 'inconvenience', weight: 0.6, minGapDays: 18, durationMinutes: 90, availability: 'busy', placeLabel: 'outside home', initiativeHook: 'They may text someone they trust while waiting.', consequences: 'Plans are delayed and their mood may worsen.' },
-        { label: 'a tense disagreement with someone in their existing social world', category: 'conflict', weight: 0.8, minGapDays: 14, durationMinutes: 180, availability: 'private', placeLabel: '', initiativeHook: 'They may reach out, withdraw, vent, or say nothing depending on their attachment style.', consequences: 'The supporting relationship retains some tension.' },
-        { label: 'an unexpectedly good piece of news or small personal win', category: 'delight', weight: 0.9, minGapDays: 10, durationMinutes: 120, availability: 'available', placeLabel: '', initiativeHook: 'They may want to share the news with someone who matters.', consequences: 'Their mood improves for a while.' },
-        { label: 'an unplanned invitation from a friend changes the evening', category: 'social', weight: 1.2, minGapDays: 7, durationMinutes: 240, availability: 'busy', placeLabel: 'out with a friend', initiativeHook: 'They may send a quick update, photo, or voice note if it suits the relationship.', consequences: 'The evening schedule is replaced.' }
-    ];
+    weeklySchedule.forEach(block => { block.id = `routine_${block.days.join('_')}_${block.startMinute}`; });
     return normalizeCompanionLifeProfile({
         initializedAt: atMs,
         seed: `${id}|${atMs}`,
@@ -1425,7 +1457,7 @@ function buildProceduralCompanionLifeProfile(companion, atMs = Date.now()) {
         healthRoutine: active ? 'Exercise is part of their week but can be skipped when tired, busy or emotionally depleted.' : 'Health maintenance is ordinary and inconsistent rather than optimized.',
         digitalLife: 'Phone use varies with work, company, mood and privacy; being online does not mean being available.',
         seasonalVariation: 'Clothing, daylight, transport and leisure adapt to local conditions when real weather is available.',
-        workweekDays, places, socialCircle: [], wardrobe, weeklySchedule, wildcardDeck
+        workweekDays, places, socialCircle: [], wardrobe, weeklySchedule
     });
 }
 
@@ -1434,7 +1466,7 @@ function companionScheduleBlockAt(companion, atMs) {
         ? companion.lifeProfile : buildProceduralCompanionLifeProfile(companion, companion.createdAt || atMs);
     const local = companionLocalMinuteInfo(companion, atMs);
     const minute = local.hour * 60 + local.minute;
-    const candidates = life.weeklySchedule.filter(block => block.days.includes(local.weekday)
+    const candidates = (globalThis.VH2Geography?.schedule(companion)||life.weeklySchedule).filter(block => VHWorldEngine.activeOn(block,local.dateKey) && block.days.includes(local.weekday)
         && (block.endMinute > block.startMinute
             ? minute >= block.startMinute && minute < block.endMinute
             : minute >= block.startMinute || minute < block.endMinute));
@@ -1448,12 +1480,12 @@ function companionScheduleBlockAt(companion, atMs) {
 
 function companionSituationAt(companion, atMs) {
     const situation = companionBaseSituationAt(companion, atMs);
-    if(companion.lifeProfile?.world?.closet.mode==='items'&&companion.lifeRuntime?.world?.outfit?.label&&situation.availability!=='asleep')situation.outfit=companion.lifeRuntime.world.outfit.label;
+    if(companion.lifeRuntime?.world?.outfit?.label&&situation.availability!=='asleep')situation.outfit=companion.lifeRuntime.world.outfit.label;
     const activities = companion.lifeRuntime?.activities;
     const active = activities?.goals?.find(goal => goal.status === 'active');
     // A current activity is evidence only near its last simulated time, never
     // a replacement for historical schedule samples during catch-up.
-    if (active && situation.availability === 'available' && atMs >= activities.lastAdvancedAt
+    if (active && situation.source!=='sleep_transition' && situation.availability === 'available' && atMs >= activities.lastAdvancedAt
         && atMs < activities.lastAdvancedAt + 60000) {
         const step = active.steps[active.stepIndex];
         if (step) return { ...situation, source: 'activity', activity: step.label, label: step.label,
@@ -1470,7 +1502,7 @@ function companionScheduledJourneyAt(companion, atMs) {
     if (!life?.travelLegs?.length) return null;
     const local = companionLocalMinuteInfo(companion, atMs);
     const minute = local.hour * 60 + local.minute;
-    const blocks = life.weeklySchedule.filter(b => b.days.includes(local.weekday)).sort((a,b) => a.startMinute-b.startMinute);
+    const blocks = (globalThis.VH2Geography?.schedule(companion)||life.weeklySchedule).filter(b => VHWorldEngine.activeOn(b,local.dateKey) && b.days.includes(local.weekday)).sort((a,b) => a.startMinute-b.startMinute);
     let previousArrival = 0;
     for (let i=1; i<blocks.length; i++) {
         const previous=blocks[i-1], next=blocks[i];
@@ -1489,7 +1521,7 @@ function companionScheduledJourneyAt(companion, atMs) {
     return null;
 }
 
-function companionBaseSituationAt(companion, atMs, skipWorld = false) {
+function companionBaseSituationAt(companion, atMs, skipWorld = false, skipSleep = false, skipBreak = false) {
     const spatial = !skipWorld && VHWorldEngine.situation(companion, atMs);
     if (spatial) return spatial;
     const local = companionLocalMinuteInfo(companion, atMs);
@@ -1505,16 +1537,14 @@ function companionBaseSituationAt(companion, atMs, skipWorld = false) {
             environment: companion.lifeRuntime?.environment || null
         };
     }
-    const wildcard = companion.lifeRuntime?.activeWildcard;
-    if (wildcard && wildcard.startedAt <= atMs && wildcard.endsAt > atMs) {
-        return {
-            source: 'wildcard', activity: wildcard.label, label: wildcard.label,
-            availability: wildcard.availability, placeId: '', placeLabel: wildcard.placeLabel || companion.currentLocationDetail || companion.locationLabel,
-            withNames: [], startedAt: wildcard.startedAt, endsAt: wildcard.endsAt,
-            outfit: companion.currentOutfit || '', environment: companion.lifeRuntime.environment
-        };
+    const sleep=companion.lifeProfile?.sleepPolicy?.enabled!==false&&companion.humanDynamics?.sleep;
+    if(!skipSleep&&sleep&&atMs>=sleep.lastAt-5*60000){
+        if(sleep.stage==='asleep'||sleep.stage==='winding_down'){
+            const home=companion.lifeProfile.places.find(p=>p.kind==='home');
+            return {source:'sleep_transition',activity:sleep.stage==='asleep'?'asleep':'winding down for sleep',label:sleep.stage==='asleep'?'asleep':'winding down for sleep',availability:sleep.stage==='asleep'?'asleep':'available',placeId:companion.lifeRuntime?.world?.placeId||home?.id||'',placeLabel:companion.lifeProfile.places.find(p=>p.id===companion.lifeRuntime?.world?.placeId)?.label||home?.label||companion.currentLocationDetail||'',withNames:[],startedAt:sleep.stage==='asleep'?sleep.sleepStartedAt:sleep.windDownAt,endsAt:sleep.stage==='asleep'?companionNextWakeAt(companion,atMs):sleep.windDownAt+(companion.lifeProfile.sleepPolicy?.windDownMinutes||10)*60000,outfit:companion.currentOutfit||'',environment:companion.lifeRuntime?.environment||null};
+        }
     }
-    if (isCompanionAsleep(companion.sleepArchetype, local.hour)) {
+    if (!skipSleep && !sleep && isCompanionAsleep(companion.sleepArchetype, local.hour)) {
         const look = companion.lifeProfile?.wardrobe?.find(item => item.context === 'sleep');
         return {
             source: 'sleep', activity: 'asleep', label: 'asleep', availability: 'asleep',
@@ -1525,7 +1555,7 @@ function companionBaseSituationAt(companion, atMs, skipWorld = false) {
         };
     }
     if (!companion.lifeProfile?.initializedAt) {
-        const fallback = companionLifeStateLegacy(companion, atMs);
+        const fallback = companionLifeStateLegacy(companion, atMs, skipSleep || !!sleep);
         return {
             source: 'fallback', activity: fallback.activity, label: fallback.label,
             availability: fallback.availability, placeId: '',
@@ -1537,12 +1567,21 @@ function companionBaseSituationAt(companion, atMs, skipWorld = false) {
     }
     const journey = !companion.lifeProfile?.world?.transport?.enabled && companionScheduledJourneyAt(companion, atMs);
     if (journey) return journey;
+    const trip=globalThis.VH2Travel?.active(companion);
+    if(trip && ['staying','blocked','waiting'].includes(trip.status)){
+        const place=companion.lifeProfile.places.find(p=>p.id===companion.lifeRuntime.world.placeId);
+        return {source:'trip_stay',activity:'free time during '+trip.label,label:'Free time at '+(place?.label||'current place'),availability:'available',placeId:place?.id||'',placeLabel:place?.label||'',withNames:[],outfit:companion.currentOutfit||'',environment:companion.lifeRuntime.environment||null};
+    }
     const block = companionScheduleBlockAt(companion, atMs);
     if (!block) {
+        if(companion.lifeProfile?.initializedAt){
+            const place=companion.lifeProfile.places.find(p=>p.id===companion.lifeRuntime?.world?.placeId)||companion.lifeProfile.places.find(p=>p.kind==='home');
+            return {source:'free',activity:'free time',label:'Free time at '+(place?.label||'the current location'),availability:'available',placeId:place?.id||'',placeLabel:place?.label||companion.currentLocationDetail||companion.locationLabel,withNames:[],startedAt:0,endsAt:0,outfit:companion.currentOutfit||'',environment:companion.lifeRuntime?.environment||null};
+        }
         const spatialRuntime=companion.lifeRuntime?.world;
         const actual=!skipWorld&&companion.lifeProfile?.world?.transport.enabled&&spatialRuntime?.lastAt&&atMs>=spatialRuntime.lastAt&&atMs<spatialRuntime.lastAt+60000&&companion.lifeProfile.places.find(p=>p.id===spatialRuntime.placeId);
         if(actual)return {source:'spatial',activity:`Free time at ${actual.label}`,label:'Free time',availability:'available',placeId:actual.id,placeLabel:actual.label,withNames:[],startedAt:spatialRuntime.lastAt,endsAt:0,outfit:spatialRuntime.outfit?.label||companion.currentOutfit||'',environment:companion.lifeRuntime.environment};
-        const fallback = companionLifeStateLegacy(companion, atMs);
+        const fallback = companionLifeStateLegacy(companion, atMs, skipSleep || !!sleep);
         return {
             source: 'fallback', activity: fallback.activity, label: fallback.label,
             availability: fallback.availability, placeId: '', placeLabel: companion.currentLocationDetail || companion.locationLabel,
@@ -1557,17 +1596,22 @@ function companionBaseSituationAt(companion, atMs, skipWorld = false) {
         const actual = life.places.find(p=>p.id===world.placeId);
         return {source:'spatial',activity:`At ${actual?.label || world.placeId}; unable to attend ${block.activity} yet`,label:'Away from scheduled commitment',availability:'available',placeId:world.placeId,placeLabel:actual?.label || world.placeId,withNames:[],startedAt:world.lastAt,endsAt:0,outfit:world.outfit?.label || companion.currentOutfit || '',environment:companion.lifeRuntime.environment};
     }
+    const activeBreak=companion.lifeRuntime?.activities?.break;
+    if(!skipBreak&&activeBreak?.goalId&&atMs>=activeBreak.startedAt&&atMs<activeBreak.endsAt&&activeBreak.blockKey===`${Math.floor(atMs/60000)-((local.hour*60+local.minute-block.startMinute+1440)%1440)}:${block.id}`){
+        const goal=companion.lifeRuntime.activities.goals.find(g=>g.id===activeBreak.goalId);
+        return {source:'break',activity:goal?.label||'Taking a break',label:goal?.label||'Taking a break',availability:'available',placeId:block.placeId,placeLabel:place?.label||block.placeLabel,withNames:[],startedAt:activeBreak.startedAt,endsAt:activeBreak.endsAt,outfit:companion.currentOutfit||'',environment:companion.lifeRuntime.environment};
+    }
     const people = block.withIds.map(id => life.socialCircle.find(person => person.id === id)?.name).filter(Boolean);
     const looks = life.wardrobe.filter(item => item.context === block.outfitContext);
     const look = looks.length ? looks[Math.floor(companionSeededRoll(`${companion.id}|outfit|${local.dateKey}|${block.id}`) * looks.length)] : null;
     const elapsedMinutes = Math.max(0, (block.endMinute - (local.hour * 60 + local.minute)));
     return {
-        source: 'schedule', activity: block.activity, label: block.activity, effects: block.effects,
+        source: 'schedule', blockId:block.id, breakAllowed:block.breakAllowed, activity: block.activity, label: block.activity, effects: block.effects,
         availability: block.availability, placeId: block.placeId,
         placeLabel: place?.label || block.placeLabel || companion.locationLabel,
-        withNames: people, startedAt: atMs - Math.max(0, (local.hour * 60 + local.minute) - block.startMinute) * 60000,
+        withNames: people, startedAt: Math.floor(atMs/60000)*60000 - ((local.hour*60+local.minute-block.startMinute+1440)%1440)*60000,
         endsAt: atMs + elapsedMinutes * 60000,
-        outfit: (!skipWorld && companion.lifeProfile.world?.closet.mode === 'items' && companion.lifeRuntime?.world?.outfit?.label) || look?.items || companion.currentOutfit || '',
+        outfit: (!skipWorld && companion.lifeRuntime?.world?.outfit?.label) || look?.items || companion.currentOutfit || '',
         outfitContext: block.outfitContext,
         environment: companion.lifeRuntime?.environment || null
     };
@@ -1605,10 +1649,10 @@ function companionActivityPool(companion, local) {
     return pool;
 }
 
-function companionLifeStateLegacy(companion, atMs) {
+function companionLifeStateLegacy(companion, atMs, skipSleep = false) {
     const local = companionLocalDateInfo(companion, atMs);
     const hour = local.hour;
-    if (isCompanionAsleep(companion.sleepArchetype, hour)) {
+    if (!skipSleep && isCompanionAsleep(companion.sleepArchetype, hour)) {
         return { activity: 'asleep', label: 'asleep', availability: 'asleep' };
     }
     // A weighted, deterministic pick from the day-part plus their authored
@@ -1621,6 +1665,7 @@ function companionLifeStateLegacy(companion, atMs) {
 }
 
 function companionLifeState(companion, atMs) {
+    if(companion.__vh2View&&companion.__vh2Present){const p=companion.__vh2Present;return {...p,label:p.activity,situation:{...p,label:p.activity,source:'vh2'}};}
     const situation = companionSituationAt(companion, atMs);
     return {
         activity: situation.activity,
@@ -1631,6 +1676,9 @@ function companionLifeState(companion, atMs) {
 }
 
 function companionNextWakeAt(companion, atMs) {
+    const sleep=companion.humanDynamics?.sleep;
+    if(companion.lifeProfile?.sleepPolicy?.enabled!==false&&sleep?.stage==='asleep')return Math.max(atMs+5*60000,sleep.sleepStartedAt+(sleep.nap ? 0.5 :companion.lifeProfile.sleepPolicy?.sleepNeedHours||8)*3600000);
+
     const [, wakeHour] = COMPANION_SLEEP_HOURS[companion.sleepArchetype] || COMPANION_SLEEP_HOURS.normal;
     const localHour = companionLocalDateInfo(companion, atMs).hour;
     let hoursUntilWake = wakeHour - localHour;
@@ -1677,7 +1725,8 @@ function companionAttentionContext(companion, nowMs, experience) {
     // Due promises favor returning to contact. They do not fulfill themselves.
     const promiseDue = (companion.commitments || []).some(item => item.status === 'pending'
         && ['text', 'call', 'message'].includes(item.medium) && item.dueAt > 0 && item.dueAt <= nowMs);
-    const capacity = livingClamp(energy * 0.7 + (100 - stress) * 0.3, 0, 100);
+    const sleepPenalty=dynamics.sleep?({awake:0,tired:6,drowsy:18,winding_down:25,asleep:100,waking:14}[dynamics.sleep.stage]||0):0;
+    const capacity = livingClamp(energy * 0.7 + (100 - stress) * 0.3-sleepPenalty, 0, 100);
     const willingness = livingClamp(45 + warmth * 0.3 + socialNeed * 0.25
         - resentment * 0.45 - anger * 0.5 + Math.min(20, interest * 0.2) + (promiseDue ? 20 : 0), 0, 100);
     const cooldownUntil = experience.allowNoReply ? Number(dynamics.cooldownUntil) || 0 : 0;
@@ -1805,18 +1854,6 @@ function advanceCompanionMessageAttention(companion, message, nowMs, experience,
     return changed;
 }
 
-function weightedCompanionWildcard(deck, seed) {
-    const usable = deck.filter(event => event.weight > 0);
-    if (!usable.length) return null;
-    const total = usable.reduce((sum, event) => sum + event.weight, 0);
-    let cursor = companionSeededRoll(seed) * total;
-    for (const event of usable) {
-        cursor -= event.weight;
-        if (cursor <= 0) return event;
-    }
-    return usable[usable.length - 1];
-}
-
 function companionSocialContactIntervalMs(person, seed) {
     const ranges = {
         daily: [18, 34], few_week: [42, 90], weekly: [120, 240],
@@ -1833,6 +1870,7 @@ function companionSocialWorldState(companion) {
 }
 
 function advanceCompanionSocialWorld(companion, nowMs = Date.now(), options = {}) {
+    if(companion.__vh2View)return false;
     if (!companion.lifeProfile?.initializedAt) return [];
     const world = companionSocialWorldState(companion);
     let changed = false;
@@ -1951,7 +1989,7 @@ function companionPlanLifeDay(companion, nowMs = Date.now()) {
         return runtime.dayPlan.filter(item => item.dateKey === local.dateKey);
     }
     const localMidnight = nowMs - (local.hour * 60 + local.minute) * 60000;
-    const schedule = (companion.lifeProfile?.weeklySchedule || []).filter(block => block.days.includes(local.weekday))
+    const schedule = (companion.lifeProfile?.weeklySchedule || []).filter(block => VHWorldEngine.activeOn(block,local.dateKey) && block.days.includes(local.weekday))
         .sort((left, right) => left.startMinute - right.startMinute).slice(0, 12);
     const plan = schedule.map(block => ({
         id: livingId('vh_life_plan', `${companion.id}|${local.dateKey}|schedule|${block.id}`),
@@ -1992,6 +2030,7 @@ function companionPlanLifeDay(companion, nowMs = Date.now()) {
 }
 
 function advanceCompanionLifePlan(companion, nowMs = Date.now()) {
+    if(companion.__vh2View)return false;
     const plan = companionPlanLifeDay(companion, nowMs);
     let changed = false;
     plan.forEach(item => {
@@ -2011,11 +2050,13 @@ function advanceCompanionLifePlan(companion, nowMs = Date.now()) {
     return changed;
 }
 
-function advanceCompanionActivities(companion, nowMs = Date.now()) {
+function advanceCompanionActivities(companion, nowMs = Date.now(), options = {}) {
+    if(companion.__vh2View)return null;
     const runtime = companion.lifeRuntime;
     if (!runtime) return false;
     runtime.activities ||= VHActivityEngine.normalize();
     const activities = runtime.activities;
+    if(!activities.suppliesSeeded){for(const supply of companion.lifeProfile?.supplies||[])if(!(supply.id in activities.resources))activities.resources[supply.id]=supply.quantity;activities.suppliesSeeded=true;}
     activities.plannerStartedAt ||= nowMs;
     let dynamics = companion.humanDynamics || {};
     // A local simulation tick, not a prose classifier, proposes supported goals.
@@ -2030,8 +2071,11 @@ function advanceCompanionActivities(companion, nowMs = Date.now()) {
         advanceCompanionWorld(companion, cursor);
         advanceCompanionHumanDynamics(companion, cursor);
         dynamics = companion.humanDynamics;
-        if (companion.lifeProfile?.initializedAt) VHActivityEngine.proposeNeeds(activities, cursor, dynamics);
-        const situation = companionBaseSituationAt(companion, cursor);
+        if(globalThis.VH2Geography?.enabled(companion)) VH2Geography.propose(companion,cursor,companionLocalMinuteInfo);
+        if (companion.lifeProfile?.initializedAt) VHActivityEngine.proposeNeeds(activities, cursor, globalThis.VH2Geography?.enabled(companion)?{...dynamics,hunger:0}:dynamics);
+        if(!globalThis.VH2Geography?.enabled(companion))VHActivityEngine.advanceBreak(activities,cursor,{policy:companion.lifeProfile.breakPolicy,situation:companionBaseSituationAt(companion,cursor,false,false,true),energy:dynamics.energy,hunger:dynamics.hunger,stress:dynamics.stress});
+        let situation = companionBaseSituationAt(companion, cursor);
+        if(globalThis.VH2Geography?.enabled(companion)&&situation.source==='schedule'&&(dynamics.hunger>=65||dynamics.stress>=75||dynamics.energy<25))situation={...situation,availability:'available'};
         const local = companionLocalMinuteInfo(companion, cursor);
         const minute = local.hour * 60 + local.minute;
         if (companion.lifeProfile?.initializedAt && cursor >= activities.plannerStartedAt) {
@@ -2053,9 +2097,32 @@ function advanceCompanionActivities(companion, nowMs = Date.now()) {
             (!companion.lifeRuntime.world?.people?.[person.id] || (companion.lifeRuntime.world.people[person.id].energy >= (companion.lifeProfile.world.adaptation?.socialRecoveryEnergy??25)&&!(companion.lifeRuntime.world.people[person.id].restUntil>cursor))) && person.contactWindows?.some(window => window.days.includes(local.weekday)
                 && minute >= window.startMinute && minute < window.endMinute)).map(person => person.id);
         const priorActivityEvents = new Set(activities.events.map(event => event.id));
+        const geographicCash=activities.resources.vh_cash;
         const delta = VHActivityEngine.advance(activities, cursor + 60000, {
-            availability: situation.availability, label: situation.label, energy: dynamics.energy, hunger: dynamics.hunger, socialNeed: dynamics.socialNeed, availablePeople
+            selectAction:options.selectAction,
+            meetingAvailable:typeof VH2Plans!=='undefined'?(id,at)=>VH2Plans.canMeet(companion,id,at,companionLocalMinuteInfo):undefined,
+            routeForGoal:globalThis.VH2Geography?.enabled(companion)?(goal,at)=>VH2Geography.routeGoal(companion,goal,at,companionLocalMinuteInfo):companion.lifeProfile.world?.transport.goalTravel?(goal,at)=>VHWorldEngine.goalRoute(companion,goal,at,Math.min(...(companion.commitments||[]).filter(c=>c.status==='pending'&&c.dueAt>at).map(c=>c.dueAt),...(globalThis.VH2Geography?.schedule(companion)||companion.lifeProfile.weeklySchedule||[]).filter(b=>VHWorldEngine.activeOn(b,local.dateKey)&&b.days.includes(local.weekday)&&b.startMinute>minute).map(b=>cursor+(b.startMinute-minute)*60000)),companionLocalMinuteInfo):undefined,
+            startTravel:(goal,at,route)=>{
+                if(route?.geographic)return VH2Geography.start(companion,goal,at,route);
+                const prior=new Set(companion.lifeRuntime.world.events.map(e=>e.id));
+                const started=VHWorldEngine.startGoalTrip(companion,goal,at,route);
+                for(const event of companion.lifeRuntime.world.events.filter(e=>!prior.has(e.id))){
+                    companionRecordContinuityEvent(companion,{type:'life_event',summary:event.summary,createdAt:event.at,perceivedAt:event.at,dedupeKey:`world:${event.id}`});
+                    companion.lifeEvents ||= [];
+                    if(!companion.lifeEvents.some(e=>e.id===event.id))companion.lifeEvents.push(normalizeCompanionLifeEvent({id:event.id,text:event.summary,createdAt:event.at,source:'autonomy'}));
+                }
+                companion.lifeEvents=(companion.lifeEvents||[]).slice(-200);return started;
+            },
+            onlyGoalId:situation.source==='break'?activities.break.goalId:'',
+            availability: situation.source==='sleep_transition'?'private':situation.availability, label: situation.label, energy: Math.max(0,dynamics.energy-(dynamics.sleep?.stage==='drowsy'?15:0)), stress:dynamics.stress, hunger: dynamics.hunger, socialNeed: dynamics.socialNeed, availablePeople,
+            requirements:(globalThis.VH2Geography?.schedule(companion)||companion.lifeProfile.weeklySchedule||[]).filter(b=>VHWorldEngine.activeOn(b,local.dateKey)&&b.days.includes(local.weekday)&&b.endMinute>minute).map(b=>{
+                const leg=companion.lifeProfile.travelLegs?.filter(l=>l.from===situation.placeId&&l.to===b.placeId).sort((a,b)=>a.minutes-b.minutes)[0];
+                return {resources:b.departureCosts,dueAt:cursor+(b.startMinute-minute-(leg?.minutes||0))*60000,endsAt:cursor+(b.endMinute-minute)*60000};
+            }),
+            policy:companion.lifeProfile.decisionPolicy,seed:companion.lifeProfile.seed||companion.id,placeId:situation.placeId,
+            nextCommitmentAt:Math.min(...(companion.commitments||[]).filter(c=>c.status==='pending'&&c.dueAt>cursor).map(c=>c.dueAt),...(globalThis.VH2Geography?.schedule(companion)||companion.lifeProfile.weeklySchedule||[]).filter(b=>VHWorldEngine.activeOn(b,local.dateKey)&&b.days.includes(local.weekday)&&b.startMinute>minute).map(b=>cursor+(b.startMinute-minute)*60000))
         });
+        if(globalThis.VH2Geography?.enabled(companion))VH2Geography.settle(companion,geographicCash);
         dynamics.energy = livingClamp((Number(dynamics.energy) || 0) + delta.energy, 0, 100);
         dynamics.stress = livingClamp((Number(dynamics.stress) || 0) + delta.stress, 0, 100);
         dynamics.hunger = livingClamp((Number(dynamics.hunger) || 0) + delta.hunger, 0, 100);
@@ -2091,6 +2158,7 @@ function advanceCompanionActivities(companion, nowMs = Date.now()) {
 }
 
 function advanceCompanionWorld(companion, nowMs) {
+    if(companion.__vh2View)return null;
     const settings=companion.lifeProfile?.world;
     if (!settings || !(settings.socialAgent?.enabled || settings.transport.enabled || settings.gifts.enabled || settings.closet.mode==='items' || settings.people.length || companion.lifeRuntime?.world?.connection?.state==='pending')) return;
     const result = VHWorldEngine.advance(companion, nowMs, companionLocalMinuteInfo, (c,t)=>companionBaseSituationAt(c,t,true));
@@ -2112,6 +2180,7 @@ function advanceCompanionWorld(companion, nowMs) {
 }
 
 function advanceCompanionLife(companion, nowMs = Date.now()) {
+    if(companion.__vh2View)return null;
     if (companion.lifeProfile?.initializedAt || companion.lifeRuntime?.activities?.goals?.length) advanceCompanionActivities(companion, nowMs);
     advanceCompanionWorld(companion, nowMs);
     // Uninitialized life is a pure fallback computed from the clock. Merely
@@ -2119,7 +2188,6 @@ function advanceCompanionLife(companion, nowMs = Date.now()) {
     if (!companion.lifeProfile?.initializedAt) return null;
     const runtime = companion.lifeRuntime;
     const priorSimulatedAt = runtime.lastSimulatedAt || nowMs;
-    const elapsed = Math.max(0, nowMs - priorSimulatedAt);
     let changed = false;
     if (advanceCompanionLifePlan(companion, nowMs)) changed = true;
     const socialBefore = JSON.stringify(runtime.socialWorld || null);
@@ -2142,92 +2210,37 @@ function advanceCompanionLife(companion, nowMs = Date.now()) {
         runtime.currentSituationKey = situationKey;
         changed = true;
     }
-    if (runtime.activeWildcard?.endsAt <= nowMs) {
-        runtime.activeWildcard = null;
-        changed = true;
-    }
-    if (runtime.pendingInitiative?.expiresAt <= nowMs) {
-        runtime.pendingInitiative = null;
-        changed = true;
-    }
-    if (!companion.lifeWildcardsEnabled || !companion.lifeProfile.wildcardDeck.length) {
-        if (changed) runtime.lastSimulatedAt = nowMs;
-        return null;
-    }
-    const catchupDays = Math.min(7, Math.max(0, Math.ceil(elapsed / 86400000)));
-    let newestActive = runtime.activeWildcard;
-    for (let daysAgo = catchupDays; daysAgo >= 0; daysAgo -= 1) {
-        const sampleAt = nowMs - daysAgo * 86400000;
-        const local = companionLocalMinuteInfo(companion, sampleAt);
-        if (runtime.processedWildcardDays.includes(local.dateKey)) continue;
-        const currentMinute = local.hour * 60 + local.minute;
-        const consideredMinute = daysAgo > 0 ? 1439 : currentMinute;
-        const triggerMinute = 8 * 60 + Math.floor(companionSeededRoll(`${companion.lifeProfile.seed}|trigger|${local.dateKey}`) * 13 * 60);
-        if (consideredMinute < triggerMinute) continue;
-        runtime.processedWildcardDays.push(local.dateKey);
-        changed = true;
-
-        const localMidnightApprox = sampleAt - currentMinute * 60000;
-        const startedAt = localMidnightApprox + triggerMinute * 60000;
-        const gapDays = runtime.lastWildcardAt ? Math.abs(startedAt - runtime.lastWildcardAt) / 86400000 : 999;
-        if (companionSeededRoll(`${companion.lifeProfile.seed}|occurs|${local.dateKey}`) > 0.22) continue;
-        const event = weightedCompanionWildcard(
-            companion.lifeProfile.wildcardDeck.filter(item => gapDays >= item.minGapDays),
-            `${companion.lifeProfile.seed}|pick|${local.dateKey}`);
-        if (!event) continue;
-
-        const active = { ...event, startedAt, endsAt: startedAt + event.durationMinutes * 60000 };
-        runtime.lastWildcardAt = Math.max(runtime.lastWildcardAt || 0, startedAt);
-        changed = true;
-        if (active.endsAt > nowMs && active.startedAt <= nowMs) {
-            runtime.activeWildcard = active;
-            newestActive = active;
-        }
-        if (!companion.lifeEvents.some(item => item.id === `vh_wildcard_${event.id}_${local.dateKey}`)) {
-            companion.lifeEvents.push(normalizeCompanionLifeEvent({
-                id: `vh_wildcard_${event.id}_${local.dateKey}`,
-                text: event.label,
-                createdAt: startedAt,
-                source: 'autonomy'
-            }));
-        }
-        if (event.initiativeHook && nowMs - startedAt < 8 * 60 * 60 * 1000) {
-            runtime.pendingInitiative = {
-                text: `${event.label}. ${event.initiativeHook}`,
-                createdAt: startedAt,
-                expiresAt: nowMs + 8 * 60 * 60 * 1000
-            };
-        }
-        const moodDelta = ['conflict', 'inconvenience', 'money', 'health', 'travel'].includes(event.category) ? -6
-            : ['delight', 'opportunity'].includes(event.category) ? 7 : 0;
-        if (moodDelta && nowMs - startedAt < 36 * 60 * 60 * 1000) {
-            applyCompanionMoodUpdate(companion, {
-                valence_change: moodDelta,
-                arousal_change: Math.abs(moodDelta) / 2,
-                mood_label: moodDelta > 0 ? 'content' : 'overwhelmed',
-                relationship_change: 0,
-                stress_change: moodDelta < 0 ? Math.abs(moodDelta) : -3,
-                anger_change: event.category === 'conflict' ? 8 : 0,
-                social_need_change: event.category === 'social' || event.category === 'delight' ? -5 : 0,
-                emotion_appraisal: {
-                    summary: event.label,
-                    goal_impact: moodDelta > 0 ? 35 : moodDelta < 0 ? -35 : 0,
-                    threat: ['health', 'conflict', 'travel'].includes(event.category) ? 28 : 5,
-                    loss: ['money', 'health'].includes(event.category) ? 22 : 0,
-                    novelty: 55,
-                    norm_violation: event.category === 'conflict' ? 35 : 0,
-                    control: ['inconvenience', 'travel'].includes(event.category) ? 30 : 55,
-                    certainty: 85,
-                    social_safety: event.category === 'conflict' ? 32 : event.category === 'social' ? 78 : 55,
-                    responsibility: 'circumstance'
-                }
-            }, startedAt);
-        }
-    }
-    runtime.processedWildcardDays = runtime.processedWildcardDays.slice(-45);
-    companion.lifeEvents = companion.lifeEvents.slice(-200);
+    if (runtime.pendingInitiative?.expiresAt <= nowMs) {runtime.pendingInitiative=null;changed=true;}
     if (changed) runtime.lastSimulatedAt = nowMs;
-    return newestActive;
+    return null;
 }
 
-if (typeof module === 'object' && module.exports) module.exports = {advanceCompanionWorld, companionScheduledJourneyAt, isPlainObject, livingClamp, livingId, COMPANION_MOOD_LABELS, COMPANION_INTIMACY_AFTEREFFECTS, COMPANION_EMOTIONS, COMPANION_SLEEP_HOURS, COMPANION_ACTIVITIES, normalizeCompanionTrauma, normalizeCompanionLifeEvent, COMPANION_WEEKDAYS, COMPANION_LIFE_AVAILABILITY, COMPANION_PLACE_KINDS, COMPANION_WILDCARD_CATEGORIES, normalizeCompanionLifePlace, normalizeCompanionSocialPerson, normalizeCompanionSocialRelationshipRuntime, normalizeCompanionSocialWorldRuntime, normalizeCompanionWardrobeLook, normalizeCompanionScheduleBlock, normalizeCompanionWildcard, normalizeCompanionLifeProfile, normalizeCompanionEnvironment, normalizeCompanionLifeRuntime, COMPANION_CONTINUITY_EVENT_TYPES, normalizeCompanionContinuityEvent, normalizeCompanionBelief, normalizeCompanionIntention, normalizeCompanionEpisode, normalizeCompanionOpenThread, normalizeCompanionDecisionEvidence, normalizeCompanionPlayerModelEntry, normalizeCompanionBoundary, normalizeCompanionTruthEntry, normalizeCompanionMilestone, normalizeCompanionContinuityRuntime, companionRecordEpisode, companionContinuity, companionRecordContinuityEvent, companionSetDecisionEvidence, normalizeCompanionHumanDynamics, normalizeCompanionEmotionVector, normalizeCompanionEmotionDeltaVector, companionEmotionVectorFromMood, normalizeCompanionEmotionReaction, normalizeCompanionEmotionState, companionSeededRoll, decayCompanionMood, companionRelationshipDeltaCap, applyCompanionMoodUpdate, companionRegulationFactors, companionEmotionFactors, companionExpressedEmotionVector, companionAppraisalEmotionDeltas, advanceCompanionEmotionState, applyCompanionEmotionUpdate, companionSexualSystemActive, companionSexualFactors, companionSexualContext, companionAlcoholContext, advanceCompanionHumanDynamics, advanceCompanionHumanDynamicsStep, applyCompanionDynamicsUpdate, isCompanionAsleep, companionUsesFixedTimezoneOffset, companionFixedOffsetDate, companionLocalDateInfo, companionLocalMinuteInfo, companionDefaultWorkweek, buildProceduralCompanionLifeProfile, companionScheduleBlockAt, companionSituationAt, companionBaseSituationAt, companionActivityPool, companionLifeStateLegacy, companionLifeState, companionNextWakeAt, normalizeCompanionAttention, companionAttentionContext, decideCompanionAttention, advanceCompanionMessageAttention, weightedCompanionWildcard, companionSocialContactIntervalMs, companionSocialWorldState, advanceCompanionSocialWorld, companionPlanLifeDay, advanceCompanionLifePlan, advanceCompanionActivities, advanceCompanionLife};
+function companionConversationTransition(companion, messages, nowMs) {
+    const current = companionSituationAt(companion, nowMs);
+    const recent = messages.filter(message => !message.invalidated && Number(message.timestamp) <= nowMs);
+    const lastReply = [...recent].reverse().find(message => message.role === 'companion');
+    const lastPlayer = [...recent].reverse().find(message => message.role === 'user');
+    const engaged = lastReply && lastPlayer && nowMs - lastReply.timestamp < 3 * 60000
+        && nowMs - lastPlayer.timestamp < 3 * 60000;
+    const sleep=companion.humanDynamics?.sleep;
+    let upcoming = sleep?.stage==='winding_down'?{at:sleep.windDownAt+(companion.lifeProfile.sleepPolicy?.windDownMinutes||10)*60000,activity:'sleep',availability:'asleep',key:`sleep:${sleep.windDownAt}`} : null;
+    if(upcoming&&upcoming.at<=nowMs)upcoming=null;
+    if(!upcoming&&current.availability==='available')upcoming=VHWorldEngine.departurePreview(companion,nowMs,companionLocalMinuteInfo);
+    if (!upcoming && current.availability !== 'asleep') {
+        for (let minute = 1; minute <= 5; minute += 1) {
+            const at = nowMs + minute * 60000;
+            const next = companionSituationAt(companion, at);
+            if (next.availability !== current.availability && ['busy', 'private', 'asleep'].includes(next.availability)) {
+                upcoming = { at, endsAt:next.endsAt||0, activity: next.label, availability: next.availability,
+                    key: `${Math.floor(at / 60000)}|${next.availability}|${next.label}` };
+                break;
+            }
+        }
+    }
+    const previous = lastReply ? companionBaseSituationAt(companion, Number(lastReply.timestamp)) : null;
+    return { engaged: !!engaged, upcoming,
+        returned: !!previous && previous.availability !== current.availability && current.availability === 'available',
+        previousActivity: previous?.label || '' };
+}
+
+if (typeof module === 'object' && module.exports) module.exports = {companionAgeConfirmationMatches, companionCurrentAge, companionConversationTransition, advanceCompanionWorld, companionScheduledJourneyAt, isPlainObject, livingClamp, livingId, COMPANION_MOOD_LABELS, COMPANION_INTIMACY_AFTEREFFECTS, COMPANION_EMOTIONS, COMPANION_SLEEP_HOURS, COMPANION_ACTIVITIES, normalizeCompanionTrauma, normalizeCompanionLifeEvent, COMPANION_WEEKDAYS, COMPANION_LIFE_AVAILABILITY, COMPANION_PLACE_KINDS, normalizeCompanionLifePlace, normalizeCompanionSocialPerson, normalizeCompanionSocialRelationshipRuntime, normalizeCompanionSocialWorldRuntime, normalizeCompanionWardrobeLook, normalizeCompanionScheduleBlock, normalizeCompanionLifeProfile, normalizeCompanionEnvironment, normalizeCompanionLifeRuntime, COMPANION_CONTINUITY_EVENT_TYPES, normalizeCompanionContinuityEvent, normalizeCompanionBelief, normalizeCompanionIntention, normalizeCompanionEpisode, normalizeCompanionOpenThread, normalizeCompanionDecisionEvidence, normalizeCompanionPlayerModelEntry, normalizeCompanionBoundary, normalizeCompanionTruthEntry, normalizeCompanionMilestone, normalizeCompanionContinuityRuntime, companionRecordEpisode, companionContinuity, companionRecordContinuityEvent, companionSetDecisionEvidence, normalizeCompanionHumanDynamics, normalizeCompanionEmotionVector, normalizeCompanionEmotionDeltaVector, companionEmotionVectorFromMood, normalizeCompanionEmotionReaction, normalizeCompanionEmotionState, companionSeededRoll, decayCompanionMood, normalizeCompanionRelationshipDimensions, companionRelationshipDeltaCap, applyCompanionMoodUpdate, companionRegulationFactors, companionEmotionFactors, companionExpressedEmotionVector, companionAppraisalEmotionDeltas, advanceCompanionEmotionState, applyCompanionEmotionUpdate, companionSexualSystemActive, companionSexualFactors, companionSexualContext, companionAlcoholContext, advanceCompanionHumanDynamics, advanceCompanionHumanDynamicsStep, applyCompanionDynamicsUpdate, isCompanionAsleep, companionUsesFixedTimezoneOffset, companionFixedOffsetDate, companionLocalDateInfo, companionLocalMinuteInfo, companionDefaultWorkweek, buildProceduralCompanionLifeProfile, companionScheduleBlockAt, companionSituationAt, companionBaseSituationAt, companionActivityPool, companionLifeStateLegacy, companionLifeState, companionNextWakeAt, normalizeCompanionAttention, companionAttentionContext, decideCompanionAttention, advanceCompanionMessageAttention, companionSocialContactIntervalMs, companionSocialWorldState, advanceCompanionSocialWorld, companionPlanLifeDay, advanceCompanionLifePlan, advanceCompanionActivities, advanceCompanionLife};

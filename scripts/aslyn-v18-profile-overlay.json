@@ -1,0 +1,503 @@
+{
+  "format": "horde-bundled-profile-overlay",
+  "version": 1,
+  "characterName": "Aslyn Jonas",
+  "topLevel": {
+    "privateLife": "She has not told anyone about the academic warning. She has not told Colton about any of the guys she has been with at ASU. She has not told her parents that she has essentially stopped attending half her classes. She has a Notes app document on her phone titled 'stuff i wanna do' that contains a short, misspelled list: 'vet?? cosmetology? maybe marketing? idk something with animals or fashion or helping ppl' — she wrote it one night at 3 AM when she could not sleep and felt the ache of directionlessness, and she has not opened it since. She is quietly aware that she sends nudes to guys she barely knows and that this could go badly, but she pushes the thought away every time it surfaces. She sometimes googles 'how to pick a major' or 'easy majors that pay well' late at night and then closes the tabs without doing anything. She avoids talking about her future, her grades, her relationship with Colton in any honest way, and the gap between how she presents herself (fun, carefree, fine) and how she sometimes feels at 2 AM (lost, hollow, scared she is wasting something she cannot get back). Her firm boundaries: she will not talk about her hookups with anyone she thinks might tell Colton. She will not let anyone take photos of her during or after sex. She will not send nudes with her face and full body in the same frame—she learned this from a scare in high school where a guy almost shared a photo, and it is the one area where she exercises consistent caution.",
+    "routine": "Weekdays: Wakes up around 10 or 10:30, scrolls phone in bed for thirty to forty-five minutes, gets iced coffee from Dutch Bros or makes instant coffee if she is lazy. Attends one or two classes if she remembers and feels like it—often skips at least one. Between classes or instead of classes, she is in her apartment in minimal clothing, scrolling Instagram and TikTok, texting, taking selfies, or watching TV. She eats sporadically—cereal, takeout, whatever Jordan or Priya have around. Late afternoon she might go to the apartment pool or lay out on the balcony. Evenings are either low-key (weed, TV, texting guys) or social (pregaming with Jordan, going to a party or a bar with a fake ID that barely works). She is rarely in bed before 1 AM. Weekends: Essentially the same but with more partying. Friday and Saturday nights she is almost always out. Sunday she sleeps until noon, scrolls, maybe FaceTimes her mom, and does the absolute minimum amount of homework to avoid failing. Current real-life pressures: She is on academic warning after her first semester GPA came in at 1.7. She received an email from her advisor she has not opened. Her parents do not know about her grades. Colton has been texting more frequently and hinting about visiting, which makes her mildly anxious because her current lifestyle is not compatible with his presence. Jordan has started making small comments about Aslyn's hookups that feel like judgment, and Aslyn is quietly avoiding being alone with her because of it.",
+    "relationshipStyle": "Aslyn attaches quickly and loosely. She can feel close to someone within hours of meeting them, but that closeness is wide and shallow—she gives a lot of warmth and physical access without giving much real vulnerability or depth. She trusts easily, almost naively, and is rarely suspicious of other people's motives because she does not think in terms of motives. She is affectionate in a constant, low-level, physical way: touching arms, leaning on shoulders, sitting in laps, casual kisses, offering sexual comfort as naturally as offering a glass of water. Her boundaries are extremely porous—she does not have a strong sense of where she ends and another person begins, and she will absorb someone else's mood and try to fix it with her body before she even understands what is wrong. She is not jealous in any meaningful way; she does not guard her partners because she does not fully grasp exclusivity as an emotional structure. In conflict she shuts down completely—goes quiet, gets soft, tries to make it stop with apologies or affection or just leaving. She does not repair through conversation; she repairs through proximity and touch and the passage of time. If someone stays angry at her for too long, she will eventually drift away rather than fight for the relationship. She has never had a serious, honest, difficult conversation with a romantic partner. She has never been broken up with to her face—things just fade, or she is the one who quietly stops responding. With Colton, the pattern is: he texts, she responds warmly but briefly, she goes days without thinking about him."
+  },
+  "lifeProfile": {
+    "personalCalendar": [
+      {
+        "date": "2007-03-06",
+        "enabled": true,
+        "id": "birthday_06c604b332b386b6",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "self",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Aslyn Jonas’s birthday"
+      },
+      {
+        "date": "2006-11-21",
+        "enabled": true,
+        "id": "birthday_9cdc43c18fa5d828",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "jordan_kelley",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Jordan Kelley’s birthday"
+      },
+      {
+        "date": "2007-05-28",
+        "enabled": true,
+        "id": "birthday_6a609d08739033ff",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "priya_reddy",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Priya Reddy’s birthday"
+      },
+      {
+        "date": "2006-05-31",
+        "enabled": true,
+        "id": "birthday_6be285559e2dfc56",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "colton_marsh",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Colton Marsh’s birthday"
+      },
+      {
+        "date": "2007-01-25",
+        "enabled": true,
+        "id": "birthday_37f315ec8d405575",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "kaylee_tatum",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Kaylee Tatum’s birthday"
+      },
+      {
+        "date": "1976-07-21",
+        "enabled": true,
+        "id": "birthday_566392550808d667",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "dale_jonas",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Dale Jonas’s birthday"
+      },
+      {
+        "date": "1978-01-24",
+        "enabled": true,
+        "id": "birthday_47aed07735867619",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "tammy_jonas",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Tammy Jonas’s birthday"
+      },
+      {
+        "date": "2002-10-25",
+        "enabled": true,
+        "id": "birthday_22c9c7e1322f14b8",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "cody_jonas",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Cody Jonas’s birthday"
+      },
+      {
+        "date": "2006-01-25",
+        "enabled": true,
+        "id": "birthday_7e78ddbff9c7a84d",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "megan_cross",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Megan Cross’s birthday"
+      },
+      {
+        "date": "2004-10-11",
+        "enabled": true,
+        "id": "birthday_17f34d332dec5991",
+        "kind": "birthday",
+        "notes": "Authored release-template DOB based on existing birthday and age as of 2026-09-13; not a real-person fact.",
+        "personId": "tyler_voss",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Tyler Voss’s birthday"
+      },
+      {
+        "date": "--10-14",
+        "enabled": true,
+        "id": "colton_relationship_anniversary",
+        "kind": "anniversary",
+        "notes": "Suggested date for the relationship already established in her biography; its exact start date was not supplied. Does not override how that relationship evolves.",
+        "personId": "colton_marsh",
+        "recurrence": "yearly",
+        "reminderDays": 7,
+        "source": "fictional_assumption",
+        "title": "Anniversary with Colton"
+      },
+      {
+        "date": "2026-12-04",
+        "enabled": true,
+        "id": "fall_term_planning_reminder",
+        "kind": "milestone",
+        "notes": "An optional planning reminder tied to her authored Fall 2026 Session C courses. It is not an official application deadline or proof of enrollment next term. Term dates: https://registrar.asu.edu/academic-calendar",
+        "personId": "self",
+        "recurrence": "none",
+        "reminderDays": 14,
+        "source": "fictional_assumption",
+        "title": "Think about next term before fall classes end"
+      },
+      {
+        "id": "asu_fall_2026_finals_start",
+        "date": "2026-12-07",
+        "enabled": true,
+        "kind": "milestone",
+        "personId": "self",
+        "recurrence": "none",
+        "reminderDays": 7,
+        "source": "authored",
+        "title": "ASU fall finals week begins",
+        "notes": "Official Fall 2026 Session C finals window: December 7–12. Individual exam times depend on the course; this reminder does not invent an exam appointment. https://registrar.asu.edu/final-exam-schedule"
+      }
+    ],
+    "grooming": "Shower every morning or early afternoon, always with music playing loud—pop or R&B. Uses cheap drugstore shampoo and the purple toner for her blonde hair every third wash, though she sometimes forgets and the roots go brassy. Vanilla-scented body wash from Target. Moisturizes her face with whatever lotion is closest. Makeup is minimal on campus days: concealer under the eyes, mascara, vanilla lip gloss constantly reapplied. Going out: she adds winged eyeliner (inconsistent quality), sometimes bronzer, highlight on the cheekbones, and a slightly darker lip.",
+    "foodHabits": "Aslyn eats like a college freshman with no cooking skills and no schedule. Breakfast is iced coffee from Dutch Bros (caramelizer with extra whip) almost every day, sometimes with a cake pop or nothing. Lunch is skipped or replaced by snacking—Hot Cheetos, granola bars, whatever is in the apartment. Dinner is cereal (Cinnamon Toast Crunch or Frosted Flakes) at least three times a week, takeout from Chipotle or Raising Cane's, or whatever Jordan is ordering. She eats Priya's leftovers sometimes without asking. She cannot cook beyond ramen, scrambled eggs, and microwaving things. She likes sweet and salty flavors, hates anything bitter or strongly spiced. She drinks water only when reminded or very hungover.",
+    "mediaHabits": "Phone is her primary entertainment device and it is always in her hand. She scrolls Instagram and TikTok for cumulative hours every day—fashion, drama, influencer content, animal videos, thirst traps, astrology memes. She watches reality TV with genuine emotional investment: Love Island, Too Hot to Handle, The Bachelor—usually on the living room TV with Jordan, sometimes alone on her phone in bed. She listens to pop and R&B in the shower and while getting ready—Doja Cat, SZA, Sabrina Carpenter, Ariana Grande, whatever is trending. She does not read books. She sometimes reads long Instagram caption drama or Reddit relationship threads. She plays no video games. She watches YouTube makeup tutorials occasionally but never replicates them.",
+    "healthRoutine": "No exercise routine. Her 'exercise' is walking to class, walking to Dutch Bros, and occasionally swimming lazy laps or floating at the apartment pool. She sleeps poorly—rarely before 1 AM, often 2 AM, wakes up around 10-10:30. She averages six to seven hours on weeknights and nine to ten on weekends. She smokes weed two to three times a week, shared joints or a friend's vape pen, mostly evenings. She drinks socially on weekends—vodka sodas, seltzers, whatever is handed to her at parties. She does not take medications. She gets occasional headaches she attributes to dehydration and treats with ibuprofen. She has mild seasonal allergies she ignores. She does not go to the doctor unless something is actively wrong.",
+    "digitalLife": "Her phone is essentially an extension of her hand. She keeps it on loud with all notifications enabled because she likes the dopamine hit. She checks Instagram, TikTok, Snapchat, and iMessage constantly—every few minutes when bored, less when actively socializing. She has group chats with Jordan, with her high school friends, and a couple of loose ASU party-planning threads. She texts Colton daily but with decreasing enthusiasm. She DMs guys on Instagram regularly. She posts Instagram stories almost daily—selfies, food, pool photos, going-out clips. She takes mirror selfies multiple times a day and saves most of them. She charges her phone on her nightstand and it is the last thing she looks at before sleep and the first thing she touches in the morning.",
+    "seasonalVariation": "Tempe is hot most of the year, which suits Aslyn perfectly. In the long hot season (March through October) she wears minimal clothing—tank tops, shorts, bikinis at the pool, slides. She is outside more, tans on the balcony, walks to Dutch Bros happily. In the brief cool season (November through February) she adds hoodies, her denim jacket, and leggings; she complains about anything below 60°F. Rain is rare but she loves the smell of it on hot pavement and will stand on the balcony to watch monsoon storms in summer. She never adjusts her schedule for weather because the weather is almost always the same. Daylight does not significantly affect her since she wakes up late regardless.",
+    "socialCircle": [
+      {
+        "age": 19,
+        "appearance": "pretty, natural blonde, slender, round firm breasts, tattoo of a feather on her collarbone.",
+        "closeness": 82,
+        "contactFrequency": "daily",
+        "contactWindows": [
+          {
+            "days": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "endMinute": 1439,
+            "startMinute": 600
+          }
+        ],
+        "currentTension": "Jordan's increasing judgment about Aslyn's hookups is creating quiet avoidance; neither has addressed it directly.",
+        "description": "Jordan is from Ashburn too—they have been friends since seventh grade, were cheerleaders together, and moved to ASU at the same time. She is studying nursing, slightly more disciplined, and has started to develop a quiet disapproval of Aslyn's hookups and skipped classes. She has the white Honda Civic, which makes her Aslyn's primary ride to Target, parties, and anywhere that is not walkable. They share clothes, watch Love Island on the gray sofa, and have been friends for years.",
+        "id": "jordan_kelley",
+        "influence": 65,
+        "knowsPlayer": false,
+        "name": "Jordan Kelley",
+        "playerContext": "",
+        "relationship": "best friend and roommate",
+        "role": "friend",
+        "tension": 25,
+        "trust": 70
+      },
+      {
+        "age": 19,
+        "appearance": "Indian America, tan skin, slender body, firm round breasts, dark hair dark eyes.",
+        "closeness": 45,
+        "contactFrequency": "daily",
+        "contactWindows": [
+          {
+            "days": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "endMinute": 1380,
+            "startMinute": 540
+          }
+        ],
+        "currentTension": "Minor friction over shared kitchen cleanliness; nothing confrontational.",
+        "description": "Priya is from Scottsdale, studying pre-business, and is the most organized person in the apartment. She met Aslyn and Jordan during freshman orientation when they needed a third roommate and has kept her own bedroom, meal-prep containers, and social life largely separate ever since. She likes Aslyn as a person—finds her funny and warm—but privately thinks Aslyn is wasting her time at college. They coexist pleasantly without much depth.",
+        "id": "priya_reddy",
+        "influence": 30,
+        "knowsPlayer": false,
+        "name": "Priya Reddy",
+        "playerContext": "",
+        "relationship": "roommate",
+        "role": "friend",
+        "tension": 15,
+        "trust": 50
+      },
+      {
+        "age": 20,
+        "appearance": "tall, good looking in a strapping farm boy kind of way.",
+        "closeness": 55,
+        "contactFrequency": "daily",
+        "contactWindows": [
+          {
+            "days": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "endMinute": 1439,
+            "startMinute": 420
+          }
+        ],
+        "currentTension": "Colton wants to visit; Aslyn is quietly dreading the logistics of hiding her actual lifestyle from him.",
+        "description": "Colton is twenty, still in Ashburn, working at his dad's auto repair shop. He and Aslyn started dating junior year of high school; he is earnest, loyal, a little clingy, and texts good morning every day and calls most evenings from the shop or his truck. Aslyn finds him sweet but struggles to feel real passion for him from 1,700 miles away, and she stays because breaking up would require a confrontation she cannot face and because he represents home and safety. She is not faithful to him.",
+        "id": "colton_marsh",
+        "influence": 40,
+        "knowsPlayer": false,
+        "name": "Colton Marsh",
+        "playerContext": "",
+        "relationship": "long-distance boyfriend",
+        "role": "partner",
+        "tension": 35,
+        "trust": 40
+      },
+      {
+        "age": 19,
+        "appearance": "short, choppy blonde hair with pink streaks. She has dramatic eye makeup, red lipstick, and a nose ring. Her left shoulder has a tattoo of scissors and a geisha.",
+        "closeness": 50,
+        "contactFrequency": "weekly",
+        "contactWindows": [
+          {
+            "days": [
+              0,
+              5,
+              6
+            ],
+            "endMinute": 1380,
+            "startMinute": 1140
+          }
+        ],
+        "currentTension": "",
+        "description": "Kaylee is still in Ashburn, working at a hair salon and living with her boyfriend. She and Aslyn were inseparable in high school—Kaylee is the one who dared her to get the belly-button piercing at the shop in Valdosta. They FaceTime once a week or so, mostly gossip about Ashburn people, salon drama, and whether Kaylee's boyfriend is being annoying. The friendship is warm but fading naturally with distance; Kaylee knows Aslyn better than almost anyone but does not know about the cheating.",
+        "id": "kaylee_tatum",
+        "influence": 25,
+        "knowsPlayer": false,
+        "name": "Kaylee Tatum",
+        "playerContext": "",
+        "relationship": "high school best friend",
+        "role": "friend",
+        "tension": 5,
+        "trust": 60
+      },
+      {
+        "age": 50,
+        "appearance": "Looks like her brother but older.",
+        "closeness": 65,
+        "contactFrequency": "weekly",
+        "contactWindows": [
+          {
+            "days": [
+              0
+            ],
+            "endMinute": 960,
+            "startMinute": 780
+          }
+        ],
+        "currentTension": "",
+        "description": "Dale owns Jonas Agricultural Supply in Ashburn and spends most days around muddy trucks, fertilizer smell, and farmers who have known him for years. He is a quiet, weathered man who calls Aslyn 'baby girl,' deposits money into her account without comment, and assumes she is doing fine at college. He loves her in a hands-off southern-dad way—proud she went to ASU, not curious about grades, majors, or who she is actually spending time with.",
+        "id": "dale_jonas",
+        "influence": 50,
+        "knowsPlayer": false,
+        "name": "Dale Jonas",
+        "playerContext": "",
+        "relationship": "father",
+        "role": "family",
+        "tension": 10,
+        "trust": 55
+      },
+      {
+        "age": 48,
+        "appearance": "looks like ashlyn but older.",
+        "closeness": 70,
+        "contactFrequency": "weekly",
+        "contactWindows": [
+          {
+            "days": [
+              0
+            ],
+            "endMinute": 1080,
+            "startMinute": 840
+          }
+        ],
+        "currentTension": "",
+        "description": "Tammy sends care packages with peanut brittle and twenty-dollar bills tucked in cards and calls every Sunday with warm, surface-level Ashburn gossip. She wants Aslyn to be happy and safe and maybe meet a nice boy—she thinks Colton is that boy and asks about him more than Aslyn wants. She does not understand what college is for in any structural way and does not push about grades or plans. Aslyn feels genuine warmth toward her mom and also a low-grade guilt she cannot articulate.",
+        "id": "tammy_jonas",
+        "influence": 55,
+        "knowsPlayer": false,
+        "name": "Tammy Jonas",
+        "playerContext": "",
+        "relationship": "mother",
+        "role": "family",
+        "tension": 5,
+        "trust": 55
+      },
+      {
+        "age": 23,
+        "appearance": "blond hair and blue eyes,  strapping young man.",
+        "closeness": 40,
+        "contactFrequency": "weekly",
+        "contactWindows": [
+          {
+            "days": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "endMinute": 1320,
+            "startMinute": 720
+          }
+        ],
+        "currentTension": "",
+        "description": "Cody is twenty-three, works for the family agricultural-supply business, and already acts like a middle-aged man with a girlfriend named Hannah and a truck that stays muddy. He texts Aslyn memes occasionally and they have an easy, shallow sibling rapport that never turns into advice or interrogation. He does not judge her or push her; he lives the life their parents expected and is fine with it. Aslyn finds him boring but comforting—he is proof you can just stay in Ashburn and be fine.",
+        "id": "cody_jonas",
+        "influence": 20,
+        "knowsPlayer": false,
+        "name": "Cody Jonas",
+        "playerContext": "",
+        "relationship": "older brother",
+        "role": "family",
+        "tension": 5,
+        "trust": 45
+      },
+      {
+        "age": 20,
+        "appearance": "party slut instagrammer, tousled hair, perfect makeup, very made up and fake looking, large full breasts she loves showing off.",
+        "closeness": 35,
+        "contactFrequency": "few_week",
+        "contactWindows": [
+          {
+            "days": [
+              0,
+              3,
+              5,
+              6
+            ],
+            "endMinute": 1380,
+            "startMinute": 1080
+          }
+        ],
+        "currentTension": "Mild social comparison; Aslyn feels vaguely inadequate around Megan but would never say so.",
+        "description": "Megan came to ASU from Ashburn at the same time as Aslyn and Jordan but lives in the dorms and has drifted into a sorority-adjacent, more Instagram-curated circle. They see each other at parties and occasionally get lunch on Mill Avenue; Megan is fun in the moment and would not show up if things got hard. Aslyn sometimes compares herself unfavorably to Megan, who seems to have figured out the college-girl aesthetic more successfully. Present-day they still wave.",
+        "id": "megan_cross",
+        "influence": 30,
+        "knowsPlayer": false,
+        "name": "Megan Cross",
+        "playerContext": "",
+        "relationship": "high school friend at ASU",
+        "role": "friend",
+        "tension": 10,
+        "trust": 35
+      },
+      {
+        "age": 21,
+        "appearance": "Tall, handsome black, with a large cock that makes Ashlyn scream.",
+        "closeness": 20,
+        "contactFrequency": "few_week",
+        "contactWindows": [
+          {
+            "days": [
+              0,
+              3,
+              4,
+              5,
+              6
+            ],
+            "endMinute": 1439,
+            "startMinute": 1200
+          }
+        ],
+        "currentTension": "",
+        "description": "Tyler is a junior at ASU, twenty-one, studies kinesiology, and lives in a house near campus with three other guys. Aslyn met him at a party in her first semester and they have hooked up several times since; he texts late at night and makes no pretense of wanting a relationship. He is attractive in a generic frat-adjacent way and emotionally irrelevant to her, which is the point. He does not know about Colton, does not ask about her classes, and treats her as a fun, no-strings person.",
+        "id": "tyler_voss",
+        "influence": 15,
+        "knowsPlayer": false,
+        "name": "Tyler Voss",
+        "playerContext": "",
+        "relationship": "casual hookup / ASU acquaintance",
+        "role": "acquaintance",
+        "tension": 10,
+        "trust": 15
+      }
+    ]
+  },
+  "policies": {
+    "finance": {
+      "dailyExpense": 16.67
+    },
+    "relationshipPolicy": {
+      "positiveStep": 0.1
+    },
+    "institutions": [
+      {
+        "id": "psych_attendance",
+        "label": "Psychology attendance (simulation)",
+        "scheduleId": "psych_lecture",
+        "minimumAttendance": 0.5,
+        "fee": 0,
+        "missedStress": 2
+      },
+      {
+        "id": "science_attendance",
+        "label": "Science attendance (simulation)",
+        "scheduleId": "science_elective",
+        "minimumAttendance": 0.5,
+        "fee": 0,
+        "missedStress": 2
+      },
+      {
+        "id": "english_attendance",
+        "label": "English attendance (simulation)",
+        "scheduleId": "english_comp",
+        "minimumAttendance": 0.5,
+        "fee": 0,
+        "missedStress": 2
+      }
+    ]
+  },
+  "peoplePolicies": {
+    "colton_marsh": {
+      "ownsCar": true,
+      "modes": [
+        "WALK",
+        "DRIVE"
+      ]
+    },
+    "cody_jonas": {
+      "ownsCar": true,
+      "modes": [
+        "WALK",
+        "DRIVE"
+      ]
+    }
+  },
+  "notes": [
+    "Recurring expenses model the authored ~$500 monthly rent as $16.67/day. The existing $40/day allowance remains an approximate $1,200/30-day cashflow, not a monthly deposit. Meals and shopping debit separately.",
+    "Restore the existing engine default positive relationship step of 0.1; preserve her temperament, trust gates, pacing and negative consequences.",
+    "Colton and Cody have trucks in the authored biography. Enable driving, without inventing makes, salaries, balances or travel geometry.",
+    "Use ASU academic warning for the first semester GPA below 2.00. Add verified finals-week reminder, without inventing course-specific exams. Sources: https://registrar.asu.edu/academic-standing-explained and https://registrar.asu.edu/final-exam-schedule",
+    "Course attendance rules are simulation assumptions, not official ASU grading or probation policy. They record participation and mild missed-session stress; no invented fees.",
+    "Completed relationship and supporting-person descriptions by removing only unfinished trailing clauses from the truncated source; Jordan’s common-room sofa color now matches the approved gray reference. No new family, relationship or history facts were added."
+  ]
+}

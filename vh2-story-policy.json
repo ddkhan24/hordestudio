@@ -1,0 +1,31 @@
+{
+  "intensity": {
+    "default": 0,
+    "min": 0,
+    "max": 100
+  },
+  "social": {
+    "default": 50,
+    "min": 0,
+    "max": 100
+  },
+  "novelty": {
+    "default": 50,
+    "min": 0,
+    "max": 100
+  },
+  "complications": {
+    "default": 20,
+    "min": 0,
+    "max": 100
+  },
+  "recoveryHours": {
+    "default": 18,
+    "min": 6,
+    "max": 72
+  },
+  "adviserEnabled": {
+    "type": "boolean",
+    "default": false
+  }
+}

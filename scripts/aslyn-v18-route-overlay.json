@@ -1,0 +1,8 @@
+{
+  "oldSource": "OpenStreetMap / Geofabrik; walking network with estimated entrance connections and 4.5 km/h walking speed",
+  "oldRouteCount": 1428,
+  "newPack": "world-packs/tempe-core.json",
+  "bindings": {
+    "osm:way/28822637": "memorial_union"
+  }
+}

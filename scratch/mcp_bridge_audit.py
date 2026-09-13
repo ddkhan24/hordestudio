@@ -27,7 +27,7 @@ class McpBridgeAudit(unittest.TestCase):
         self.assertEqual(put.call_args.kwargs["method"], "PUT")
         self.assertTrue(source["references"][0]["identifier"].startswith("data:"))
 
-    @mock.patch.object(bridge, "http_request", return_value=(500, {}, b""))
+    @mock.patch.object(bridge, "http_request", return_value=(400, {}, b""))
     @mock.patch.object(bridge, "call_tool", return_value={"structuredContent":{"proxyUploadUrl":"https://upload.invalid/put", "path":"temporary/path"}})
     def test_magnific_failed_upload_does_not_finalize(self, call, put):
         with self.assertRaisesRegex(RuntimeError, "upload failed"):
@@ -289,6 +289,60 @@ class McpBridgeAudit(unittest.TestCase):
         self.assertEqual(endpoint, "alibaba/wan-3.0/reference-to-video")
         self.assertEqual(payload["reference_image_urls"], [reference])
 
+    def test_video_reference_routes_never_drop_assets(self):
+        refs = ['data:image/png;base64,YQ==', 'data:image/png;base64,Yg==']
+        endpoint, payload, _, _ = bridge._hotapi_video_request('seedance-2.0-spicy', 'Image 1 holds Image 2', '', 8, '1080P', '9:16', 7, reference_image_urls=refs)
+        self.assertTrue(endpoint.endswith('/reference-to-video'))
+        self.assertEqual(payload['reference_image_urls'], refs)
+        self.assertEqual(payload['resolution'], '1080p')
+        with self.assertRaises(ValueError):
+            bridge._hotapi_video_request('wan-2.2-spicy', 'scene', '', 8, '480P', '9:16', 7, reference_image_urls=refs)
+        with self.assertRaises(ValueError):
+            bridge._fal_video_request('alibaba/wan-3.0-prime', {}, 'scene', '', refs, 8, '480P', '9:16', 7)
+        with self.assertRaises(ValueError):
+            bridge._fal_video_request('alibaba/wan-3.0', {}, 'scene', '', refs * 6, 8, '480P', '9:16', 7)
+
+    def test_hotapi_expanded_catalog_routes_and_limits(self):
+        refs = ['https://example.com/identity.png', 'https://example.com/room.png']
+        self.assertEqual(len(bridge.HOTAPI_VIDEO_RENDERERS), 11)
+        for model in bridge.HOTAPI_VIDEO_RENDERERS:
+            with self.subTest(model=model):
+                multi = model in bridge.HOTAPI_REFERENCE_LIMITS
+                endpoint,payload,duration,resolution = bridge._hotapi_video_request(model, 'scene', '' if multi else refs[0], 30, '4K', '9:16', 7, reference_image_urls=refs if multi else [])
+                self.assertIn(model,endpoint)
+                if multi:self.assertEqual(payload['reference_image_urls'],refs)
+                if model.startswith('berry-') and '-pro-' in model:self.assertEqual(resolution,'4k')
+                if model=='seedance-2.5-spicy':self.assertEqual(duration,30);self.assertNotIn('seed',payload)
+                if model=='seedance-2.0-mini-spicy':self.assertEqual(duration,15);self.assertEqual(resolution,'720p')
+                if model=='wan-2.2-spicy':self.assertEqual(duration,8);self.assertNotIn('generate_audio',payload)
+        with self.assertRaises(ValueError):bridge._hotapi_video_request('wan-2.7-spicy','scene','',5,'768P','9:16',1)
+        with self.assertRaises(ValueError):bridge._hotapi_video_request('seedance-2.0-mini-spicy','scene','',5,'480P','9:16',1,reference_image_urls=refs*5)
+
+    @mock.patch.object(bridge, 'download_hotapi_video', return_value=(Path('/tmp/mock.mp4'), 1234))
+    @mock.patch.object(bridge, 'hotapi_json_request')
+    @mock.patch.object(bridge, 'hotapi_upload_image')
+    def test_berry_uploads_all_references_and_preserves_30_second_4k_request(self, upload, request, download):
+        upload.side_effect=['https://example.com/a.png','https://example.com/b.png']
+        request.side_effect=[{'id':'job'}, {'status':'succeeded','output':{'video_url':'https://example.com/result.mp4'}}]
+        result=bridge.generate_hotapi_video({'apiKey':'fixture','prompt':'scene','models':['berry-1.0-pro-spicy'],'referenceImageDataUrls':['data:image/png;base64,YQ==','data:image/png;base64,Yg=='],'duration':30,'resolution':'4K','aspectRatio':'9:16','generateAudio':False})
+        payload=request.call_args_list[0].kwargs['payload']
+        self.assertEqual(payload['reference_image_urls'],['https://example.com/a.png','https://example.com/b.png'])
+        self.assertFalse(payload['generate_audio']);self.assertEqual(payload['resolution'],'4k');self.assertEqual(result['duration'],30)
+
+    def test_all_seedance_reference_routes_upload_before_submission(self):
+        for model in ('seedance-2.0-mini-spicy','seedance-2.0-fast-spicy','seedance-2.0-spicy','seedance-2.5-spicy'):
+            with self.subTest(model=model), mock.patch.object(bridge,'hotapi_upload_image',side_effect=['https://example.com/a.png','https://example.com/b.png']) as upload, mock.patch.object(bridge,'hotapi_json_request',side_effect=[{'id':'job'},{'status':'succeeded','output':{'video_url':'https://example.com/clip.mp4'}}]) as request, mock.patch.object(bridge,'download_hotapi_video',return_value=(Path('/tmp/mock.mp4'),1234)):
+                bridge.generate_hotapi_video({'apiKey':'fixture','models':[model],'prompt':'scene','referenceImageDataUrls':['data:image/png;base64,YQ==','data:image/png;base64,Yg==']})
+                self.assertEqual(upload.call_count,2)
+                self.assertEqual(request.call_args_list[0].kwargs['payload']['reference_image_urls'],['https://example.com/a.png','https://example.com/b.png'])
+                self.assertTrue(request.call_args_list[0].args[0].endswith('/reference-to-video'))
+
+    def test_reference_upload_failure_does_not_submit_video(self):
+        with mock.patch.object(bridge,'hotapi_upload_image',side_effect=RuntimeError('Upload failed')), mock.patch.object(bridge,'hotapi_json_request') as request:
+            with self.assertRaisesRegex(RuntimeError,'Upload failed'):
+                bridge.generate_hotapi_video({'apiKey':'fixture','models':['seedance-2.0-mini-spicy'],'prompt':'scene','referenceImageDataUrls':['data:image/png;base64,YQ==']})
+            request.assert_not_called()
+
     def test_fal_input_contract_rejects_invalid_resolution_and_frame(self):
         with self.assertRaises(ValueError):
             bridge.generate_fal_video({"apiKey": "x", "prompt": "shot", "resolution": "4K"})
@@ -335,7 +389,7 @@ class McpBridgeAudit(unittest.TestCase):
                 "appInstance": bridge.APP_INSTANCE_ID,
             }).encode(),
         )
-        with mock.patch.object(sys, "argv", ["horde_mcp_bridge.py"]):
+        with mock.patch.object(sys, "argv", ["horde_mcp_bridge.py"]), mock.patch.object(bridge, "get_vh2_service"):
             bridge.main()
 
     @mock.patch.object(bridge, "http_request")
@@ -368,7 +422,7 @@ class McpBridgeAudit(unittest.TestCase):
             ),
             (200, {"Content-Type": "application/json"}, b'{"ok":true}'),
         ]
-        with mock.patch.object(sys, "argv", ["horde_mcp_bridge.py"]):
+        with mock.patch.object(sys, "argv", ["horde_mcp_bridge.py"]), mock.patch.object(bridge, "get_vh2_service"):
             bridge.main()
         self.assertEqual(server.call_count, 2)
         shutdown = request.call_args_list[1]

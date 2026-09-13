@@ -1,53 +1,23 @@
 #!/usr/bin/env python3
-"""Fail a portable build when advertised Virtual Humans are not first-class files."""
-
-from pathlib import Path
-import re
-import sys
-
-
-BUNDLES = (
-    ("ashlyn-reynolds-human.js", "ashlyn-reynolds-v1"),
-    ("jane-harlow-human.js", "jane-harlow-v1"),
-)
-
-
-def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: verify-portable-humans.py APP_DIR")
-
-    app_dir = Path(sys.argv[1]).resolve()
-    html = (app_dir / "index.html").read_text(encoding="utf-8")
-    if "data-horde-bundled-human" in html:
-        raise SystemExit("portable index still contains fragile inline human scripts")
-    csp = re.search(
-        r'<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]*)"',
-        html,
-        flags=re.IGNORECASE,
-    )
-    if not csp:
-        raise SystemExit("portable index has no Content-Security-Policy")
-    script_src = re.search(r"script-src\s+([^;]+)", csp.group(1), flags=re.IGNORECASE)
-    if not script_src or "'self'" not in script_src.group(1).split():
-        raise SystemExit("portable CSP does not allow its first-class script files")
-
-    for filename, bundle_id in BUNDLES:
-        script_tag = re.search(
-            rf'<script\s+src="{re.escape(filename)}(?:\?[^\"]*)?"></script>',
-            html,
-            flags=re.IGNORECASE,
-        )
-        if not script_tag:
-            raise SystemExit(f"portable index does not load {filename}")
-        script_path = app_dir / filename
-        if not script_path.is_file():
-            raise SystemExit(f"portable package is missing {filename}")
-        source = script_path.read_text(encoding="utf-8")
-        if bundle_id not in source or "HORDE_INCLUDED_HUMANS" not in source:
-            raise SystemExit(f"{filename} is not a valid {bundle_id} built-in")
-
-    print("Portable built-in humans: first-class files loaded at application boot")
-
-
-if __name__ == "__main__":
-    main()
+"""Verify the shipped character catalog and every referenced local asset."""
+import hashlib,json,pathlib,sys
+root=pathlib.Path(sys.argv[1]);html=(root/'index.html').read_text()
+assert 'bundled-humans.js' in html and (root/'bundled-humans.js').is_file()
+for retired in ('ashlyn-reynolds-human.js','jane-harlow-human.js','Ashlyn Reynolds.horde_human'):
+ assert retired not in html and not (root/retired).exists(),retired
+catalog=json.loads((root/'assets/bundled/humans.json').read_text());assert len(catalog['humans'])==1
+for entry in catalog['humans']:
+ path=root/entry['path'];a=json.loads(path.read_text());c=a['companion'];assert a['_kind']=='character-template' and c['bundledId']==entry['id']
+ assert not a.get('timelines') and not a.get('vh2ServiceArchives')
+ inventory=json.loads((path.parent/'inventory.json').read_text())
+ for name,info in inventory['files'].items():
+  raw=(path.parent/name).read_bytes();assert len(raw)==info['bytes'] and hashlib.sha256(raw).hexdigest()==info['sha256'],name
+ def visit(v):
+  if isinstance(v,str) and v.startswith('assets/bundled/'):assert (root/v).is_file(),v
+  elif isinstance(v,dict):
+   for value in v.values():visit(value)
+  elif isinstance(v,list):
+   for value in v:visit(value)
+ visit(c)
+ for key,count in [('startingSocialPosts','posts'),('startingGallery','galleryPhotos'),('startingVideoClips','clips'),('startingReferences','references')]:assert len(c[key])==inventory[count]
+ print('Verified included',c['name'],{k:inventory[k] for k in ('posts','galleryPhotos','clips','references')})

@@ -74,10 +74,20 @@
         return { ...reaction, salience: Math.round(100 * Math.max(0, Math.min(1,
             (reaction.expiresAt - now) / Math.max(1, reaction.expiresAt - reaction.createdAt)))) };
     }
+    function handoffBrief(handoff){
+        return `Your ongoing conversation is about to be interrupted by ${handoff.activity}. You may finish the current thought and give a brief natural sign-off; silence is also an option. Do not invent having already left or fallen asleep. ${handoff.endsAt>handoff.at?`The activity is expected to end around ${new Date(handoff.endsAt).toISOString()}; any return estimate is tentative.`:'No return time is established; do not invent one.'}`;
+    }
+    function physicalBrief(companion={},compact=false){
+        const d=companion.humanDynamics||{},s=d.sleep;
+        if(!s)return '';
+        if(compact)return `Body: ${s.stage.replaceAll('_',' ')}, hunger ${Math.round(d.hunger||0)}, irritability ${Math.round(s.irritability)}. Let fatigue affect brevity/patience, not trust. Wind-down permits goodnight; invent no return time.`;
+        return `PHYSICAL STATE: ${s.stage.replaceAll('_',' ')}; sleep pressure ${Math.round(s.pressure)}/100; sleep debt ${Math.round(s.debtHours*10)/10} hours; hunger ${Math.round(d.hunger||0)}/100; physical irritability ${Math.round(s.irritability)}/100. Fatigue can shorten replies, reduce focus or make patience thinner; hunger can add irritability. Express this according to personality, not on every turn. These are bodily feelings, not anger at the player, reduced trust or evidence of rejection. When winding down, you may finish the exchange and say goodnight; waking means groggy, not instantly refreshed. Never fabricate a sleep event or promise an exact return time.`;
+    }
     function receptiveness(companion, situation = {}) {
         const dynamics = companion.humanDynamics || {};
         const reasons = [];
         if (situation.availability && situation.availability !== 'available') reasons.push(situation.availability);
+        if(dynamics.sleep&&dynamics.sleep.stage!=='awake')reasons.push(dynamics.sleep.stage.replaceAll('_',' '));
         if (Number(dynamics.energy) < 30) reasons.push('tired');
         if (Number(dynamics.stress) > 65) reasons.push('under stress');
         if (Number(dynamics.cooldownUntil) > Number(situation.now || 0)) reasons.push('taking time to regulate');
@@ -171,13 +181,14 @@
         if (impression?.engagement > 0 && !unavailable) add('interest','Stay with this exchange',impression.summary);
         const canMakeTime = !unavailable && situation.source === 'activity' && !!activity && activity.kind !== 'contact'
             && Number(dynamics.energy) >= 30;
-        return {candidates,sourceMessageId:latest?.id || '',canMakeTime,
+        return {activityReason:activity&&companion.lifeRuntime.activities.decision?.goalId===activity.id?companion.lifeRuntime.activities.decision.reason:'',candidates,sourceMessageId:latest?.id || '',canMakeTime,
             recentChoices:conversation.choices.slice(-3),
             expression:companion.emotionExpression || 'guarded'};
     }
     function decisionBrief(context) {
         return `PRIVATE CONVERSATIONAL CHOICE:
 Grounded possible motives: ${JSON.stringify(context.candidates)}.
+${context.activityReason?`The ongoing activity was selected for ${context.activityReason}. This explains existing behavior; do not recite it or invent completion.`:''}
 Choose what matters in this exchange using the authored personality and actual message. These are possibilities, not a rotation, diagnosis or requirement to announce a motive. Being tired need not become rejection; wanting company need not become flirting.
 Let that purpose shape a direct response in the person's voice. Leave most internal state unspoken. Do not invent an event, reason for leaving or promise to create texture.
 A voluntary short pause of the active solo task is ${context.canMakeTime ? 'available' : 'unavailable'}. If the visible reply actually chooses to make time and that fits a listed motive, optionally report conversation.choice with motiveId, action=make_time and an exact evidence quote from the latest perceived player message. Otherwise use action=none or omit choice. Keep promises in the existing commitments receipt; planning and preparing are not completion.
@@ -252,9 +263,9 @@ A first occurrence stays a first occurrence. Shared habits, “again”, or “l
 Only new relevant evidence merits lasting relationship changes. Enjoyment can shift mood without raising trust or familiarity.`;
     }
     function dialogueGuidance(messages, now = Date.now(), companion = {}, compact = false) {
-        if(compact)return relationshipGrounding(companion,messages,now)+"\nRespond to the actual question or disclosure in the authored voice. Do not merely evaluate the player, recycle a catchphrase, invent an event, or add a teasing retreat to every warm remark. A single word or emoji may be the complete reply. Length settings are ceilings, not quotas. Leave a finished thought finished.";
+        if(compact)return physicalBrief(companion,true)+"\n"+relationshipGrounding(companion,messages,now)+"\nRespond to the actual question or disclosure in the authored voice. Do not merely evaluate the player, recycle a catchphrase, invent an event, or add a teasing retreat to every warm remark. A single word or emoji may be the complete reply. Length settings are ceilings, not quotas. Leave a finished thought finished.";
         const patterns = dialoguePatterns(messages,now);
-        return `${relationshipGrounding(companion,messages,now)}\n\nCONVERSATION, NOT A PERFORMANCE:
+        return `${physicalBrief(companion)}\n${relationshipGrounding(companion,messages,now)}\n\nCONVERSATION, NOT A PERFORMANCE:
 Respond to what this message is doing in the exchange: a question, offer, disclosure, joke, disagreement or repair. Let the actual transcript decide; do not announce this analysis.
 A single word, short fragment or emoji can be a complete reply. Do not expand an adequate yes/no answer into a sentence, explanation or follow-up merely to sound personable. Length preferences are not minimums. Answer the substance before ornament. A plain answer, sincere admission, ordinary preference or brief acknowledgment can be the whole reply. Leave a thought finished when it is finished.
 Use this person's authored voice, but traits are tendencies, not required moves on every turn. Guarded means choosing what to disclose; it does not require mockery, coyness or contradicting every warm remark. Warmth can stand without a warning or put-down. Disagreement and boundaries can be direct without a polished comeback.
@@ -288,5 +299,5 @@ ${patterns.recurring.length ? `Recent replies reuse these fragments (quoted hist
     function playerFactsBrief(runtime,personaId){const facts=(runtime?.playerFacts||[]).filter(f=>f.personaId===(personaId||'__none__'));
         return facts.length?'REMEMBERED PLAYER DETAILS (their direct statements; retain across days, do not ask again without a reason):\n'+facts.map(f=>`${f.key}: ${f.value}`).join('\n'):'';
     }
-    return { stripPrivateChannels, relationshipGrounding, learnPlayerFacts, playerFactsBrief, decisionContext, decisionBrief, enactChoice, dialogueTurns, dialoguePatterns, dialogueGuidance, assessDialogue, normalize, update, receive, reactionContext, receptiveness, hasAffect, tokens, messageTokens, fitRequest };
+    return { handoffBrief, physicalBrief, stripPrivateChannels, relationshipGrounding, learnPlayerFacts, playerFactsBrief, decisionContext, decisionBrief, enactChoice, dialogueTurns, dialoguePatterns, dialogueGuidance, assessDialogue, normalize, update, receive, reactionContext, receptiveness, hasAffect, tokens, messageTokens, fitRequest };
 });

@@ -1,0 +1,15 @@
+'use strict';
+const assert=require('node:assert/strict'),core=require('../vh-simulation-core'),plans=require('../vh2-plans-engine');
+const vm=require('node:vm'),{buildContext}=require('./app_source');
+const c={id:'self',age:24,libidoEnabled:true,lifeProfile:{socialCircle:[{id:'jo',name:'Jo',age:23,role:'friend'}]},vh2Calendar:{ages:{self:{currentAge:25},jo:{currentAge:24}}},vh2Plans:{privateVisitPermissions:[{personId:'jo',personAge:23,enabled:true,allowIntimacy:false}],policy:{privateVisits:true}}};
+const p=c.lifeProfile.socialCircle[0];assert.equal(core.companionCurrentAge(c),25);assert.equal(core.companionCurrentAge(c,p),24);assert.equal(c.age,24);assert.equal(p.age,23);
+assert(core.companionAgeConfirmationMatches(c,p,23));assert(plans.permission(c,'jo'));
+c.vh2Calendar.ages.jo.currentAge=17;assert(!core.companionAgeConfirmationMatches(c,p,23));assert(!plans.permission(c,'jo'));
+c.vh2Calendar.ages.self.currentAge=17;assert(!core.companionSexualSystemActive(c));c.vh2Calendar.ages.self.currentAge=null;assert(!core.companionSexualSystemActive(c));
+const context=buildContext(vm,['applyBuiltCompanionProfile'],{COMPANION_BUILDER_FIELDS:['name','age'],getActiveCompanionTimeline:()=>({vh2:{simAt:Date.UTC(2026,8,13)}}),normalizeCompanion:c=>c});
+const profile={id:'builder-age',name:'Alex',age:24,lifeProfile:{personalCalendar:[]}};
+context.applyBuiltCompanionProfile(profile,{name:'Alex',age:24,dateOfBirth:'2002-05-01'});
+assert.equal(profile.lifeProfile.personalCalendar[0].date,'2002-05-01');assert.equal(profile.lifeProfile.personalCalendar[0].source,'authored');assert(!Object.hasOwn(profile,'dateOfBirth'));assert.equal(profile.age,24);
+assert.throws(()=>context.applyBuiltCompanionProfile(profile,{age:24,dateOfBirth:'2030-01-01'}),/birth date/);
+assert.throws(()=>context.applyBuiltCompanionProfile(profile,{age:24,dateOfBirth:'2001-02-29'}),/date of birth/);
+console.log('PASS calendar ages preserve authored age/permissions and respect adult boundaries');

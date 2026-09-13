@@ -1,0 +1,11 @@
+'use strict';
+const assert=require('node:assert/strict'),vm=require('node:vm'),{buildContext}=require('./app_source');
+const context={};buildContext(vm,['companionArchiveLifeSetup'],context);
+const link={setupProfile:{socialCircle:[{id:'friend'}],places:[{id:'home'},{id:'cafe'}]},executableSetup:{peopleLives:[{personId:'friend',policy:{homePlaceId:'home'}},{personId:'resident',policy:{homePlaceId:'home'}}],population:{residents:[{id:'friend'},{id:'resident'}]}},people:{actors:{friend:{placeId:'cafe',balance:41.25},resident:{placeId:'',journey:{from:'home',to:'cafe'},balance:99}}}};
+const before=JSON.stringify(link),result=context.companionArchiveLifeSetup(link);
+assert.deepEqual(JSON.parse(JSON.stringify(result.population.residents)),[{id:'resident'}]);
+assert.equal(result.peopleLives[0].initialPlaceId,'cafe');assert.equal(result.peopleLives[0].startingBalance,41.25);
+assert.equal(result.peopleLives[1].initialPlaceId,'home');assert.equal(result.peopleLives[1].startingBalance,99);
+assert.equal(JSON.stringify(link),before,'export cannot modify the active participant graph');
+link.executableSetup.peopleLives.push({personId:'orphan'});assert.throws(()=>context.companionArchiveLifeSetup(link),/missing from the character/);
+console.log('PASS export retains participant placement/budget, transit departure, known-vs-resident identity and active-life isolation');

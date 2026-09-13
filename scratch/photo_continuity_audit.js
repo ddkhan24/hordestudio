@@ -5,7 +5,7 @@ const ctx={console,companionPhotoCapturePlan:()=>({label:'Mirror selfie',instruc
 buildContext(vm,['buildCompanionPhotoPrompt','companionPhotoReferences'],ctx);
 const c={age:43,basePhoto:'identity',appearance:'UNWANTED_FACE_BODY_DETAILS',photoLocations:[{id:'bed',label:'bedroom',description:'Oak headboard',photo:'bedroom-image'}],lifeProfile:{wardrobe:[{id:'gym_set_b',items:'rose shorts'}]}};
 let prompt=ctx.buildCompanionPhotoPrompt(c,'Mirror selfie in bedroom wearing gym_set_b');
-assert(prompt.includes('43 years old'));assert(!prompt.includes(c.appearance));assert(!prompt.includes('virtual human'));assert(!prompt.includes('gym_set_b'));assert(prompt.includes('rose shorts'));assert(prompt.includes('second attached image'));
+assert(prompt.includes('43 years old'));assert(!prompt.includes(c.appearance));assert(!prompt.includes('virtual human'));assert(!prompt.includes('gym_set_b'));assert(prompt.includes('rose shorts'));assert(prompt.includes('Image 2: Environment: bedroom'));
 assert(ctx.buildCompanionPhotoPrompt(c,'Tea',{hasReference:false}).includes(c.appearance));
 assert(!prompt.includes('Appearance emphasis: large breasts'));
 c.photoLargeBreasts=true;

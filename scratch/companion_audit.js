@@ -106,7 +106,6 @@ buildContext(vm, [
     'companionEffectiveLifeBuilderModel',
     'companionBalancedJSONObjectBlocks', 'parseCompanionLifeJSONCandidate',
     'unwrapCompanionLifeObject', 'parseCompanionLifeResponsePayload',
-    'mergeCompanionLifeBuildWithStarter',
     'modelOutputModalities', 'normalizeTTSVoiceOptions', 'fallbackTTSVoicesForModel',
     'normalizeCompanionTTSProviderOptions', 'companionTTSCapabilities',
     'ttsResponseFormatForModel', 'buildCompanionTTSRequest',
@@ -1305,16 +1304,13 @@ test('Active Life repairs truncated JSON and unwraps nested provider envelopes',
     assert.equal(parsed.weeklySchedule[0].activity, 'work');
 });
 
-test('partial Active Life output keeps model details and fills missing editable sections locally', () => {
-    const companion = freshCompanion({ occupation: 'designer', locationLabel: 'Karachi' });
-    const merged = context.mergeCompanionLifeBuildWithStarter(companion, {
-        fashionSense: 'bright tailoring',
-        places: [{ id: 'studio', label: 'Design studio' }]
-    }, 1000);
-    assert.equal(merged.fashionSense, 'bright tailoring');
-    assert.equal(merged.places[0].id, 'studio');
-    assert(merged.weeklySchedule.length > 0);
-    assert(merged.wardrobe.length > 0);
+test('partial Active Life output stays explicit for the reviewed AI completion pipeline', () => {
+    const partial = context.parseCompanionLifeResponsePayload({choices:[{message:{content:JSON.stringify({fashionSense:'bright tailoring',places:[{id:'studio',label:'Design studio'}]})}}]});
+    assert.equal(partial.fashionSense, 'bright tailoring');
+    assert.equal(partial.places[0].id, 'studio');
+    assert.equal(partial.weeklySchedule, undefined);
+    assert.equal(partial.wardrobe, undefined);
+    assert(functionSource('buildCompanionLifeWithAI').includes('completeCompanionLifeDraftSections'));
 });
 
 test('manual Active Life authoring is a local starter that opens the editor without calling generation', () => {
@@ -1325,7 +1321,9 @@ test('manual Active Life authoring is a local starter that opens the editor with
     assert(start >= 0 && end > start);
     const handler = setup.slice(start, end);
     assert(handler.includes('buildProceduralCompanionLifeProfile'));
-    assert(handler.includes('renderCompanionLifeEditor'));
+    assert(handler.includes('vhBlueprintLifeSection'));
+    assert(!handler.includes('advanceCompanionLife'));
+    assert(!handler.includes('refreshCompanionEnvironment'));
     assert(!handler.includes('buildCompanionLifeWithAI'));
     assert(!handler.includes('fetch('));
 });
@@ -1353,7 +1351,7 @@ test('structured busy blocks defer replies until a natural break', () => {
     assert(message.readAt > mondayTen, 'a phone check is separate from being available to answer');
 });
 
-test('wildcard catch-up is seeded, bounded and never duplicates a day', () => {
+test('retired wildcard input cannot create events during catch-up', () => {
     const start = Date.UTC(2026, 0, 1, 12, 0);
     const c = freshCompanion({
         locationMode: 'custom', timezoneOffsetMinutes: 0,
@@ -1370,9 +1368,9 @@ test('wildcard catch-up is seeded, bounded and never duplicates a day', () => {
     });
     for (let day = 1; day <= 45; day++) context.advanceCompanionLife(c, start + day * 86400000);
     const ids = c.lifeEvents.filter(event => event.id.startsWith('vh_wildcard_')).map(event => event.id);
-    assert(ids.length > 0);
-    assert.equal(new Set(ids).size, ids.length);
-    assert(c.lifeRuntime.processedWildcardDays.length <= 45);
+    assert.equal(ids.length, 0);
+    assert.equal(c.lifeProfile.wildcardDeck, undefined);
+    assert.equal(c.lifeRuntime.activeWildcard, undefined);
 });
 
 test('sleep keeps a willing reply unread until it is opened after wake time', () => {

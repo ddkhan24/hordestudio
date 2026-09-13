@@ -1,0 +1,11 @@
+'use strict';
+const assert = require('node:assert/strict');
+const { browserOptions } = require('./browser_runtime');
+assert.deepEqual(browserOptions({}, 'linux', () => true), { headless: true });
+assert.deepEqual(browserOptions({}, 'win32', () => true), { headless: true });
+assert.deepEqual(browserOptions({}, 'darwin', () => false), { headless: true });
+assert.equal(browserOptions({}, 'darwin', () => true).executablePath, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+assert.equal(browserOptions({ HORDE_BROWSER_EXECUTABLE: '/fixture/browser' }, 'linux').executablePath, '/fixture/browser');
+assert.equal(browserOptions({ HORDE_BROWSER_EXECUTABLE: '/fixture/browser', HORDE_CHROME_EXECUTABLE: '/fixture/legacy' }, 'darwin').executablePath, '/fixture/browser');
+assert.equal(browserOptions({ HORDE_CHROME_EXECUTABLE: '/fixture/legacy' }, 'linux').executablePath, '/fixture/legacy');
+console.log('PASS portable browser discovery: explicit override, host Chrome, Playwright defaults');

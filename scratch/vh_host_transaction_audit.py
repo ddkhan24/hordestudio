@@ -126,3 +126,26 @@ result = json.loads(subprocess.check_output([node,str(root/'vh-host-worker.js')]
 assert result['openingDueAt'] == 0
 assert result['companion']['continuityRuntime']['originScenarioConsumedAt'] == now
 print('PASS explicit first contact works in the host and is consumed once')
+# A real host handoff is delivered once, and discarded if generation outlives it.
+for expires in [False, True]:
+    handoff_snapshot=copy.deepcopy(snapshot)
+    hc=handoff_snapshot['companion']
+    hc['initiativeMode']='balanced'
+    hc['humanDynamics']['sleep']={'stage':'winding_down','pressure':85,'lastAt':now,'windDownAt':now-300000,'lastWakeAt':now-57600000}
+    handoff_snapshot['messages']=[{'id':'u','role':'user','type':'text','text':'Long day?', 'timestamp':now-1000}, {'id':'c','role':'companion','type':'text','text':'yeah','timestamp':now-500}]
+    handoff_manifest=copy.deepcopy(manifest)
+    handoff_manifest['humans'][0]['simulation']=handoff_snapshot
+    hr=bridge.AlwaysOnRuntime(queue_file=Path(tempfile.mkdtemp())/'queue.json',start_thread=False)
+    clock=[now/1000]
+    with patch.object(bridge.time,'time',side_effect=lambda:clock[0]):
+        hr.sync(handoff_manifest);hr.last_heartbeat-=100
+        def farewell(human,kind):
+            assert human['handoff'] and 'sign-off' in human['dialogueGuidance']
+            if expires:clock[0]+=600
+            return {'decision':'message','text':'night','state':{}}
+        hr._generate=farewell;hr._tick()
+        published=hr.pending_events('test')
+        assert len(published)==(0 if expires else 1)
+        if published:assert published[0]['simulation']['companion']['continuityRuntime']['lastHandoffKey']
+        hr.stop()
+print('PASS background farewell reaches the transaction queue once; an expired farewell is discarded')

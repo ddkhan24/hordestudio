@@ -58,3 +58,7 @@ console.log('PASS actual Magnific TOON catalog, mode slugs, reference identifier
     assert.deepEqual(calls,['/health','/providers/magnific/generate']);
     console.log('PASS stale bridges blocked before generation; compatible bridge submits exactly once');
 })().catch(error=>{console.error(error);process.exitCode=1;});
+// The Reference Library model must override a stale MCP tool model for reference jobs.
+const referenceModelArgs=ctx.companionMcpGenerationArguments({...c,referenceImageSource:'higgsfield',imageModel:'selected-reference-model'},'Portrait',{photoContext:{referenceStudy:'front_face'}});
+assert.equal(referenceModelArgs.args.params.model,'selected-reference-model');
+console.log('PASS Reference Library model reaches the advertised MCP model field');

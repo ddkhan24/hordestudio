@@ -1,0 +1,21 @@
+'use strict';
+const assert=require('node:assert/strict'),worker=require('../vh2-kernel-worker'),f=require('../vh2-followthrough-engine');
+const now=1788764400000,minute=60000;
+const make=()=>worker.run({create:true,name:'Alex',entityId:'alex',now}).companion;
+const source={id:'promise',role:'user',text:"I'll text you in an hour.",timestamp:now,readAt:now,playerPersonaId:'p'};
+const proposal={sourceMessageId:'promise',evidence:source.text,dueInMinutes:60,confidence:1};
+const input={personaId:'p',messages:[source],commitments:[proposal]};
+const msg=(id,mins,read=true)=>({id,role:'user',text:'Back now',timestamp:now+mins*minute,readAt:read?now+mins*minute:0,playerPersonaId:'p'});
+const c=make();f.register(c,input,now);f.register(c,input,now);assert.equal(c.vh2Psychology.checkIns.length,1);
+f.advance(c,{personaId:'p',messages:[source,msg('early',1)]},now+minute);assert.equal(c.vh2Psychology.checkIns[0].status,'pending');
+f.advance(c,{personaId:'p',messages:[source,msg('return',60,false)]},now+90*minute);assert.equal(c.vh2Psychology.checkIns[0].status,'overdue');assert.equal(c.relationshipDynamics.trust,0);
+f.advance(c,{personaId:'p',messages:[source,msg('return',60)]},now+90*minute);assert.equal(c.vh2Psychology.checkIns[0].status,'fulfilled');assert.ok(c.relationshipDynamics.trust>0);
+const trust=c.relationshipDynamics.trust,episodes=c.vh2Psychology.episodes.length;
+const saved=structuredClone(c);f.advance(saved,{personaId:'p',messages:[source,msg('return',60)]},now+100*minute);assert.equal(saved.relationshipDynamics.trust,trust);assert.equal(saved.vh2Psychology.episodes.length,episodes);
+const late=make();f.register(late,input,now);f.advance(late,{personaId:'p',messages:[source,msg('late',90)]},now+90*minute);assert.equal(late.vh2Psychology.checkIns[0].status,'late');assert.equal(late.relationshipDynamics.trust,0);
+const dismissed=make();f.register(dismissed,input,now);dismissed.vh2Psychology.checkIns[0].status='dismissed';f.advance(dismissed,{personaId:'p',messages:[msg('back',60)]},now+60*minute);assert.equal(dismissed.relationshipDynamics.trust,0);
+for(const patch of [{evidence:'invented'},{dueInMinutes:-1},{dueInMinutes:1.5},{confidence:.1},{kind:'errand'}]){const bad=make();f.register(bad,{...input,commitments:[{...proposal,...patch}]},now);assert.equal(bad.vh2Psychology.checkIns.length,0);}
+const twice=make();f.register(twice,input,now);f.register(twice,{...input,messages:[{...source,id:'promise2'}],commitments:[{...proposal,sourceMessageId:'promise2'}]},now);
+f.advance(twice,{personaId:'p',messages:[msg('back',60)]},now+60*minute);assert.equal(twice.vh2Psychology.checkIns.filter(x=>x.status==='fulfilled').length,1);
+const foreign=make();f.register(foreign,input,now);f.advance(foreign,{personaId:'other',messages:[msg('back',60)]},now+60*minute);assert.equal(foreign.vh2Psychology.checkIns[0].status,'pending');
+console.log('Check-in evidence, early/unread/late timing, persona scope, duplicate/reload, dismissal and single-receipt credit passed.');

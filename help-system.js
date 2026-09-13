@@ -163,8 +163,6 @@
         'global-always-on-minimum-minutes': 'Minimum cooldown between background model calls for one Virtual Human. Higher values reduce cost and message frequency.',
         'always-on-stop-btn': 'Immediately disables background agency and removes provider credentials from the launcher’s memory.',
         'pause-all-agency-btn': 'Emergency control for proactive behavior. Pausing stops autonomous messages, social posts, life beats and launcher generation, but you can still message a Virtual Human and receive direct replies.',
-        'cs-run-autonomy-health': 'Fast-forward this human locally without model calls. The report checks schedule overlap, impossible travel, likely spam and projected call pressure. It is advisory and changes nothing.',
-        'cs-autonomy-health-days': 'Choose how many simulated weeks the non-destructive Autonomy Health preflight should inspect.',
         'global-local-image-url': 'Base URL for an OpenAI-compatible local image server.',
         'global-comfy-profile': 'Saved ComfyUI workflow and node mapping. Switch profiles without replacing other workflows.',
         'global-comfy-url': 'Address of ComfyUI on this computer or a private LAN IP. Remote ComfyUI must listen on the LAN (commonly with --listen 0.0.0.0) and expose port 8188 through its firewall.',

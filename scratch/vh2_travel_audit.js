@@ -1,0 +1,15 @@
+'use strict';
+const assert=require('node:assert/strict'),travel=require('../vh2-travel-engine');
+function fixture(){return {id:'test',lifeProfile:{places:[{id:'home',kind:'home'},{id:'town',label:'Town'}],world:{transport:{car:true,bicycle:false,transit:true,rideshare:false,budget:30}},travelLegs:[{from:'home',to:'town',mode:'DRIVE',minutes:60,cost:5},{from:'town',to:'home',mode:'DRIVE',minutes:60,cost:5}]},lifeRuntime:{world:{placeId:'home',balance:30},activities:{}}};}
+function plan(c){const r=travel.ensure(c);r.activeId='t';r.trips.push({id:'t',label:'Visit',status:'planned',startsAt:1000,legSequence:0,stops:[{placeId:'town',stayMinutes:60},{placeId:'home',stayMinutes:0}]});return r.trips[0];}
+const c=fixture(),t=plan(c);travel.tick(c,1000,{availability:'available'});assert.equal(t.status,'travelling');assert.equal(c.lifeRuntime.world.placeId,'home');assert.equal(c.lifeRuntime.world.balance,25);const j=c.lifeRuntime.world.journey;travel.tick(c,2000,{});assert.equal(c.lifeRuntime.world.balance,25);c.lifeRuntime.world.placeId=j.to;c.lifeRuntime.world.journey=null;travel.arrival(c,j,j.arrivesAt);travel.tick(c,j.arrivesAt,{});assert.equal(t.status,'staying');assert.equal(c.vh2Travel.carPlaceId,'town');travel.tick(c,t.stayUntil,{});assert.equal(t.status,'travelling');assert.equal(c.lifeRuntime.world.balance,20);
+const poor=fixture();poor.lifeRuntime.world.balance=4;plan(poor);travel.tick(poor,1000,{});assert.equal(poor.vh2Travel.trips[0].status,'planned');assert.equal(poor.lifeRuntime.world.journey,undefined);
+const blocked=fixture(),bt=plan(blocked);bt.status='travelling';bt.lastLeg={to:'home'};bt.legs=[{from:'elsewhere',to:'town',mode:'DRIVE',cost:5,minutes:5}];travel.tick(blocked,1000,{});assert.equal(bt.status,'blocked');assert.equal(bt.legs.length,1);assert.equal(blocked.lifeRuntime.world.placeId,'home');
+const cancelled=fixture(),ct=plan(cancelled);travel.tick(cancelled,1000,{});ct.cancelAfterArrival=true;const cj=cancelled.lifeRuntime.world.journey;cancelled.lifeRuntime.world.placeId=cj.to;cancelled.lifeRuntime.world.journey=null;travel.arrival(cancelled,cj,cj.arrivesAt);travel.tick(cancelled,cj.arrivesAt,{});assert.equal(ct.status,'cancelled');assert.equal(cancelled.lifeRuntime.world.placeId,'town');
+console.log('PASS: trips preserve position, charge once, hold stays, retain blocked legs and cancel only on arrival');
+
+const fs=require('node:fs'),vm=require('node:vm'),source=fs.readFileSync(require.resolve('../vh2-horde-integration.js'),'utf8');
+const ctx={};vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('function vh2RestorePhotoReferences(')),ctx);
+const frozen={lifeProfile:{places:[{id:'room',photo:''}],world:{items:[{id:'gift',photo:'canonical-gift'}]}}},authored={lifeProfile:{places:[{id:'room',photo:'stale-room'}],world:{items:[]}}};
+ctx.vh2RestorePhotoReferences(frozen,authored);assert.equal(frozen.lifeProfile.places[0].photo,'');assert.equal(frozen.lifeProfile.world.items[0].photo,'canonical-gift');
+console.log('PASS: reference restoration preserves gifted images and explicit removals');

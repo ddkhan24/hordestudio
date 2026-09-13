@@ -1,0 +1,36 @@
+const assert=require('node:assert/strict');
+const engine=require('../vh-activity-engine');
+const minute=60000,now=Date.UTC(2026,8,8,9),clone=x=>JSON.parse(JSON.stringify(x));
+const context={availability:'available',energy:90,hunger:0,stress:10,socialNeed:0,placeId:'home',seed:'person',policy:{variation:0}};
+const opportunities=Array.from({length:5},(_,i)=>({id:`task${i}`,label:`Task ${i}`,kind:'focus',priority:40,days:[2],startMinute:540+i*60,endMinute:600+i*60}));
+const planning={seed:'person',dateKey:'2026-09-08',weekday:2,midnight:now-540*minute,opportunities};
+const state=engine.normalize({lastAdvancedAt:now});
+engine.plan(state,now,planning);assert.equal(state.goals.length,1,'future activities are possibilities, not a daily script');
+engine.plan(state,now+4*60*minute,planning);assert(state.goals.some(g=>g.opportunityId==='task4'),'the fourth/fifth opportunity is not discarded by a daily top-three limit');
+function choose(hunger){const s=engine.normalize({lastAdvancedAt:now});engine.addGoal(s,'meal','meal',now);const focus=engine.addGoal(s,'focus','focus',now);focus.priority=80;engine.advance(s,now+minute,{...context,hunger});return s;}
+assert.equal(choose(0).decision.goalId,'focus');assert.equal(choose(95).decision.goalId,'meal');
+const stable=choose(0),active=stable.goals.find(g=>g.id==='focus');
+engine.addGoal(stable,'leisure','distraction',now+minute).priority=80;
+engine.advance(stable,now+2*minute,context);assert.equal(active.status,'active','minor temptation cannot continually restart work');
+const urgent=engine.addGoal(stable,'preparation','due',now+2*minute);urgent.commitmentId='promise';urgent.deadline=now+3*minute;
+engine.advance(stable,now+3*minute,{...context,policy:{variation:0,commitmentWeight:3}});assert.equal(urgent.status,'active','urgent obligation can interrupt');
+assert.equal(active.steps[0].progressMs,2*minute,'interruption preserves work');
+const blocked=engine.normalize({lastAdvancedAt:now});
+const local=engine.addGoal(blocked,'focus','campus-task',now);local.requiredPlaceId='campus';local.priority=90;
+const missing=engine.addGoal(blocked,'focus','missing',now);missing.steps[0].costs={paper:1};
+const possible=engine.addGoal(blocked,'leisure','possible',now);
+engine.advance(blocked,now+minute,context);assert.equal(local.status,'blocked');assert.equal(missing.status,'blocked');assert.equal(possible.status,'active');
+assert.equal(local.steps[0].progressMs,0);assert.equal(missing.steps[0].progressMs,0);
+const recurring={...planning,opportunities:[{id:'break',label:'Read',kind:'leisure',startMinute:540,endMinute:780,repeatMinutes:10}]};
+const repeated=engine.normalize({lastAdvancedAt:now});engine.plan(repeated,now,recurring);engine.advance(repeated,now+40*minute,context);
+const first=repeated.goals[0];assert.equal(first.status,'completed');engine.plan(repeated,first.completedAt+9*minute,recurring);assert.equal(repeated.goals.length,1);
+engine.plan(repeated,first.completedAt+10*minute,recurring);assert.equal(repeated.goals.length,2);
+assert.equal(engine.utility(first,repeated,now,{...context,hunger:100,policy:{variation:100}}).components.variation,0,'urgent pressure reduces randomness');
+function replay(reload){let s=engine.normalize({lastAdvancedAt:now});for(let m=0;m<180;m++){const at=now+m*minute;engine.plan(s,at,recurring);engine.advance(s,at+minute,{...context,seed:'replay'});if(reload)s=engine.normalize(clone(s));}return clone(s);}
+assert.deepEqual(replay(false),replay(true));
+const migrated=engine.normalize({goals:clone(choose(0).goals),lastAdvancedAt:now});const past=migrated.goals.find(g=>g.id==='focus');past.opportunityId='old';engine.plan(migrated,now,planning);assert(migrated.goals.includes(past),'migration preserves started work');
+console.log('PASS continuous opportunities, need competition, inertia, urgent interruption, place/resource prerequisites, recurrence, pressure-dependent variation and reload replay');
+const custom=engine.normalize({lastAdvancedAt:now});engine.plan(custom,now,{...planning,opportunities:[{id:'snack',label:'Quick snack',kind:'meal',startMinute:540,endMinute:780,durationMinutes:12,effects:{hunger:-24,energy:3,stress:-1}}]});
+const customGoal=custom.goals[0];assert.equal(customGoal.steps.reduce((n,s)=>n+s.durationMs,0),12*minute);assert(Math.abs(customGoal.steps.reduce((n,s)=>n+s.hunger,0)+24)<1e-9);
+const customDelta=engine.advance(custom,now+13*minute,context);assert(Math.abs(customDelta.hunger+24)<1e-9);assert(Math.abs(customDelta.energy-3)<1e-9);
+console.log('PASS authored action duration and effect vectors execute exactly once');

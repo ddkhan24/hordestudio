@@ -1,0 +1,311 @@
+{
+  "format": "horde-bundled-location-overlay",
+  "version": 1,
+  "changedFields": 30,
+  "changes": [
+    {
+      "section": "places",
+      "id": "home",
+      "field": "label",
+      "before": "Norte Town Lake Apartments",
+      "after": "Town Lake shared apartment"
+    },
+    {
+      "section": "places",
+      "id": "home",
+      "field": "detail",
+      "before": "A two-bedroom off-campus apartment in a stucco complex near Tempe, shared with Jordan and Priya. The front door opens into a small living room with a sagging beige couch, a TV mounted on the wall, and Jordan's nursing textbooks stacked on the coffee table. The kitchen is a galley with a microwave that gets more use than the stove, a fridge covered in takeout magnets, and a perpetual pile of dishes. Aslyn and Jordan share one bedroom; Priya has the other. The AC runs constantly and hums through e",
+      "after": "A fictional, lived-in three-bedroom apartment near Tempe Town Lake, shared by Aslyn, Jordan and Priya. Each has a private bedroom; they share the living room, modern kitchen and bathroom. White cabinets, pale quartz, light oak flooring in common areas and beige bedroom carpet. The saved map point is an approximate neighborhood anchor, not a verified private address or a unit at Norte Town Lake."
+    },
+    {
+      "section": "places",
+      "id": "home",
+      "field": "referenceDescription",
+      "before": "",
+      "after": "Fictional modern apartment near Tempe Town Lake: three separate private bedrooms for Aslyn, Jordan and Priya, with shared living room, kitchen and bathroom. Common areas have light oak flooring, white walls and white kitchen cabinets with pale quartz surfaces and stainless appliances. Living room has a gray sofa, blush-pink throw and navy cushion. Bedrooms have beige carpet and separate full-size beds. Bathroom has a white double vanity and tub-shower. A small balcony faces neighboring stucco apartments. Everyday student belongings make the home lived-in. Exterior and pool belong to a fictional well-maintained modern stucco complex; do not reproduce an exact Norte floor plan."
+    },
+    {
+      "section": "places",
+      "id": "home",
+      "field": "referenceAliases",
+      "before": "",
+      "after": "home, shared apartment, Town Lake apartment"
+    },
+    {
+      "section": "places",
+      "id": "home",
+      "field": "googlePlaceId",
+      "before": "ChIJfzGDKx8JK4cR_11KJTNPrd8",
+      "after": ""
+    },
+    {
+      "section": "places",
+      "id": "apartment_pool",
+      "field": "label",
+      "before": "Norte Town Lake Apartments pool",
+      "after": "Town Lake apartment pool"
+    },
+    {
+      "section": "places",
+      "id": "apartment_pool",
+      "field": "detail",
+      "before": "A small rectangular pool in the courtyard of the apartment complex, surrounded by cracked concrete and a few plastic lounge chairs. The water is over-chlorinated and slightly too warm from May through September. Aslyn comes here in the late afternoon to tan, scroll her phone, and occasionally float on her back staring at the sky. Sometimes other tenants are there; sometimes she and Jordan have it to themselves. There is a faded sign about pool hours that nobody follows.",
+      "after": "The shared outdoor pool at the fictional apartment complex near Tempe Town Lake. A well-maintained pool deck, loungers, shade umbrellas and modern stucco buildings make this an easy place to cool off near home. Its saved marker is an approximate neighborhood anchor, not a verified Norte amenity."
+    },
+    {
+      "section": "places",
+      "id": "apartment_pool",
+      "field": "referenceDescription",
+      "before": "",
+      "after": "A fictional well-maintained residential pool courtyard near Tempe Town Lake, with clear blue water, clean pale paving, simple loungers, shade umbrellas and modern light stucco apartment buildings with balconies. Hot Arizona daylight and sparse desert planting. The same fictional complex as Aslyn, Jordan and Priya's shared apartment; this is an inspired generated setting rather than a photograph of Norte's pool."
+    },
+    {
+      "section": "places",
+      "id": "apartment_pool",
+      "field": "referenceAliases",
+      "before": "",
+      "after": "pool, apartment pool, home pool"
+    },
+    {
+      "section": "places",
+      "id": "apartment_pool",
+      "field": "googlePlaceId",
+      "before": "ChIJfzGDKx8JK4cR_11KJTNPrd8",
+      "after": ""
+    },
+    {
+      "section": "places",
+      "id": "dutch_bros",
+      "field": "label",
+      "before": "Dutch Bros on University Drive",
+      "after": "Dutch Bros on Rural Road"
+    },
+    {
+      "section": "places",
+      "id": "dutch_bros",
+      "field": "detail",
+      "before": "A small drive-through and walk-up Dutch Bros coffee stand on University Drive, about a ten-minute walk from the apartment. The baristas are aggressively friendly in the Dutch Bros way and a couple of them know Aslyn's order by sight. She comes here almost every morning, orders a caramelizer with extra whip, and lingers for a few minutes checking her phone in the shade of the small patio overhang. The ground is always sticky and the line is always long but she does not care.",
+      "after": "Dutch Bros at 1037 S Rural Rd near Lemon Street in Tempe. A drive-through and walk-up coffee stop near ASU. Aslyn usually comes for a cold sweet drink; the actual route determines how long it takes from home."
+    },
+    {
+      "section": "places",
+      "id": "dutch_bros",
+      "field": "referenceDescription",
+      "before": "",
+      "after": "Public-place-inspired view of the Dutch Bros coffee shop at 1037 S Rural Rd, Tempe, by Lemon Street: compact coffee service building, pickup window, drive-through lane and canopies, shaded patio and bike rack. Use the real location and service layout as anchors, with generated incidental details. Do not label it University Drive or invent a sit-down cafe interior."
+    },
+    {
+      "section": "places",
+      "id": "dutch_bros",
+      "field": "referenceAliases",
+      "before": "",
+      "after": "Dutch Bros, Rural Road coffee"
+    },
+    {
+      "section": "places",
+      "id": "target",
+      "field": "label",
+      "before": "Target on Rural Road",
+      "after": "Target Tempe Rio Salado"
+    },
+    {
+      "section": "places",
+      "id": "target",
+      "field": "detail",
+      "before": "The Target about fifteen minutes by bus from the apartment. Aslyn comes here for lip gloss, snacks, cheap basics, and the vague comfort of walking around a brightly lit store with no agenda. She always ends up in the beauty aisle and the snack aisle and leaves with things she did not intend to buy. The fluorescent lighting is unflattering but the AC is good. She sometimes comes here with Priya, who is more efficient about it.",
+      "after": "Target Tempe Rio Salado at 1800 E Rio Salado Pkwy, near Tempe Marketplace. Aslyn comes for toiletries, snacks and small impulse buys. The store includes Starbucks and CVS. This is the Rio Salado location, not a store on Rural Road."
+    },
+    {
+      "section": "places",
+      "id": "target",
+      "field": "referenceDescription",
+      "before": "",
+      "after": "Public-place-inspired Target shopping setting at Tempe Rio Salado, 1800 E Rio Salado Pkwy. Contemporary large-format retail entrance or everyday shopping aisles, red Target accents, carts and practical store lighting. Officially includes Starbucks and CVS. Exact current shelving, interior layout and exterior colors are not verified; generated details must not imply a photograph of the real store."
+    },
+    {
+      "section": "places",
+      "id": "target",
+      "field": "referenceAliases",
+      "before": "",
+      "after": "Target, Rio Salado Target, Tempe Marketplace Target"
+    },
+    {
+      "section": "rooms",
+      "id": "room_living_room",
+      "field": "label",
+      "before": "Living Room",
+      "after": "Living room"
+    },
+    {
+      "section": "rooms",
+      "id": "room_living_room",
+      "field": "description",
+      "before": "A small rectangular living room just inside the front door of the apartment. A sagging beige fabric couch sits against the long wall, its left cushion permanently dented from Aslyn's habitual spot. Opposite the couch, a flat-screen TV is mounted on the off-white stucco wall with a single HDMI cable dangling behind it. A low particleboard coffee table in front of the couch is cluttered with Jordan's nursing textbooks, empty Hot Cheetos bags, and a vanilla-scented candle that has never been lit. The carpet is builder-grade beige, slightly matted near the couch. A sliding glass door on the far wall leads to a narrow concrete balcony with a single plastic chair. The AC vent above the front door hums constantly. There is no art on the walls—just a few command-strip hooks holding a tote bag and a lanyard. Overhead lighting is a single flush-mount dome fixture; they usually leave it off and use the TV glow or the balcony light bleeding in.",
+      "after": "The shared living room of the fictional three-bedroom Town Lake apartment. White walls, light oak flooring and a sliding glass balcony door keep the room bright. A gray fabric sofa has a blush-pink throw and a navy cushion; Aslyn gravitates to the same end when she scrolls her phone. A low coffee table holds a vanilla candle, a few snack wrappers and whatever Jordan was studying. The TV sits opposite the sofa. The adjoining white kitchen and pale quartz surfaces are visible from the seating area. Student bags, charging cables and small everyday messes make it comfortable and lived-in. This common room is separate from all three private bedrooms."
+    },
+    {
+      "section": "rooms",
+      "id": "room_kitchen",
+      "field": "description",
+      "before": "A narrow galley kitchen open to the living room on one end, with laminate countertops in a faded tan speckle pattern and dark-brown particle-board cabinets. The microwave on the counter gets the most use; the electric stove's burners are dusty. The fridge is white and covered in takeout magnets—Chipotle, Raising Cane's, a pizza place nobody remembers ordering from. Inside: oat milk, a Brita pitcher half-full, Priya's labeled meal-prep containers, a bag of shredded cheese, and condiments. A perpetual pile of dishes sits in the single-basin sink. Cinnamon Toast Crunch and Frosted Flakes boxes lean against the backsplash near a drying rack that is always full. The overhead fluorescent tube flickers slightly. A narrow strip of peel-and-stick tile lines the backsplash. A small trash can by the fridge overflows every other day.",
+      "after": "A modern shared kitchen opening toward the apartment living room, with white cabinets, pale quartz countertops, a simple light backsplash and stainless appliances. Light oak flooring continues through the common areas. A microwave, kettle, cereal boxes and a drying rack sit on the counter. The fridge contains oat milk, a water pitcher, Priya's labeled meal-prep containers, shredded cheese and condiments; takeout magnets and a few notes collect on its door. Dishes and mugs occasionally accumulate by the sink. The fixed finishes are clean and modern, while three students' practical clutter gives the room its character."
+    },
+    {
+      "section": "rooms",
+      "id": "room_bathroom",
+      "field": "label",
+      "before": "Bathroom",
+      "after": "Shared bathroom"
+    },
+    {
+      "section": "rooms",
+      "id": "room_bathroom",
+      "field": "description",
+      "before": "A single shared bathroom between the two bedrooms with a tub-shower combo behind a slightly mildewed beige curtain. The vanity has one sink, a smudged mirror, and barely enough counter space for three people's products—Aslyn's drugstore shampoo, purple toner bottle, vanilla body wash, and a scatter of hair ties crowd one corner; Jordan's skincare bottles line the other; Priya's toiletry bag sits zipped and tidy on the shelf above the toilet. The tile floor is white with grey grout that has darkened. A small Bluetooth speaker sits on the toilet tank lid where Aslyn plays pop and R&B during her showers. The towel rack holds two damp towels at all times. The exhaust fan rattles when turned on. A flat-iron and a curling wand share a single outlet next to the sink, cords tangled together.",
+      "after": "The bathroom shared by Aslyn, Jordan and Priya, reached from the apartment common hall. A white double vanity with pale counters and a wide mirror provides space for three people's products. There is a tub-shower and a clean light shower curtain, with pale tile on the floor. Aslyn's purple toner, vanilla body wash, hair ties and makeup gather near one sink; Jordan groups her skincare neatly by the other, and Priya keeps her toiletries in a tidy bag. A small Bluetooth speaker, towels and hair tools make it an ordinary occupied student bathroom. It is a shared common room, not an ensuite or a divider between two shared bedrooms."
+    },
+    {
+      "section": "rooms",
+      "id": "room_priya_bedroom",
+      "field": "label",
+      "before": "Priya's Bedroom",
+      "after": "Priya's bedroom"
+    },
+    {
+      "section": "rooms",
+      "id": "room_priya_bedroom",
+      "field": "description",
+      "before": "The second, slightly smaller bedroom belonging to Priya alone. A full-size bed with a neat grey linen duvet is pushed against the far wall beneath a window with functional blinds. A small wooden desk holds a laptop, a planner, and a cup of pens. The closet door actually closes and inside the clothes are organized by type. A fabric storage cube on the floor holds extra meal-prep containers and a yoga mat she occasionally uses. The walls are bare except for a single framed print of a geometric pattern. The room smells faintly of eucalyptus from a reed diffuser on the nightstand. It is noticeably tidier and quieter than the shared bedroom across the hall, and Aslyn rarely enters it except to grab leftovers Priya has brought to the kitchen.",
+      "after": "Priya's separate private bedroom in the three-bedroom Town Lake apartment. A full-size bed with a neatly made gray duvet sits beneath a window with white blinds. White walls and beige carpet match the other private bedrooms. A compact wooden desk holds a laptop, planner and cup of pens. Her clothes are organized inside a closed closet; a storage cube and yoga mat sit neatly beside it. A restrained geometric print and a small eucalyptus diffuser give it a quiet personal touch. The room is noticeably tidier than Aslyn's, and the others respect it as Priya's private space."
+    },
+    {
+      "section": "rooms",
+      "id": "room_aslyn_jordan_bedroom",
+      "field": "label",
+      "before": "Aslyn's Bedroom",
+      "after": "Aslyn's bedroom"
+    },
+    {
+      "section": "rooms",
+      "id": "room_aslyn_jordan_bedroom",
+      "field": "description",
+      "before": "A cramped, slightly chaotic college bedroom that feels like Aslyn has been living out of bags since move-in. Twin XL bed beside the window with a rumpled pink-and-white duvet, several pillows, and Mr. Potato, her stuffed manatee, shoved near the headboard. A white IKEA nightstand is overloaded with lip gloss, ibuprofen, a half-empty water bottle, tangled charging cables, hair ties, and miscellaneous makeup.\nHer full-length mirror leans against the wall where the afternoon light hits it—clearly positioned for mirror selfies rather than interior design. Bent white vinyl blinds, beige rental carpet, cheap white walls, and a small closet whose sliding door never quite closes. Clothes, shoes, Shein bags, an overflowing laundry basket, makeup, dry shampoo, and going-out outfits create controlled clutter. A few inexpensive decorations and personal photos make it unmistakably a 20-year-old college girl's room. Warm bedside lamp instead of the ugly overhead light.\nOverall: messy, feminine, impulsive, lived-in, attractive without looking curated. The room should feel like Aslyn gets dressed, takes selfies, changes outfits three times, and leaves everything where it lands.",
+      "after": "Aslyn's separate private bedroom in the three-bedroom Town Lake apartment. A full-size bed beside the window has rumpled blush-pink bedding, loose pillows and Mr. Potato, her stuffed manatee, near the headboard. White walls, white blinds and beige carpet match the other bedrooms. A small white nightstand is crowded with lip gloss, a water bottle, tangled chargers and hair ties. A full-length mirror leans where daylight is good for outfit photos. Clothes, shopping bags, makeup, dry shampoo and an overflowing laundry basket create her familiar uncurated mess. A warm bedside lamp makes the room cozy after dark. Jordan has her own separate bedroom."
+    },
+    {
+      "section": "rooms",
+      "id": "zone:df9432fe-2de3-4ebe-82a0-c0e8a5f8b23f",
+      "field": "label",
+      "before": "Jordan’s Bedroom",
+      "after": "Jordan's bedroom"
+    },
+    {
+      "section": "rooms",
+      "id": "zone:df9432fe-2de3-4ebe-82a0-c0e8a5f8b23f",
+      "field": "description",
+      "before": "A small, practical college apartment bedroom that feels noticeably more organized than Aslyn’s without being unnaturally spotless. A twin XL bed sits against one wall with a navy comforter pulled mostly straight, white sheets, and two simple pillows. Beige rental carpet, plain off-white walls, a single window with cheap white vinyl blinds, and generic apartment fixtures make the room feel unmistakably student housing.\nA compact desk is the center of the room, cluttered in an organized way with nursing textbooks, handwritten flashcards, highlighters, notebooks, a laptop, water bottle, and a basic desk lamp. A backpack hangs from the chair. A few photos of Jordan, Aslyn, and friends are pinned casually above the desk.\nHer small closet is partially open, revealing everyday clothes on mismatched hangers, sneakers underneath, and a laundry basket tucked into the corner. A hoodie has been thrown over the back of the desk chair and a charging cable trails across the nightstand. There are a few cosmetics and hair products, but they are grouped together rather than scattered everywhere.\nA cheap bedside table holds her phone charger, water bottle, lip balm, and whatever nursing material she was studying before bed. She avoids the harsh overhead light and mostly uses the warm desk and bedside lamps.\nThe room feels lived-in, affordable, functional, and genuinely inhabited by a 20-year-old nursing student—Jordan is organized and responsible, but she's still a college student, not a minimalist adult with a perfectly curated bedroom.",
+      "after": "Jordan's separate private bedroom in the three-bedroom Town Lake apartment. A full-size bed with a navy comforter, white sheets and simple pillows sits against one wall. White walls, white blinds and beige carpet match the other bedrooms. Her compact nursing-study desk holds textbooks, handwritten flashcards, highlighters, a laptop, a water bottle and a practical lamp; a backpack hangs from the chair. A few photos of friends sit above the desk. A hoodie, charging cable and partly open closet keep it recognizably lived-in, though she groups her cosmetics and clothes more neatly than Aslyn does. Warm desk and bedside lamps soften the room in the evening."
+    },
+    {
+      "section": "authored",
+      "field": "socialWorld",
+      "before": "Lives in a two-bedroom off-campus apartment near Tempe with her high school friend Jordan Kelley (19, also from Ashburn, studying nursing, slightly more together than Aslyn but not by much) and Priya Reddy (19, from Scottsdale, pre-business, quietly judges Aslyn's lifestyle but likes her as a person). Aslyn's closest friend is Jordan—they share clothes, go out together, and have the kind of friendship where loyalty is assumed but never tested hard. Priya is more of a pleasant roommate than a real friend. Aslyn has a wide, shallow social circle at ASU: party friends, guys from Tinder and Instagram DMs, girls she met at events and follows online. She knows a lot of people's first names and almost nobody's last name. Her boyfriend is Colton Marsh, twenty, back in Ashburn, working at his dad's auto shop. They started dating junior year of high school. Colton is earnest, a little clingy, and texts her good morning every day. Aslyn finds him sweet in a way she sometimes describes internally as 'pathetic'—she does not mean it cruelly, she just cannot muster real passion for him. She stays with him because breaking up would be a confrontation and because he is a safe, familiar comfort object. She is not faithful to him. She has hooked up with at least three guys since arriving at ASU and flirts actively in DMs with several more. She keeps this from Colton not out of calculated deception but because telling him would cause a scene and she does not want to deal with scenes. Her parents call once a week, usually Sunday. Her brother Cody texts her memes occasionally. She has no pets but has named the two succulents on her windowsill Gerald and Brenda and talks to them when she is high. She does not have enemies. She has never had a real falling-out with anyone because she leaves before things get that far.",
+      "after": "Lives with two roommates in a fictional three-bedroom apartment near Tempe Town Lake, each with a private bedroom and shared common rooms: her high school friend Jordan Kelley (19, also from Ashburn, studying nursing, slightly more together than Aslyn but not by much) and Priya Reddy (19, from Scottsdale, pre-business, quietly judges Aslyn's lifestyle but likes her as a person). Aslyn's closest friend is Jordan—they share clothes, go out together, and have the kind of friendship where loyalty is assumed but never tested hard. Priya is more of a pleasant roommate than a real friend. Aslyn has a wide, shallow social circle at ASU: party friends, guys from Tinder and Instagram DMs, girls she met at events and follows online. She knows a lot of people's first names and almost nobody's last name. Her boyfriend is Colton Marsh, twenty, back in Ashburn, working at his dad's auto shop. They started dating junior year of high school. Colton is earnest, a little clingy, and texts her good morning every day. Aslyn finds him sweet in a way she sometimes describes internally as 'pathetic'—she does not mean it cruelly, she just cannot muster real passion for him. She stays with him because breaking up would be a confrontation and because he is a safe, familiar comfort object. She is not faithful to him. She has hooked up with at least three guys since arriving at ASU and flirts actively in DMs with several more. She keeps this from Colton not out of calculated deception but because telling him would cause a scene and she does not want to deal with scenes. Her parents call once a week, usually Sunday. Her brother Cody texts her memes occasionally. She has no pets but has named the two succulents on her windowsill Gerald and Brenda and talks to them when she is high. She does not have enemies. She has never had a real falling-out with anyone because she leaves before things get that far."
+    }
+  ],
+  "preserved": [
+    "entity IDs",
+    "room-place links",
+    "map coordinates",
+    "routes",
+    "media",
+    "personality",
+    "relationships",
+    "life state"
+  ],
+  "provenance": {
+    "places": {
+      "home": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Existing coordinates remain an approximate neighborhood anchor."
+      },
+      "apartment_pool": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address."
+      },
+      "dutch_bros": {
+        "kind": "public_place_inspired",
+        "sources": [
+          "https://www.dutchbros.com/locations/az/tempe/1037-s.-rural-rd.",
+          "https://www.tempe.gov/home/showpublisheddocument/106432/638440395210000000"
+        ],
+        "note": "Exact business/address verified by the official shop page; pickup/drive-through/patio anchors supported by the city site plan. Generated visual interpretation, not a current site photograph."
+      },
+      "target": {
+        "kind": "public_place_inspired",
+        "sources": [
+          "https://www.target.com/sl/tempe-ne-target-store/2176"
+        ],
+        "note": "Exact store name/address and Starbucks/CVS services verified on the official store page; generated architecture and aisle details are illustrative."
+      }
+    },
+    "rooms": {
+      "room_living_room": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      },
+      "room_kitchen": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      },
+      "room_bathroom": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      },
+      "room_priya_bedroom": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      },
+      "room_aslyn_jordan_bedroom": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction. The historical combined room ID is retained for reference continuity, not as a shared-bedroom premise."
+      },
+      "zone:df9432fe-2de3-4ebe-82a0-c0e8a5f8b23f": {
+        "kind": "fictional",
+        "sources": [
+          "https://www.nortetownlakeapartments.com/az/tempe/amenities",
+          "https://www.nortetownlakeapartments.com/az/tempe/photogallery"
+        ],
+        "note": "Fictional three-bedroom household near Town Lake. Modern finishes are inspired by public neighborhood apartment imagery; no claim about a real Norte unit, floor plan, resident or exact private address. Room geometry, furniture and personal belongings are authored fiction."
+      }
+    }
+  }
+}

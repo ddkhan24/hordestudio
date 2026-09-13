@@ -1,0 +1,9 @@
+'use strict';
+const assert=require('node:assert/strict');global.VHWorldEngine=require('../vh-world-engine');global.VHActivityEngine=require('../vh-activity-engine');global.VHConversationEngine=require('../vh-conversation-engine');const core=require('../vh-simulation-core'),engine=require('../vh2-lifestyle-engine');
+const at=Date.parse('2026-03-29T00:30:00Z'),c={locationMode:'custom',timezoneOffsetMinutes:0,vh2Travel:{clockHistory:[{at,timeZone:'Europe/London'},{at:at+7200000,timeZone:'Asia/Karachi'},{at:at+10800000,timeZone:null}]}};
+assert.equal(core.companionLocalMinuteInfo(c,at).hour,0);assert.equal(core.companionLocalMinuteInfo(c,at+3600000).hour,2);assert.equal(core.companionLocalMinuteInfo(c,at+7200000).hour,7);assert.equal(core.companionLocalMinuteInfo(c,at+10800000).hour,3);assert.equal(core.companionLocalMinuteInfo(c,at-60000).hour,0);
+const person={id:'x',humanDynamics:{stress:0},lifeRuntime:{world:{placeId:'job',balance:100}},lifeProfile:{world:{items:[],closet:{mode:'presets'}}}};engine.ensure(person);person.vh2Finance.policy={enabled:true,incomePerHour:12,dailyIncome:0,dailyExpense:150,workPlaceIds:['job']};
+for(let i=0;i<=60;i++)engine.finance(person,at+i*60000,{source:'schedule',placeId:'job',availability:'busy'});assert.equal(person.lifeRuntime.world.balance,112);assert.ok(person.vh2Finance.ledger.length<=2,'work income is aggregated by hour, not a ledger row per minute');
+engine.finance(person,at+86400000,{source:'free',placeId:'job',availability:'available'});assert.equal(person.lifeRuntime.world.balance,0);assert.equal(person.vh2Finance.unpaid,38);assert.ok(person.humanDynamics.stress>0);
+engine.finance(person,at+86400000,{source:'free',placeId:'job',availability:'available'});assert.equal(person.vh2Finance.unpaid,38);
+console.log('PASS DST, historical travel clocks, home-clock restoration, actual work income, expense debt and no duplicate charging.');
