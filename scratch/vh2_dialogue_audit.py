@@ -33,6 +33,16 @@ class Dialogue(unittest.TestCase):
         self.assertEqual(first,self.s.dialogue.snapshot(self.w,2,other)[1])
         other['truth']['companion']['vh2Calendar']['ages']['friend']['currentAge']=27
         self.assertNotEqual(first,self.s.dialogue.snapshot(self.w,2,other)[1])
+    def test_malformed_retry_is_bounded_and_excludes_uncertainty(self):
+        from vh2_dialogue import reply_retry_allowed
+        malformed=('failed','Malformed structured reply; no metadata was delivered.')
+        self.assertTrue(reply_retry_allowed([malformed]))
+        self.assertFalse(reply_retry_allowed([malformed,malformed]))
+        self.assertFalse(reply_retry_allowed([('unknown','Timeout')]))
+        self.assertFalse(reply_retry_allowed([('failed','Daily request limit reached; no submission made.')]))
+        self.assertFalse(reply_retry_allowed([malformed,('unknown','Timeout')]))
+        self.assertTrue(reply_retry_allowed([('superseded','Changed')]))
+
     def make_check_in(self):
         self.cmd('receive_message',text="I'll text you in 20 minutes.")
         self.cmd('advance',steps=1)

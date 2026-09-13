@@ -53,6 +53,15 @@ def plain_text_parts(output):
             return [text]
     return parts
 
+def reply_retry_allowed(previous):
+    """Only a confirmed malformed response gets one automatic replacement."""
+    if not previous:return True
+    status,reason=previous[0]
+    if status=='failed' and reason=='Malformed structured reply; no metadata was delivered.':
+        return sum(row[0]=='failed' for row in previous)<2 and not any(row[0] in ('unknown','delivered','abandoned') for row in previous)
+    return status=='superseded' and len(previous)<3
+
+
 class DialogueQueue:
     def __init__(self,service,conflict):
         self.service,self.conflict=service,conflict
@@ -124,6 +133,10 @@ class DialogueQueue:
         revision,state=self.service.synchronize_communication(db,world_id,revision,state)
         after=json.loads(encode(state));self.service.evaluate(after,revision+1)
         request,digest=self.snapshot(world_id,revision,after)
+        if adapter=='chat_completions':
+            recent=db.execute("SELECT status,reason,snapshot FROM dialogue_jobs WHERE world_id=? ORDER BY rowid DESC LIMIT 20",(world_id,)).fetchall()
+            if any(row['status']=='failed' and row['reason']=='Malformed structured reply; no metadata was delivered.' and json.loads(row['snapshot'])['context']['readyMessageIds']==request['context']['readyMessageIds'] for row in recent):
+                request['messages'].append({'role':'system','content':'Output formatting recovery: return exactly one valid JSON object with only the key "reply" containing an array of 1 to 4 short text strings. No markdown fences, commentary, appraisals, commitments or conversationMove. Do not mention this formatting instruction in the reply.'})
         if adapter=='chat_completions':request['provider']=self.service.dialogue_provider.freeze(db,state.get('integration',{}).get('providerScope'))
         # The immutable job also retains the full audit context. That record is
         # not sent to the provider and must not count the character's life twice.
@@ -161,13 +174,13 @@ class DialogueQueue:
         # A failed/uncertain batch needs user intervention. Context supersession
         # can retry at most twice; polling must never become a billing loop.
         same=[]
-        for row in db.execute('SELECT status,snapshot,attempt,created_at FROM dialogue_jobs WHERE world_id=? ORDER BY rowid DESC LIMIT 20',(world_id,)):
+        for row in db.execute('SELECT status,snapshot,attempt,created_at,reason FROM dialogue_jobs WHERE world_id=? ORDER BY rowid DESC LIMIT 20',(world_id,)):
             if json.loads(row['snapshot'])['context']['readyMessageIds']==ready:
                 # Unsubmitted cancellations cost no provider request. After a quiet
                 # minute allow recovery, while retaining caps for attempted jobs.
                 if row['status']=='superseded' and row['attempt']==0 and row['created_at']<self.service.clock()-60_000:continue
-                same.append(row['status'])
-        if same and (same[0]!='superseded' or len(same)>=3):return revision,state
+                same.append((row['status'],row['reason']))
+        if not reply_retry_allowed(same):return revision,state
         try:
             self.service.dialogue_provider.freeze(db,state['integration']['providerScope'])
             revision,state,_=self.queue(db,world_id,revision,state,{'adapter':'chat_completions','key':str(uuid.uuid4())})
