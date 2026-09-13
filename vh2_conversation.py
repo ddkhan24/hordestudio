@@ -228,6 +228,14 @@ def model_context(context):
     """
     result={k:v for k,v in context.items() if k not in ('worldId','revision','simAt','sharedHistory','recentExperiences','recalledExperiences','recalledConversation')}
     query=terms(' '.join(m['text'] for m in context['conversationBrief']['respondTo']))
+    # Every ready turn already appears verbatim in conversation. Point the brief
+    # to those records instead of repeating an entire long pending batch. Keep
+    # the original brief intact in the immutable audit context and its digest.
+    batch=context['conversationBrief']['respondTo']
+    turns={m.get('id'):m for m in context.get('conversation',[]) if m.get('id')}
+    if all(m.get('id') in turns and turns[m['id']]==m for m in batch):
+        result['conversationBrief']={k:v for k,v in context['conversationBrief'].items() if k!='respondTo'}
+        result['conversationBrief']['respondToMessageIds']=[m['id'] for m in batch]
     for key in ('recentPurchases','observedPeerMeetings','institutionOutcomes','noticedTransportUpdates','possessions','receivedGifts','sharedPlans','ownSocialPosts','knownWorldClaims'):
         result[key]=select(context.get(key),query,3)
     result['recentExperiences']=select(context.get('recentExperiences'),query,4)

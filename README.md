@@ -1,173 +1,103 @@
-![Horde Studio 17 — Your Story. Your Choices. Now in Motion.](assets/marketing/v17.0.0/horde-studio-v17.0.0-launch-poster.png)
+![Horde Studio 18 — Build characters. Shape worlds. Simulate lives.](assets/marketing/v18.0.0/github-hero.png)
 
-<div align="center">
-
-# Horde Studio 17
+# Horde Studio 18
 
 ### Build characters. Shape worlds. Simulate lives.
 
-**A local-first creative studio for persistent AI stories that remember, react, and evolve.**
+**A free, self-hosted creative studio for AI roleplay, persistent worlds and simulated lives.**
 
-Characters & group rooms · Living sandbox worlds · Autonomous virtual humans · Local models & cloud providers
+Character cards & group rooms · Living Worlds · Virtual Humans 2.0 · Optional RPG rules · Multiplayer · Video Adventures
 
-</div>
+[**Download v18**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.0.1) · [Release notes](docs/releases/v18.0.1.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
 
-## What is Horde Studio?
+Horde Studio brings your characters, stories and simulations into one local application. Import a character card and start a conversation, build a world with places and consequences, host a campaign with friends, or create a virtual human whose conversations draw on an ongoing life. Connect your own local models or cloud providers; the application does not include paid inference.
 
-**Horde Studio 17** is a creator-focused AI roleplay and simulation platform that brings character chat, interactive video storytelling, persistent worldbuilding, virtual-human simulation, and host-powered multiplayer into one application.
+## New in v18: Virtual Humans 2.0
 
-It is designed for stories that need to **remember, react, and evolve**. Build a cast, create a world around them, carry consequences across sessions, or simulate an AI person with routines, relationships, moods, memories, and multiple timelines.
+### The texts are a window into a life.
 
-Horde Studio is **local-first**: the application runs on your computer and stores its primary state in your browser. You decide whether generation happens through a local model or a connected cloud provider.
+A message is one part of what is happening. Virtual Humans 2.0 connects conversations to a persistent simulation of places, travel, needs, supporting people, relationships and personal calendars. Open **Life** to inspect that state; open the social profile to see posts, photos and clips.
 
-> [!NOTE]
-> Local-first does not automatically mean fully offline. Content sent to a cloud model or media provider is processed under that provider's own terms. Use a local OpenAI-compatible endpoint when you want generation to remain on your machine.
-
----
-
-## See it in action
-
-### Real in-app screenshots
+**Aslyn Jonas is included as a starting point.** Explore her authored places and social profile, or use the AI builder to create someone of your own. Each new life starts without the publisher's personal chats, player relationships or memories.
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/marketing/v16.6.0/reddit-pack/screenshots/08-living-world-gameplay.png" alt="Horde Studio living World gameplay with persistent location, time, character stats and outfit state" /></td>
-    <td width="50%"><img src="assets/marketing/v16.6.0/reddit-pack/screenshots/06-virtual-human-social.png" alt="Horde Studio Virtual Human conversation with an optional persistent social feed" /></td>
+    <td width="50%"><img src="assets/marketing/v18.0.0/screenshots/chat.png" alt="Virtual Humans 2.0: Aslyn's conversation in a staged demo life" /></td>
+    <td width="50%"><img src="assets/marketing/v18.0.0/screenshots/feed.png" alt="Aslyn's social feed with an existing generated photo and caption" /></td>
   </tr>
   <tr>
-    <td align="center"><strong>Living Worlds</strong><br />Location, time, outfits, meters, mechanics and consequences stay attached to play.</td>
-    <td align="center"><strong>Virtual Humans</strong><br />Texting timelines connect to schedules, memory, delayed replies and an optional public life.</td>
+    <td><strong>Conversations with context</strong><br />Current activity and personal history inform the conversation, with optional short message bursts.</td>
+    <td><strong>A shared social life</strong><br />Feed, Gallery and Clips belong to the same life across persona-specific conversations.</td>
+  </tr>
+  <tr>
+    <td><img src="assets/marketing/v18.0.0/screenshots/map.png" alt="Virtual Humans 2.0 map showing places in the demo life" /></td>
+    <td><img src="assets/marketing/v18.0.0/screenshots/life.png" alt="Virtual Humans 2.0 Life view showing recorded simulation state" /></td>
+  </tr>
+  <tr>
+    <td><strong>Places and journeys</strong><br />Geography, travel and supporting people's activity are recorded state.</td>
+    <td><strong>Inspect the life behind the chat</strong><br />Review activity, people, needs, calendars and autonomy controls.</td>
   </tr>
 </table>
 
-![Horde Studio dedicated multiplayer campaign hub](assets/marketing/v16.6.0/reddit-pack/screenshots/04-multiplayer-hub.png)
+*Actual app screens from a staged demonstration, with AI replies and existing generated media. Starter posts are authored content; the screenshots do not imply that every pictured event happened autonomously.*
 
-Dedicated Multiplayer keeps party identities, campaign state and the host's model connection separate from single-player saves.
+What changes in practice:
 
-### Virtual humans who have somewhere else to be
+- **One life, distinct relationships.** Different player personas have their own conversations and relationship histories within the same persistent life.
+- **A day beyond the inbox.** Needs, travel, supporting people, calendars and bounded story proposals connect to activity and conversation context.
+- **Media with references.** Character, place and room references can guide supported image and video providers. New clips render on demand; public captions remain separate from production instructions.
+- **Visible controls.** Review autonomous permissions and spending limits. Gallery ideas can retain prompts and references before generating a paid image.
+- **Portable lives.** Export a clean character template or a Full Portable Human containing the saved life and conversations. ZIP packages keep media and compressed life data in separate files.
 
-![A Horde Studio Virtual Human conversation with real-time status, autonomous messages, timelines, and an in-chat generated photo](assets/readme/virtual-human-chat.png)
+Aslyn includes **28 starter posts, two private gallery photos, five clips and 62 approved visual references**, covering all **22 authored places and six rooms**. These are included starter assets, not a promise of automatic paid generation.
 
-Virtual Humans maintain their own clock, routine, mood, relationship state, memories, and availability. They can reply late, follow up on their own, refuse a request, send a context-aware photo or voice note, and continue across persistent or forked timelines.
+The local server must stay running for background life. Catch-up resumes after downtime; nothing simulates while the computer is off. This is a model of decisions and continuity, not a claim of consciousness or guaranteed human realism. Results vary by the model and provider you connect.
+
+[Start with Virtual Humans 2.0 →](docs/vh2/START-HERE.md)
+
+### How is this different from character chat?
+
+[SillyTavern](https://docs.sillytavern.app/) is an established LLM frontend with character cards, group chat, lorebooks, media integrations and an extensive [extension ecosystem](https://docs.sillytavern.app/extensions/). Horde Studio is a separate application that also imports SillyTavern-compatible character cards and presets.
+
+Horde's focus is the **built-in simulation around the conversation**: a saved life with spatial activity, needs and supporting people; structured World state and optional game rules; and host-owned multiplayer campaigns. These are integrated application systems rather than facts you must keep in a chat prompt. SillyTavern's core is not presented as this same integrated life simulator; its scripts and extensions can add substantial capabilities, and this is not a claim about everything its community can build.
+
+## The rest of the studio
+
+Virtual Humans 2.0 is the new flagship. Character roleplay, worldbuilding and shared campaigns remain central to Horde Studio.
+
+| Experience | What you can build or play |
+| --- | --- |
+| **Characters & Group Rooms** | Individual characters or a cast sharing a room, with personas, greetings, lorebooks, presets, regex scripts, rerolls and SillyTavern-compatible imports. |
+| **Living Worlds** | Settings with locations, rooms, routes, NPCs, factions, quests, inventories, time, weather and persistent consequences. Author starting lives, homes and social ties. |
+| **Optional RPG systems** | Choose Off for narrative, Light for equipment and checks, or Full for progression, requirements, resources and persistent effects. Rules are system-agnostic. |
+| **Dedicated Multiplayer** | Host a shared campaign over LAN or a configured Internet relay. The host owns canonical state and supplies the model connection; each player keeps their persona, sheet, inventory and turn. |
+| **Video Adventures** | Choose the next story beat and render it as a short video scene. A text Director plans choices; only the chosen path incurs video generation costs. Separate from simulation Worlds. |
+| **Persistent story memory** | Carry facts, relationships and unresolved threads across character-chat sessions. Inspect, pin, edit or archive memories, and continue, fork or start fresh. |
 
 <table>
   <tr>
-    <td width="50%">
-      <img src="assets/readme/world-living-society.png" alt="World Studio starting lives and living society editor" />
-    </td>
-    <td width="50%">
-      <img src="assets/readme/world-npc-editor.png" alt="World Studio NPC autonomy and agenda editor" />
-    </td>
+    <td width="50%"><img src="assets/marketing/v16.6.0/reddit-pack/screenshots/08-living-world-gameplay.png" alt="Living World gameplay with location, time, character stats and outfit state" /></td>
+    <td width="50%"><img src="assets/marketing/v16.6.0/reddit-pack/screenshots/04-multiplayer-hub.png" alt="Dedicated Multiplayer campaign hub" /></td>
   </tr>
   <tr>
-    <td align="center"><strong>Start anywhere</strong><br />Create starting lives, homes, families, roles, schedules, and social ties.</td>
-    <td align="center"><strong>Build people with agency</strong><br />Give NPCs goals, secrets, routines, autonomy, and persistent relationships.</td>
+    <td><strong>Build a playable world</strong><br />State and consequences stay attached to the campaign.</td>
+    <td><strong>Bring your party</strong><br />A shared campaign with independent player identities.</td>
   </tr>
 </table>
 
-> Screens shown are from the real application. Generated character imagery depends on the image provider and model you connect.
+*Living Worlds and Multiplayer screenshots are from v16.6 and illustrate those continuing modes.*
 
----
+## Your models, your machine
 
-## Core experiences
+Horde Studio is free to run and its source is available in this repository. The browser interface and local services run on your computer. Connect local OpenAI-compatible text servers, ComfyUI and supported local image endpoints, or choose cloud text and media providers.
 
-### Video Adventures — new in 17
+**Local storage does not make cloud generation private or free.** Selected providers receive the content required for their requests and may charge for generation. Video generation can take time and fail; reference support and output quality vary. Check connections and autonomous spending controls before enabling them.
 
-Video Adventures are a separate, story-first roleplay mode built around short generated scenes and contextual player choices. A fast World Director plans the complete bounded decision tree as inexpensive text in advance; Horde validates it, then renders only the opening and the path the player actually chooses so unused branches never incur video costs.
-
-- Context-aware choices across preplanned 4- or 13-scene blocks, plus a go-off-script action that prepares a new block
-- Persistent characters, reference images, visual styles, player viewpoint, canon and timelines
-- First-person and visible-player presentation modes
-- MiniMax H3 Max, Wan 3.0, Wan 3.0 Prime and LTX-2.3 Fast renderer selection
-- Ordered automatic fallbacks that preserve the Director beat and continuity frame
-- Background jobs, cancellation, recovery, local clip storage and timeline deletion
-- Session spending limits with renderer-aware duration and price estimates
-- Fal image generation for World visuals and Virtual Human photos
-- Fal video generation for Virtual Human story clips
-
-Video Adventures remain separate from simulation Worlds: neither definitions nor timelines are silently shared between the two experiences.
-
-### Persistent story memory — new in 16.7
-
-Character chats now keep a durable story continuity separate from individual chat sessions. Facts, relationships, current state, unresolved threads, and important scenes survive long-running roleplay without flooding the model with the entire transcript.
-
-- Continue, fork, or start fresh when creating a chat session
-- Hybrid semantic and local lexical recall with recency, importance, pinned-canon, state, and open-thread weighting
-- Structured provenance so edited, rerolled, or deleted messages can invalidate memories they created
-- Contradiction handling that supersedes stale canon instead of silently keeping both versions
-- A dedicated Story Memory inspector for searching, pinning, editing, archiving, and deleting durable memories
-- Backward-compatible migration for existing episodic summaries and embedding caches
-
-### Optional RPG systems — new in 16.6
-
-![Horde Studio 16.6 optional RPG systems](assets/marketing/v16.6.0/horde-studio-v16.6.0-rpg-systems.png)
-
-Worlds and dedicated Multiplayer campaigns now share one system-agnostic mechanics engine. Use **Off** for pure narrative, **Light** for equipment and checks, or **Full** for progression, requirements, resources and persistent effects.
-
-- Weapons, armor, clothing, consumables, tools, cyberware and custom items
-- Equipment slots, damage, armor, charges, durability, rarity and requirements
-- Gear modifiers for attributes, skills, defenses, resources and checks
-- Visible base and effective values on character sheets
-- Buffs, debuffs, status effects and progression in Full mode
-- Non-destructive live mechanics switching in Worlds and Multiplayer
-- Backward-compatible migration for existing text inventories
-
-The rules layer is optional. Disabling it pauses mechanics without deleting the party's builds, equipment or authored state.
-
-### Characters & Group Rooms
-
-Create individual AI characters or bring a full cast into a shared room.
-
-- Detailed character profiles, personas, greetings, examples, and behavioral instructions
-- One-to-one and multi-character roleplay
-- Multiple chat sessions, rerolls, continuations, editing, and summaries
-- Lorebooks, author guidance, long-term memory, presets, and regex scripts
-- SillyTavern-compatible character-card and preset imports
-
-### Persistent Worlds
-
-Build a playable setting instead of a disposable chat background.
-
-- Locations, maps, rooms, exits, NPCs, factions, settlements, and items
-- Quests, shops, inventories, stats, relationships, schedules, and starting lives
-- Travel, time, weather, outfits, world events, story threads, and secrets
-- Autonomous NPC goals, faction activity, movement, markets, and world-state changes
-- Persistent timelines that preserve the consequences of play
-- World audit and calibration tools for catching inconsistent state
-
-### Dedicated Multiplayer
-
-- Multiplayer campaigns remain separate from single-player saves and UI
-- One host owns canonical state and supplies the AI connection
-- Every player has an independent persona, sheet, inventory and turn
-- LAN rooms and bring-your-own Internet WebSocket relays
-- Round-robin play, reconnecting guests, permissions and party votes
-- Synchronized rules, equipment, resources, effects, encounters and progression
-
-### Virtual Humans
-
-Create an AI person designed to feel like they have a life beyond the current message.
-
-- Identity, personality, inner life, mood, relationships, and private boundaries
-- Eight-channel mixed emotions, appraisal, masking, rumination and delayed reactions
-- Optional adult-only desire and intimacy dynamics kept separate from trust, attraction and consent
-- Workweeks, sleep cycles, routines, commitments, locations, and wardrobes
-- Evolving memory and relationship context
-- Autonomous messages, photos, voice notes, and live-call-style interaction
-- Real-location and Open-Meteo weather grounding
-- Fresh timelines, persistent timelines, and timeline forks
-- Jane Harlow and Ashlyn “Ash” Reynolds included as complete showcase humans
-
-### Local-First Creative Control
-
-- Browser-based local storage through IndexedDB
-- Localhost-only Python bridge
-- Bring your own model and media providers
-- Optional **Horde Labs** cognition through a local server, the in-app **TinyBrain 2 / Needle** structured router, or the legacy embedded runtime
-- Validated local assists for social cues, world continuity, life beats, status briefs, and chat meters
-- Exportable characters, worlds, timelines, and backups
-- Provider credentials kept outside normal Horde Studio exports
-- No Node.js build process and no external Python packages required
+- Local browser data and a local Virtual Humans 2.0 simulation database
+- Exportable characters, worlds, conversations and saved lives
+- Provider credentials excluded from normal project exports
+- Vanilla HTML, CSS and JavaScript; Python bridge and Node.js simulation runtime
+- No frontend build process or dependency installation for the included application
 
 ---
 
@@ -198,9 +128,12 @@ Create an AI person designed to feel like they have a life beyond the current me
 
 ## Quick start
 
+Download the [v18 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.0.1), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
+
 ### Requirements
 
 - Python 3
+- Node.js 18 or newer for Virtual Humans 2.0 (or set `HORDE_NODE_EXECUTABLE`)
 - A modern desktop browser
 - An AI provider or local model server for generation
 
@@ -261,13 +194,14 @@ HORDE_MCP_PORT=43128 python3 horde_mcp_bridge.py --open
 ## First-time setup
 
 1. Launch Horde Studio.
-2. Open **Settings**.
+2. Open **Settings → Connections**.
 3. Choose a text provider:
    - Add an OpenRouter or GPTProto key, or
    - Configure a local OpenAI-compatible server.
 4. Select a model and test the connection.
 5. Optionally configure image generation, voice, weather grounding, and MCP providers.
-6. Create a character, virtual human, or world.
+6. Import or create a character, start a World, or open **Virtual Humans 2.0** and select Aslyn Jonas.
+7. For a Virtual Human, review **Life** and its autonomy controls before starting background activity.
 
 ---
 
@@ -319,9 +253,12 @@ Horde Studio supports portable project data and common roleplay formats.
 
 ### Virtual Human data
 
-- Virtual Human archives
-- Persistent and forked timelines
-- Included memories, relationship state, messages, and simulation state where supported by the selected export
+- `.horde_human.zip`: import directly without unpacking
+- Clean templates for sharing a character without personal player history
+- Full Portable Human packages with conversations, saved life and media
+- Legacy JSON `.horde_human` imports remain supported
+
+Imported lives are isolated copies. Keep the original installation until you have verified the restored life and media.
 
 Keep backups of important projects before upgrading or making large structural changes.
 
@@ -331,7 +268,7 @@ Keep backups of important projects before upgrading or making large structural c
 
 ### Application data
 
-Primary application state is stored in browser **IndexedDB** under the Horde Studio origin.
+Browser application data is stored in **IndexedDB** under the Horde Studio origin. Virtual Humans 2.0 also persists life state in the local service's **SQLite** database (`vh2-worlds.sqlite`) in the application configuration directory.
 
 Deleting browser site data, using a different browser profile, or changing the local origin can make that state unavailable. Export regular backups.
 
@@ -356,7 +293,7 @@ The included bridge binds to `127.0.0.1` rather than exposing the application to
 ## Project structure
 
 ```text
-Horde Studio 10+/
+hordestudio/
 ├── index.html                  # Application shell and views
 ├── style.css                   # Complete visual system
 ├── app.js                      # State, UI, chat, worlds, and simulations
@@ -379,8 +316,9 @@ Horde Studio 10+/
 Horde Studio intentionally keeps its stack simple and portable.
 
 - **Frontend:** vanilla HTML, CSS, and JavaScript
-- **Persistence:** IndexedDB
+- **Persistence:** IndexedDB plus SQLite for Virtual Humans 2.0
 - **Local bridge:** Python standard library
+- **Virtual Humans 2.0:** local Python service and Node.js simulation runtime
 - **Text APIs:** OpenAI-compatible chat-completion patterns plus supported cloud providers
 - **Media:** ComfyUI, compatible local image endpoints, MCP integrations, and TTS
 - **Build system:** none
@@ -394,8 +332,8 @@ This makes the project easy to inspect, modify, back up, and run without a packa
 Clone or download the repository, then run the local bridge:
 
 ```bash
-git clone <YOUR_REPOSITORY_URL>
-cd "Horde Studio 10+"
+git clone https://github.com/ddkhan24/hordestudio.git
+cd hordestudio
 python3 horde_mcp_bridge.py --open
 ```
 

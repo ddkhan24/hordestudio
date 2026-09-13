@@ -113,6 +113,13 @@ class Texting(unittest.TestCase):
         replies=[m for m in self.state()['communication']['messages'] if m.get('channel')=='call' and m['role']=='assistant']
         self.assertEqual(len(replies),1);self.assertEqual(replies[0]['text'],'Hey. Can you hear me?')
         self.assertEqual(replies[0]['callId'],'test-call')
+        self.cmd('call_turn',callId='test-call',text='Still there?')
+        self.queue();job=self.s.dialogue.claim();self.assertIsNotNone(job)
+        self.assertNotIn('For this text exchange',job['snapshot']['messages'][0]['content'])
+        self.assertTrue(self.s.dialogue.finish(job['id'],job['token'],'yep\nstill here'))
+        replies=[m for m in self.state()['communication']['messages'] if m.get('channel')=='call' and m['role']=='assistant']
+        self.assertEqual(len(replies),2);self.assertEqual(replies[-1]['text'],'yep\nstill here')
+        self.assertEqual(self.state(),self.s.replay(self.w))
 
     def test_grounded_reentry_timing_and_fatigue_preserve_relationship(self):
         state=copy.deepcopy(self.state());now=state['simAt']
@@ -200,7 +207,8 @@ class Texting(unittest.TestCase):
         self.assertEqual(model['identity']['textingStyle'],c['textingStyle'])
         self.assertEqual(model['voice']['affection'],fields['voice']['affection'])
         self.assertEqual(model['conversationBrief']['lengthPreference'],'brief')
-        self.assertIn('optionally be an array',request['messages'][0]['content'])
+        self.assertIn('return only a JSON reply envelope',request['messages'][0]['content'])
+        self.assertIn('1–4 nonempty strings',request['messages'][0]['content'])
         self.assertNotIn('always fragments',c['chatAvoid'])
         self.assertIn('phrasing only',request['messages'][0]['content'])
 

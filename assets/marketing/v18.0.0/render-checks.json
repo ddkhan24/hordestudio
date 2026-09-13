@@ -1,0 +1,57 @@
+{
+  "source": "render-campaign.html",
+  "slides": [
+    {
+      "slide": "1",
+      "overlaps": [],
+      "width": 1080,
+      "height": 1350
+    },
+    {
+      "slide": "2",
+      "overlaps": [],
+      "width": 1080,
+      "height": 1350
+    },
+    {
+      "slide": "3",
+      "overlaps": [],
+      "width": 1080,
+      "height": 1350
+    },
+    {
+      "slide": "4",
+      "overlaps": [],
+      "width": 1080,
+      "height": 1350
+    },
+    {
+      "slide": "5",
+      "overlaps": [],
+      "width": 1080,
+      "height": 1350
+    },
+    {
+      "slide": "6",
+      "overlaps": [],
+      "width": 1080,
+      "height": 1350
+    },
+    {
+      "slide": "7",
+      "overlaps": [],
+      "width": 1080,
+      "height": 1350
+    },
+    {
+      "slide": "8",
+      "overlaps": [],
+      "width": 1080,
+      "height": 1350
+    }
+  ],
+  "hero": {
+    "width": 1600,
+    "height": 900
+  }
+}

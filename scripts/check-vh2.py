@@ -40,6 +40,7 @@ def main():
     commands.append(('location_overlay',[sys.executable,'scratch/vh2_location_overlay_audit.py']))
     commands.append(('coordinate_edit',[sys.executable,'scratch/vh2_coordinate_edit_audit.py']))
     commands.append(('authored_context',[sys.executable,'scratch/vh2_authored_context_audit.py']))
+    commands.append(('dialogue_context',[sys.executable,'scratch/vh2_dialogue_context_audit.py']))
     commands.append(('authored_profile_contract',[node,'scratch/vh_authored_profile_contract_audit.js']))
     for suite in ('personal_calendar','life_adviser','story_service','complete_builder','compatibility','social_awareness','social_worker','weather','calls','starter_social','foundation','migration','horde_integration','dialogue','conversation_quality','texting','provider','communication','memory','media','transcript','outing_service','social','presence_service','plans_service','agency_service','library','backup','npc_service','population_service','people_service','relationship_lifecycle','gifts','travel_service','ecosystem','workers','lifestyle','extended_travel','reference_studies','calendar','player','history','delivery_gaps','realtime','live_data','expression_matrix','flights','feed_discovery','open_airports','flow_overhaul'):
         commands.append((suite,[sys.executable,'scratch/vh2_'+suite+'_audit.py']))
