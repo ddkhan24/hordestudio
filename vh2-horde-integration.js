@@ -62,7 +62,7 @@ function vh2ConversationActionDialog(companion,action){
 }
 function vh2Linked(companion){return companion&&getActiveCompanionTimeline(companion.id)?.vh2;}
 function vh2TextOnly(companion){if(!vh2Linked(companion))return false;showToast('This action is not connected to VH2 yet. Photos and simulated posts are available in the VH2 controls; calls are not available in VH2 yet.','info');return true;}
-async function vh2SyncProvider(companion){
+async function vh2SyncProvider(companion,options={}){
     const provider=companionTextProviderId(companion);
     if(!['openrouter','gptproto','nanogpt','nvidia','local'].includes(provider)){
         await mcpBridgeRequest('/vh2/dialogue-provider',{method:'POST',body:{disableScope:'horde:'+companion.id}});
@@ -72,7 +72,7 @@ async function vh2SyncProvider(companion){
     const headers=providerAuthHeaders(provider),key=(headers.Authorization||'').replace(/^Bearer\s+/i,'');
     const config={scope:'horde:'+companion.id,baseUrl:providerApiBase(provider),model:companion.model||state.globalSettings.defaultModel,
         apiKey:key,clearKey:true,enabled:providerHasCredentials(provider),maxTokens:Math.min(4096,companionProviderOutputBudget(companion)),
-        temperature:Math.max(0,Math.min(2,Number(companion.temperature??.8))),dailyLimit:state.globalSettings.companionAlwaysOnDailyLimit||6};
+        preserveDailyLimit:!options.updateDailyLimit,temperature:Math.max(0,Math.min(2,Number(companion.temperature??.8))),dailyLimit:state.globalSettings.companionAlwaysOnDailyLimit||6};
     const signature=JSON.stringify(config);
     if(vh2ProviderSignatures.get(companion.id)!==signature){
         await mcpBridgeRequest('/vh2/dialogue-provider',{method:'POST',body:config});

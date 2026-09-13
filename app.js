@@ -7,7 +7,7 @@ const STORE_NAME = 'state';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
-const HORDE_STUDIO_VERSION = '18.0.2';
+const HORDE_STUDIO_VERSION = '18.0.3';
 const HORDE_STUDIO_RELEASED_AT = '2026-09-13T04:30:00+05:00';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
@@ -1924,7 +1924,7 @@ function repairLoadedState() {
     state.globalSettings.companionAlwaysOnEnabled = state.globalSettings.companionAlwaysOnEnabled === true;
     state.globalSettings.companionAlwaysOnMessages = state.globalSettings.companionAlwaysOnMessages !== false;
     state.globalSettings.companionAlwaysOnSocial = state.globalSettings.companionAlwaysOnSocial !== false;
-    state.globalSettings.companionAlwaysOnDailyLimit = livingClamp(Math.round(Number(state.globalSettings.companionAlwaysOnDailyLimit) || 6), 1, 100);
+    state.globalSettings.companionAlwaysOnDailyLimit = livingClamp(Math.round(Number(state.globalSettings.companionAlwaysOnDailyLimit) || 6), 1, 1000);
     state.globalSettings.companionAlwaysOnMinimumMinutes = livingClamp(Math.round(Number(state.globalSettings.companionAlwaysOnMinimumMinutes) || 120), 15, 1440);
     state.globalSettings.companionAlwaysOnClientId = String(state.globalSettings.companionAlwaysOnClientId || '').slice(0, 120);
     state.globalSettings.companionAgencyPaused = state.globalSettings.companionAgencyPaused === true;
@@ -11068,7 +11068,11 @@ function setupGlobalSettings() {
         state.globalSettings.companionAlwaysOnEnabled = document.getElementById('global-companion-always-on').checked;
         state.globalSettings.companionAlwaysOnMessages = document.getElementById('global-always-on-messages').checked;
         state.globalSettings.companionAlwaysOnSocial = document.getElementById('global-always-on-social').checked;
-        state.globalSettings.companionAlwaysOnDailyLimit = livingClamp(parseInt(document.getElementById('global-always-on-daily-limit').value) || 6, 1, 100);
+        const previousDailyLimit=state.globalSettings.companionAlwaysOnDailyLimit;
+        state.globalSettings.companionAlwaysOnDailyLimit = livingClamp(parseInt(document.getElementById('global-always-on-daily-limit').value) || 6, 1, 1000);
+        if(previousDailyLimit!==state.globalSettings.companionAlwaysOnDailyLimit&&typeof vh2SyncProvider==='function'){
+            for(const human of state.companions.filter(c=>vh2Linked(c)))await vh2SyncProvider(human,{updateDailyLimit:true});
+        }
         state.globalSettings.companionAlwaysOnMinimumMinutes = livingClamp(parseInt(document.getElementById('global-always-on-minimum-minutes').value) || 120, 15, 1440);
         if (state.globalSettings.companionAlwaysOnEnabled) companionAlwaysOnClientId();
         state.globalSettings.localImageBaseUrl = normalizeLoopbackUrl(

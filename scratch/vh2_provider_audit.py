@@ -22,6 +22,12 @@ class Provider(unittest.TestCase):
     def status(self):return self.s.dialogue.list(self.w)[0]['status']
     @staticmethod
     def response(text='Hi',reason='stop'):return {'choices':[{'finish_reason':reason,'message':{'content':text}}]}
+    def test_background_sync_preserves_saved_budget(self):
+        self.s.dialogue_provider.save({**self.settings,'dailyLimit':500})
+        self.s.dialogue_provider.save({**self.settings,'dailyLimit':6,'preserveDailyLimit':True})
+        self.assertEqual(self.s.dialogue_provider.status()['dailyLimit'],500)
+        self.s.dialogue_provider.save({**self.settings,'dailyLimit':200})
+        self.assertEqual(self.s.dialogue_provider.status()['dailyLimit'],200)
     def test_mock_delivery_and_secret_isolation(self):
         self.queue();calls=[]
         def mock(config,key,messages):

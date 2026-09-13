@@ -93,6 +93,8 @@ class ProviderStore:
             config['scope']=scope
         with self.service.connect() as db:
             db.execute('BEGIN IMMEDIATE');prior=self.current(db,scope)
+            if body.get('preserveDailyLimit') is True and prior:
+                config['dailyLimit']=json.loads(prior['config'])['dailyLimit']
             secret=body.get('apiKey','')
             if not isinstance(secret,str) or len(secret)>4096 or any(c in secret for c in '\r\n'):raise ValueError('Invalid API key.')
             # Never carry a credential to a changed endpoint implicitly.
