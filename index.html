@@ -3303,6 +3303,7 @@
                                             <option value="local">Local / self-hosted</option>
                                             <option value="local_image">Local image server (OpenAI-compatible)</option>
                                             <option value="comfyui">ComfyUI workflow</option>
+                                            <option value="gemini">Google Gemini (direct API)</option>
                                             <option value="higgsfield">Higgsfield MCP</option>
                                             <option value="magnific">Magnific MCP</option>
                                         </select>
@@ -3947,8 +3948,8 @@
                         <input id="global-comfy-prompt-input" class="form-input" value="text">
                     </div>
                     <div class="form-col">
-                        <label class="form-label" for="global-comfy-reference-node">Reference image node</label>
-                        <input id="global-comfy-reference-node" class="form-input" placeholder="optional node ID">
+                        <label class="form-label" for="global-comfy-reference-node">Reference image nodes</label>
+                        <input id="global-comfy-reference-node" class="form-input" placeholder="e.g. 12, 18, 24 — identity, room, clothing">
                     </div>
                 </div>
                 <p class="form-hint">Profiles keep several workflows and node mappings ready to switch without replacing JSON. Horde Studio auto-detects standard CLIP prompt and KSampler seed nodes. Set a LoadImage node ID only when the workflow accepts the human’s identity reference.</p>

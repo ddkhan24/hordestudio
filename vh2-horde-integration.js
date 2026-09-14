@@ -179,6 +179,7 @@ function vh2ImageConfiguration(companion,saved={}){
  return {scope:'horde:'+companion.id,provider,enabled:saved.enabled===true,tool:mcp?companion.mcpImageTool:'',arguments:mcp?safeJsonClone(companion.mcpImageArguments||{}):{},model,dailyLimit:saved.dailyLimit||4,maxReferences:saved.maxReferences||10,apiKey,imageParameters:provider==='openrouter'?safeJsonClone(companion.imageParameters||{}):{},imageProviderOptions:provider==='openrouter'?safeJsonClone(companion.imageProviderOptions||{}):{},imageProviderTag:provider==='openrouter'?companion.imageProviderTag||'':'',imageProviderSlug:provider==='openrouter'?saved.imageProviderSlug||'':''};
 }
 function vh2SupportsDurableImages(companion,timeline=getActiveCompanionTimeline(companion.id)){
+ if(['local_image','comfyui'].includes(companion.imageSource))return false;
  const provider=timeline?.vh2?.imageProvider?.provider||((companion.imageSource==='provider'||!companion.imageSource)?companionImageProviderId(companion):companion.imageSource);
  return ['openrouter','gemini','magnific','higgsfield'].includes(provider);
 }
@@ -442,7 +443,7 @@ async function vh2PreparePhoto(companion,timeline,photoId,authored=safeJsonClone
         const snapshot=await mcpBridgeRequest('/vh2/photo-job?worldId='+encodeURIComponent(worldId)+'&id='+encodeURIComponent(photoId));
         const frozen={...authored,...snapshot.companion,id:authored.id};
         const renderer=timeline.vh2.imageProvider,referenceCapture=snapshot.destination==='reference'||!!snapshot.photoContext?.referenceStudy;
-        if(renderer?.configured&&!(referenceCapture&&authored.referenceImageSource))Object.assign(frozen,{imageSource:renderer.provider,imageModel:renderer.model==='provider default'?'':renderer.model,mcpImageTool:renderer.tool||'',mcpImageArguments:safeJsonClone(renderer.arguments||{}),imageParameters:safeJsonClone(renderer.imageParameters||{}),imageProviderOptions:safeJsonClone(renderer.imageProviderOptions||{}),imageProviderTag:renderer.imageProviderTag||''});
+        if(renderer?.configured&&vh2SupportsDurableImages(companion,timeline)&&!(referenceCapture&&authored.referenceImageSource))Object.assign(frozen,{imageSource:renderer.provider,imageModel:renderer.model==='provider default'?'':renderer.model,mcpImageTool:renderer.tool||'',mcpImageArguments:safeJsonClone(renderer.arguments||{}),imageParameters:safeJsonClone(renderer.imageParameters||{}),imageProviderOptions:safeJsonClone(renderer.imageProviderOptions||{}),imageProviderTag:renderer.imageProviderTag||''});
         if(renderer?.configured&&vh2SupportsDurableImages(companion,timeline)&&!(referenceCapture&&authored.referenceImageSource)){
             const preview=await mcpBridgeRequest('/vh2/photo-preview?worldId='+encodeURIComponent(worldId)+'&id='+encodeURIComponent(photoId));
             const references=await Promise.all(preview.referenceAssetIds.map(id=>vh2PhotoData(vh2PhotoAssetUrl(worldId,id))));
@@ -459,9 +460,9 @@ async function vh2PreparePhoto(companion,timeline,photoId,authored=safeJsonClone
         const bibleReferences=await Promise.all((snapshot.referenceAssets||[]).map(e=>vh2PhotoData(vh2PhotoAssetUrl(worldId,e.assetId))));
         if(context.assetStudy?.role==='identity'&&!bibleReferences.length&&authored.basePhoto)bibleReferences.push(await vh2PhotoData(authored.basePhoto));
         context.bibleRoles=(snapshot.referenceAssets||[]).map(e=>({role:e.role,label:e.label}));
-        const references=companionPhotoReferences(frozen,snapshot.scene,{photoContext:context,previousPhoto:previous,bibleReferences});
+        const references=await Promise.all(companionPhotoReferences(frozen,snapshot.scene,{photoContext:context,previousPhoto:previous,bibleReferences}).map(source=>vh2PhotoData(source)));
         if(context.referenceStudy&&(!context.assetStudy||context.assetStudy.requiresReference)&&!references.length)throw Error('Upload and approve an identity reference before generating missing views.');
-        if(references.length>1&&['local_image','comfyui'].includes(frozen.imageSource))throw Error('This local image route cannot yet preserve multiple VH2 references. Choose a multi-reference provider.');
+        if(references.length>1&&['local_image'].includes(frozen.imageSource))throw Error('This local image route cannot yet preserve multiple VH2 references. Choose a multi-reference provider.');
         const referenceHashes=await Promise.all(references.map(async ref=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(ref)))).map(b=>b.toString(16).padStart(2,'0')).join('')));
         const manifest={style:context.style||'',direction:context.direction||'',promptPreview:buildCompanionPhotoPrompt(frozen,snapshot.scene,{photoContext:context,previousPhoto:previous,atMs:context.atMs,captureType:snapshot.captureType}),referenceHashes,provider:String(['higgsfield','magnific','local_image','comfyui'].includes(frozen.imageSource)?frozen.imageSource:companionImageProviderId(frozen)),model:String(frozen.imageModel||'provider default')};
         return {snapshot,frozen,context,previous,bibleReferences,references,manifest,photoId};

@@ -3127,21 +3127,26 @@ def comfy_generate(body: dict[str, Any]) -> str:
     if seed_node:
         set_workflow_input(workflow, seed_node, seed_input, int(body.get("seed") or secrets.randbelow(2**31)))
 
-    reference = str(body.get("reference") or "")
-    reference_node = str(mapping.get("referenceNode") or "")
+    references = body.get("references", [body["reference"]] if body.get("reference") else [])
+    if not isinstance(references, list) or len(references)>20:
+        raise ValueError("ComfyUI accepts up to 20 reference images.")
+    nodes = [str(v).strip() for v in str(mapping.get("referenceNode") or "").split(",") if str(v).strip()]
+    if not nodes:
+        nodes = [str(k) for k,v in workflow.items() if isinstance(v,dict) and v.get("class_type")=="LoadImage"]
+    if references and len(nodes)<len(references):
+        raise ValueError(f"This ComfyUI workflow needs {len(references)} LoadImage inputs for these references, but has {len(nodes)}. Add connected LoadImage nodes or map their comma-separated IDs in reference order.")
     reference_input = str(mapping.get("referenceInput") or "image")
-    if reference and reference_node:
-        upload, boundary = multipart_image(reference)
-        status, _, raw = http_request(
-            base + "/upload/image", "POST",
-            {"Accept": "application/json", "Content-Type": f"multipart/form-data; boundary={boundary}"},
-            upload, 120,
-        )
-        uploaded = json.loads(raw.decode("utf-8")) if raw else {}
-        if not 200 <= status < 300 or not uploaded.get("name"):
+    if any(not isinstance(workflow.get(node,{}).get('inputs'),dict) or reference_input not in workflow[node]['inputs'] for node in nodes[:len(references)]):
+        raise ValueError("A configured ComfyUI reference node/input does not exist.")
+    uploads = [multipart_image(reference, f"horde-reference-{i}.png") for i,reference in enumerate(references)]
+    for node,(upload,boundary) in zip(nodes,uploads):
+        status, _, raw = http_request(base + "/upload/image", "POST",
+            {"Accept":"application/json","Content-Type":f"multipart/form-data; boundary={boundary}"},upload,120)
+        uploaded=json.loads(raw.decode("utf-8")) if raw else {}
+        if not 200<=status<300 or not uploaded.get("name"):
             raise RuntimeError(f"ComfyUI reference upload failed ({status}).")
-        if not set_workflow_input(workflow, reference_node, reference_input, uploaded["name"]):
-            raise ValueError("The configured ComfyUI reference node/input does not exist.")
+        filename='/'.join(part for part in [uploaded.get('subfolder',''),uploaded['name']] if part)
+        set_workflow_input(workflow,node,reference_input,filename)
 
     status, _, result = json_request(base + "/prompt", "POST", payload={"prompt": workflow}, timeout=60)
     if not 200 <= status < 300 or not result.get("prompt_id"):
@@ -3797,6 +3802,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return self.respond(200, always_on_runtime.pause(str(body.get("reason") or "paused by user")))
             if parsed_path == "/always-on/stop":
                 return self.respond(200, always_on_runtime.stop())
+            if parsed_path == "/google-image/generate":
+                if not self.client_is_loopback():return self.respond(403,{"error":"Image generation is loopback-only."})
+                body=self.read_json();service=get_vh2_service()
+                import vh2_workers, vh2_image_adapters
+                with service.connect() as db:row=vh2_workers.current(db,body.get('scope'))
+                if not row:raise ValueError("Save a Google image connection first.")
+                config=json.loads(row['config'])
+                if config.get('provider')!='gemini' or not row['api_key']:raise ValueError("Save your Google API key in the photo settings first.")
+                refs=body.get('references',[])
+                if not isinstance(refs,list) or len(refs)>config.get('maxReferences',14) or any(not isinstance(r,str) or not re.fullmatch(r'data:image/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+',r) for r in refs):raise ValueError("Google references must be supported base64 images within the model reference limit.")
+                prompt=body.get('prompt')
+                if not isinstance(prompt,str) or not 1<=len(prompt)<=32000:raise ValueError("Enter an image prompt up to 32,000 characters.")
+                model=body.get('model') or config['model']
+                if not isinstance(model,str) or not 1<=len(model)<=200:raise ValueError("Choose a Google image model.")
+                return self.respond(200,{"image":vh2_image_adapters.gemini({**config,'model':model},row['api_key'],{'prompt':prompt,'input_references':[{'image_url':{'url':r}} for r in refs]})})
             if parsed_path == "/local-image/comfy/generate":
                 body = self.read_json()
                 return self.respond(200, {"image": comfy_generate(body)})

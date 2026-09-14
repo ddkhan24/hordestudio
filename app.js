@@ -7,7 +7,7 @@ const STORE_NAME = 'state';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
-const HORDE_STUDIO_VERSION = '18.0.3';
+const HORDE_STUDIO_VERSION = '18.0.4';
 const HORDE_STUDIO_RELEASED_AT = '2026-09-13T04:30:00+05:00';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
@@ -35591,10 +35591,10 @@ function normalizeCompanion(raw) {
         intimacyBoundaries: String(c.intimacyBoundaries || '').trim().slice(0, 2400),
         textProvider: ['provider', ...TEXT_PROVIDER_IDS].includes(c.textProvider)
             ? c.textProvider : 'provider',
-        imageSource: ['provider', 'openrouter', 'gptproto', 'nanogpt', 'fal', 'local', 'local_image', 'comfyui', 'higgsfield', 'magnific'].includes(c.imageSource)
+        imageSource: ['provider', 'openrouter', 'gptproto', 'nanogpt', 'fal', 'local', 'local_image', 'comfyui', 'gemini', 'higgsfield', 'magnific'].includes(c.imageSource)
             ? c.imageSource : 'provider',
         imageModel: typeof c.imageModel === 'string' ? c.imageModel : '',
-        referenceImageSource: ['provider','openrouter','gptproto','nanogpt','fal','local','local_image','comfyui','higgsfield','magnific'].includes(c.referenceImageSource) ? c.referenceImageSource : '',
+        referenceImageSource: ['provider','openrouter','gptproto','nanogpt','fal','local','local_image','comfyui','gemini','higgsfield','magnific'].includes(c.referenceImageSource) ? c.referenceImageSource : '',
         referenceImageModel: typeof c.referenceImageModel === 'string' ? c.referenceImageModel.slice(0,500) : '',
         mcpImageTool: typeof c.mcpImageTool === 'string' ? c.mcpImageTool.trim().slice(0, 300) : '',
         mcpImageArguments: isPlainObject(c.mcpImageArguments) ? safeJsonClone(c.mcpImageArguments) : {},
@@ -40915,6 +40915,7 @@ function companionPhotoPrevious(messages,context,minutes=90,allowSameTime=false)
 }
 function companionPhotoReferences(companion,scene,options={}){
     if(options.includeReference===false||options.locationReferenceOnly)return [];
+    if(Array.isArray(options.resolvedReferences))return options.resolvedReferences;
     if(options.photoContext?.assetStudy)return [...new Set((options.bibleReferences||[]).filter(Boolean))];
     if(options.photoContext?.referenceStudy)return [...new Set([companion.basePhoto,...(options.bibleReferences||[])].filter(Boolean))];
     const room=companionPhotoLocationReference(companion,scene,{...options,photoLocationId:options.photoContext?.roomId||options.photoLocationId});
@@ -41036,7 +41037,7 @@ function renderCompanionPhotoLocations(companion) {
 }
 
 function companionPhotoReferenceGuide(companion,scene,options={}){
- const refs=companionPhotoReferences(companion,scene,options);if(!refs.length)return '';
+ const refs=companionPhotoReferences(companion,scene,{...options,resolvedReferences:undefined});if(!refs.length)return '';
  const jobs=new Map(),add=(ref,job)=>{const index=refs.indexOf(ref);if(index<0)return;const list=jobs.get(index)||[];if(!list.includes(job))list.push(job);jobs.set(index,list);};
  add(companion.basePhoto,'Main person: preserve facial identity and body proportions; clothing and background come from the requested moment.');
  add(options.previousPhoto?.photo,'Previous moment: preserve exact outfit, surroundings and lighting; change only the requested gesture or framing.');
@@ -41621,7 +41622,7 @@ async function generateCompanionMcpPhoto(companion, sceneDescription, options = 
 
 async function generateCompanionLocalPhoto(companion, sceneDescription, options = {}) {
     const references=companionPhotoReferences(companion,sceneDescription,options);
-    if (references.length > 1) throw new Error('Place or garment references are not supported by this local workflow. Choose a multi-reference image provider.');
+    if (references.length > 1 && companion.imageSource!=='comfyui') throw new Error('This local image endpoint supports one reference. Use a multi-reference workflow for identity and location references.');
     const includeReference = references.length > 0;
     const prompt = buildCompanionPhotoPrompt(companion, sceneDescription, {
         ...options, hasReference: (!!companion.basePhoto || options.photoContext?.bibleRoles?.some(r=>r.role==='identity')) && options.includeReference !== false
@@ -41635,7 +41636,7 @@ async function generateCompanionLocalPhoto(companion, sceneDescription, options 
                 baseUrl: settings.comfyUiBaseUrl,
                 workflow: comfyProfile.workflow,
                 prompt,
-                reference: includeReference ? references[0] : '',
+                references,
                 mapping: {
                     promptNode: comfyProfile.promptNode,
                     promptInput: comfyProfile.promptInput || 'text',
@@ -41678,10 +41679,12 @@ async function generateCompanionLocalPhoto(companion, sceneDescription, options 
 }
 
 async function generateCompanionPhoto(companion, sceneDescription, options = {}) {
+    options={...options,resolvedReferences:await Promise.all(companionPhotoReferences(companion,sceneDescription,options).map(source=>vh2PhotoData(source)))};
     // Authored starter-profile photos belong to the blueprint, not live VH2 capture.
     if (!options.vh2Capture && !options.historicalPhoto && vh2Linked(companion)) {
         throw new Error('Generate live-life photos from Life → Media. Starter-profile photos can be generated in Person → Social Media.');
     }
+    if(companion.imageSource==='gemini'){const result=await mcpBridgeRequest('/google-image/generate',{method:'POST',body:{scope:'horde:'+companion.id,model:companion.imageModel,prompt:buildCompanionPhotoPrompt(companion,sceneDescription,options),references:options.resolvedReferences},timeoutMs:200000});return result.image;}
     if (['higgsfield', 'magnific'].includes(companion.imageSource)) {
         return generateCompanionMcpPhoto(companion, sceneDescription, options);
     }
@@ -44048,7 +44051,7 @@ function renderCompanionStudioForm() {
     const textProviderSelect = document.getElementById('cs-text-provider');
     if (textProviderSelect) textProviderSelect.value = companion.textProvider || 'provider';
     populateCompanionTextModelPicker(companion);
-    if (!['higgsfield', 'magnific', 'comfyui'].includes(companion.imageSource)) populateCompanionImageModelPicker(companion);
+    if (!['higgsfield', 'magnific', 'comfyui', 'gemini'].includes(companion.imageSource)) populateCompanionImageModelPicker(companion);
     else populateCompanionMcpTools(companion);
     populateCompanionTTSModelPicker(companion);
 }
@@ -44648,7 +44651,7 @@ async function companionMcpDiscoverModels(provider, tools) {
 }
 
 function updateCompanionImageSourceUI(companion) {
-    const source = ['provider', 'openrouter', 'gptproto', 'nanogpt', 'fal', 'local', 'local_image', 'comfyui', 'higgsfield', 'magnific'].includes(companion.imageSource)
+    const source = ['provider', 'openrouter', 'gptproto', 'nanogpt', 'fal', 'local', 'local_image', 'comfyui', 'gemini', 'higgsfield', 'magnific'].includes(companion.imageSource)
         ? companion.imageSource : 'provider';
     const isMcp = ['higgsfield', 'magnific'].includes(source);
     const isComfy = source === 'comfyui';
@@ -44657,7 +44660,16 @@ function updateCompanionImageSourceUI(companion) {
     const providerControls = document.getElementById('cs-provider-image-controls');
     const mcpControls = document.getElementById('cs-mcp-image-controls');
     if (select) select.value = source;
-    providerControls?.classList.toggle('hidden', isMcp || isComfy);
+    providerControls?.classList.toggle('hidden', isMcp || isComfy || source==='gemini');
+    let google=document.getElementById('cs-google-image-controls');
+    if(!google){google=document.createElement('div');google.id='cs-google-image-controls';google.className='form-group';select?.parentElement?.append(google);}
+    google.classList.toggle('hidden',source!=='gemini');
+    if(source==='gemini'){
+        google.innerHTML='<label>Google image model<input class="form-input" data-model placeholder="gemini-2.5-flash-image"></label><label>Google AI Studio API key<input class="form-input" data-key type="password" autocomplete="off" placeholder="Blank keeps the saved key"></label><button type="button" class="tool-btn">Save Google image connection</button><p role="status"></p>';
+        const model=google.querySelector('[data-model]'),key=google.querySelector('[data-key]'),button=google.querySelector('button'),status=google.querySelector('[role=status]');
+        model.value=companion.imageModel||'gemini-2.5-flash-image';model.oninput=()=>{companion.imageModel=model.value.trim();};
+        button.onclick=async()=>{button.disabled=true;status.textContent='Saving…';try{const saved=await mcpBridgeRequest('/vh2/image-provider?scope='+encodeURIComponent('horde:'+companion.id));await mcpBridgeRequest('/vh2/image-provider',{method:'POST',body:{scope:'horde:'+companion.id,provider:'gemini',model:model.value.trim(),apiKey:key.value,enabled:saved.provider==='gemini'&&saved.enabled===true,dailyLimit:saved.dailyLimit||4,maxReferences:/gemini-2\.5/.test(model.value)?3:14}});companion.imageModel=model.value.trim();key.value='';await saveState();status.textContent='Google image connection saved.';}catch(error){status.textContent=error.message;}finally{button.disabled=false;}};
+    }
     mcpControls?.classList.toggle('hidden', !isMcp);
     const textProvider = providerDisplayName(companionTextProviderId(companion));
     const photoProvider = source === 'provider'
@@ -45881,7 +45893,7 @@ function setupCompanionsLogic() {
                 testReference.checked = true;
             }
             await saveState();
-            if (!['higgsfield', 'magnific', 'comfyui'].includes(companion.imageSource)) populateCompanionImageModelPicker(companion);
+            if (!['higgsfield', 'magnific', 'comfyui', 'gemini'].includes(companion.imageSource)) populateCompanionImageModelPicker(companion);
             else renderCompanionMcpToolSchema(companion);
             showToast('Generation reference normalized and saved.', 'success');
         } catch (error) {
@@ -46462,7 +46474,7 @@ function setupCompanionsLogic() {
     document.getElementById('cs-image-source').onchange = (e) => {
         const companion = getCompanion(state.editingCompanionId);
         if (!companion) return;
-        companion.imageSource = ['openrouter', 'gptproto', 'nanogpt', 'fal', 'local', 'local_image', 'comfyui', 'higgsfield', 'magnific'].includes(e.target.value)
+        companion.imageSource = ['openrouter', 'gptproto', 'nanogpt', 'fal', 'local', 'local_image', 'comfyui', 'gemini', 'higgsfield', 'magnific'].includes(e.target.value)
             ? e.target.value : 'provider';
         companion.imageModel = '';
         companion.imageProviderTag = '';
@@ -46472,7 +46484,7 @@ function setupCompanionsLogic() {
         companion.mcpImageArguments = {};
         updateCompanionImageSourceUI(companion);
         if (['higgsfield', 'magnific'].includes(companion.imageSource)) populateCompanionMcpTools(companion);
-        else if (companion.imageSource !== 'comfyui') populateCompanionImageModelPicker(companion, true);
+        else if (!['comfyui','gemini'].includes(companion.imageSource)) populateCompanionImageModelPicker(companion, true);
     };
     document.getElementById('cs-mcp-tool-search').oninput = () => {
         const companion = getCompanion(state.editingCompanionId);
