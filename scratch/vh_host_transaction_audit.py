@@ -28,10 +28,10 @@ probe = copy.deepcopy(snapshot)
 probe['now'] = now
 probe['messages'].append({'id':'future','role':'user','type':'text','text':'Later',
                          'timestamp':now+60000,'deliveredAt':now+60000,'awaitingReply':True})
-result = json.loads(subprocess.check_output([node, str(root/'vh-host-worker.js')], input=json.dumps(probe), text=True))
+result = json.loads(subprocess.check_output([node, str(root/'virtual_humans/engine/vh-host-worker.js')], input=json.dumps(probe), text=True))
 assert 'future' not in result['replyIds']
 probe['messages'][0]['type'] = 'photo'
-result = json.loads(subprocess.check_output([node, str(root/'vh-host-worker.js')], input=json.dumps(probe), text=True))
+result = json.loads(subprocess.check_output([node, str(root/'virtual_humans/engine/vh-host-worker.js')], input=json.dumps(probe), text=True))
 assert result['due'] is False and result['messages'][0]['awaitingReply']
 print('PASS future messages are excluded from the reply batch and attachments stay pending for the browser')
 manifest = {'enabled':True,'clientId':'test','handoffSeconds':45,'dailyLimit':6,'humans':[{
@@ -105,7 +105,7 @@ probe['companion']['lifeRuntime']['world']['followups'] = [
     {'id':'gift:host','text':'Opened a gift','status':'pending','dueAt':now-1000,'expiresAt':now+3600000}]
 probe['commit'] = {'text':'I opened your gift this morning.',
                    'state':{'conversation':{'followThrough':{'id':'gift:host','evidence':'I opened your gift'}}}}
-result = json.loads(subprocess.check_output([node,str(root/'vh-host-worker.js')],input=json.dumps(probe),text=True))
+result = json.loads(subprocess.check_output([node,str(root/'virtual_humans/engine/vh-host-worker.js')],input=json.dumps(probe),text=True))
 assert 'London' in result['dialogueGuidance']
 assert result['companion']['continuityRuntime']['playerFacts'][0]['personaId'] == 'london-profile'
 assert result['companion']['lifeRuntime']['world']['followups'][0]['status'] == 'addressed'
@@ -117,12 +117,12 @@ probe['messages'] = []
 probe['companion']['initiativeMode'] = 'balanced'
 probe['companion']['lifeProfile']['world']['frame'].update({'openerMode':'vh_first','openingDelayMinutes':0,'openerScenario':'Introduce yourself after a match.'})
 probe['companion']['continuityRuntime']['originScenarioConsumedAt'] = 0
-result = json.loads(subprocess.check_output([node,str(root/'vh-host-worker.js')],input=json.dumps(probe),text=True))
+result = json.loads(subprocess.check_output([node,str(root/'virtual_humans/engine/vh-host-worker.js')],input=json.dumps(probe),text=True))
 assert result['openingDueAt'] == now
 assert 'first conversation' in result['dialogueGuidance']
 probe['companion'] = result['companion']
 probe['commit'] = {'text':'Hey, good to meet you.','state':{}}
-result = json.loads(subprocess.check_output([node,str(root/'vh-host-worker.js')],input=json.dumps(probe),text=True))
+result = json.loads(subprocess.check_output([node,str(root/'virtual_humans/engine/vh-host-worker.js')],input=json.dumps(probe),text=True))
 assert result['openingDueAt'] == 0
 assert result['companion']['continuityRuntime']['originScenarioConsumedAt'] == now
 print('PASS explicit first contact works in the host and is consumed once')

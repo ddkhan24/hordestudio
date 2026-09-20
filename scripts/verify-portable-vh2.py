@@ -9,21 +9,44 @@ import tempfile
 from pathlib import Path
 
 def verify(app):
-    required={'vh-life-schema.js','vh_maps_budget.py','vh2_runtime.py','vh2-kernel-worker.js','vh2-horde-integration.js','vh2-vh1-fields.json'}
-    for path in app.glob('*.py'):
-        tree=ast.parse(path.read_text(),filename=str(path))
+    required = {app / name for name in (
+        'virtual_humans/__init__.py', 'virtual_humans/backend/__init__.py',
+        'virtual_humans/frontend/vh-page-builder.js',
+        'virtual_humans/engine/vh-life-schema.js',
+        'virtual_humans/backend/vh_maps_budget.py',
+        'virtual_humans/backend/vh2_runtime.py',
+        'virtual_humans/engine/vh2-kernel-worker.js',
+        'virtual_humans/frontend/vh2-horde-integration.js',
+        'virtual_humans/engine/vh2-vh1-fields.json')}
+    for path in app.rglob('*.py'):
+        tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
-            names=[a.name for a in node.names] if isinstance(node,ast.Import) else [node.module or ''] if isinstance(node,ast.ImportFrom) else []
-            required.update(name+'.py' for name in names if name.startswith('vh2_'))
-            if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='__import__' and node.args and isinstance(node.args[0],ast.Constant):
-                name=node.args[0].value
-                if isinstance(name,str) and name.startswith('vh2_'):required.add(name+'.py')
-    for path in app.glob('*.js'):
-        for name in re.findall(r"require\(['\"]\./([^'\"]+)['\"]\)",path.read_text()):
-            if name.startswith(('vh2','vh-')):required.add(name if name.endswith(('.js','.json')) else name+'.js')
-    missing=sorted(name for name in required if not (app/name).is_file())
-    if missing:raise ValueError('Portable VH2 dependencies missing: '+', '.join(missing))
-    print('Portable VH2 dependency closure passed.',flush=True)
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith('virtual_humans.backend.'):
+                        required.add(app / (alias.name.replace('.', '/') + '.py'))
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ''
+                if module == 'virtual_humans.backend' or (node.level and not module):
+                    required.update(app / 'virtual_humans/backend' / (alias.name + '.py')
+                                    for alias in node.names if alias.name != '*')
+                elif module.startswith('virtual_humans.backend.'):
+                    required.add(app / (module.replace('.', '/') + '.py'))
+                elif node.level and module.startswith('vh'):
+                    required.add(path.parent / (module.replace('.', '/') + '.py'))
+    for path in app.rglob('*.js'):
+        for name in re.findall(r"require\(['\"](\.[^'\"]+)['\"]\)", path.read_text()):
+            dependency = path.parent / name
+            if not dependency.suffix:
+                dependency = dependency.with_suffix('.js')
+            required.add(dependency)
+    missing = sorted(str(path.relative_to(app)) for path in required if not path.is_file())
+    if missing:
+        raise ValueError('Portable VH2 dependencies missing: ' + ', '.join(missing))
+    loose = [path.name for path in app.glob('vh*')
+             if path.suffix in {'.js', '.json', '.css', '.html', '.py'}]
+    assert not loose, 'Loose VH source files or compatibility shims are not allowed: ' + ', '.join(loose)
+    print('Portable VH2 dependency closure passed.', flush=True)
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -34,7 +57,7 @@ def main():
             code="""
 import sys
 from pathlib import Path
-from vh2_runtime import WorldService
+from virtual_humans.backend.vh2_runtime import WorldService
 s=WorldService(Path(sys.argv[2])/'test.sqlite',sys.argv[1],Path.cwd(),clock=lambda:1789030800000)
 try:
  w=s.command(dict(schemaVersion=1,key='create',type='create',name='Portable fixture'))['worldId']

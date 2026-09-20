@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),kernel=require('../vh2-kernel-worker'),plans=require('../vh2-plans-engine'),bonds=require('../vh2-social-bonds'),core=require('../vh-simulation-core');
+const assert=require('node:assert/strict'),kernel=require('../virtual_humans/engine/vh2-kernel-worker'),plans=require('../virtual_humans/engine/vh2-plans-engine'),bonds=require('../virtual_humans/engine/vh2-social-bonds'),core=require('../virtual_humans/engine/vh-simulation-core');
 const MIN=60000,START=Date.UTC(2026,8,11,17);
 function fixture(seed='social'){
  const places=[{id:'home',label:'Alex home',kind:'home',encounterScope:'nearby'},{id:'jo_home',label:'Jo home',kind:'home',encounterScope:'nearby'},{id:'lee_home',label:'Lee home',kind:'home',encounterScope:'nearby'},{id:'park',label:'Community park',kind:'social',encounterScope:'nearby'}];

@@ -5,8 +5,8 @@ import copy
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from scratch.vh2_realtime_audit import feed,f,SOURCE
-import vh2_realtime
-from vh2_runtime import WorldService,Conflict
+from virtual_humans.backend import vh2_realtime
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict
 ROOT=Path(__file__).resolve().parents[1]
 class ExtendedTravel(unittest.TestCase):
  def setUp(self):

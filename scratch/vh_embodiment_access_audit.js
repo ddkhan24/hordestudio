@@ -1,0 +1,64 @@
+'use strict';
+const {spawn}=require('node:child_process'),assert=require('node:assert/strict');
+const {chromium,launchOptions}=require('./browser_runtime').browserRuntime();
+const body=require('../virtual_humans/engine/vh-embodiment-engine');
+const kernel=require('../virtual_humans/engine/vh2-kernel-worker');
+
+assert(Object.keys(body.MODULES).length>=70,'Body/access library should be substantial, not a token dropdown.');
+assert(body.searchModules('wheelchair').some(row=>row.id==='manual_wheelchair'));
+assert(body.searchModules('armless').some(row=>row.id==='bilateral_arm_difference'));
+assert(body.searchModules('one leg').some(row=>row.id==='one_leg_difference'));
+assert(body.searchModules('deaf').some(row=>row.id==='deaf_signing'));
+assert(body.searchModules('mute').some(row=>row.id==='nonspeaking_aac'));
+let oneLeg=body.addModule({},'one_leg_difference',80);
+let oneLegContext=body.contextSnapshot(oneLeg,{});
+assert.equal(oneLegContext.modules.length,1);
+assert(!oneLegContext.resolved.supports.some(value=>/prosthe|wheelchair/i.test(value)),'A limb difference must not silently invent equipment.');
+let profile=body.addModule(oneLeg,'manual_wheelchair',100);
+profile=body.addModule(profile,'deaf_signing',80);
+profile=body.addModule(profile,'nonspeaking_aac',90);
+profile=body.addModule(profile,'speech_device',75);
+profile.details.capabilities='Transfers independently and uses a compact folding chair.';
+profile.details.communication='ASL with signers; text or AAC with nonsigners.';
+assert(body.activityScore(profile,{kind:'leisure',label:'Run up the stairs'})<-70);
+assert(body.activityScore(profile,{kind:'leisure',label:'Use an accessible wheelchair route'})>20);
+assert.match(body.prompt(profile,{}),/does not supply personality/i);
+assert.match(body.prompt(profile,{}),/ASL with signers/i);
+const conflicts=body.audit(profile,{activityOptions:[{id:'run',label:'Run up the stairs',kind:'leisure'}],weeklySchedule:[],travelLegs:[{from:'home',to:'work',mode:'WALK'}]});
+assert(conflicts.some(value=>/Run up the stairs/.test(value)));
+assert(conflicts.some(value=>/home.*work.*WALK/.test(value)));
+
+const now=Date.parse('2026-09-20T12:00:00Z');
+let human=kernel.run({create:true,name:'Ari',entityId:'body-action',now,profile:{age:28,embodimentProfile:profile,lifeProfile:{places:[{id:'home',label:'Home',kind:'home'}],weeklySchedule:[],activityOptions:[{id:'run',label:'Run up the stairs',kind:'leisure',startMinute:0,endMinute:1440,priority:30,durationMinutes:30},{id:'read',label:'Read an accessible ebook',kind:'leisure',startMinute:0,endMinute:1440,priority:30,durationMinutes:30}],sleepPolicy:{enabled:false}}}}).companion;
+for(let step=1;step<=3&&!human.vh2Decision?.choice;step++)human=kernel.run({companion:human,now:now+step*60000}).companion;
+assert(human.embodimentContext.modules.some(row=>row.id==='manual_wheelchair'));
+const candidates=human.vh2Decision.choice.candidates;
+assert(!candidates.some(row=>row.id.includes(':run:')),'A mechanically impossible activity must not remain a selectable candidate.');
+assert(human.vh2Decision.choice.excluded.some(row=>row.id.includes(':run:')&&row.reason==='body_access_infeasible'));
+assert(human.vh2Decision.choice.goalId.includes(':read:'),'Body/access mechanics must reach actual VH2 choice scoring.');
+
+(async()=>{const server=spawn(process.env.HORDE_PYTHON_EXECUTABLE||'python3',['scratch/vh2_browser_server.py'],{stdio:['ignore','pipe','pipe']});let browser;
+try{
+ const port=await new Promise((resolve,reject)=>{server.stdout.once('data',data=>resolve(+String(data).trim()));server.stderr.on('data',data=>process.stderr.write(data));server.once('exit',code=>reject(Error('server '+code)));});
+ const base=`http://127.0.0.1:${port}`;browser=await chromium.launch(launchOptions);const page=await browser.newPage({viewport:{width:1280,height:900}}),errors=[];
+ page.on('pageerror',error=>errors.push(error.message));await page.route('**/*',route=>route.request().url().startsWith(base)?route.continue():route.abort());
+ await page.goto(base+'/index.html');await page.addStyleTag({content:'*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}'});await page.waitForFunction(()=>typeof companionAgencyTimer!=='undefined'&&!!companionAgencyTimer);
+ const id=await page.evaluate(()=>{clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);hideGlobalSettings();const c=normalizeCompanion({id:'body-ui',name:'Ari',age:28,appearance:'Short dark hair.'});state.companions=[c];state.companionTimelines={};state.companionThreads={};ensureCompanionTimelineStore(c.id);openCompanionStudio(c.id);switchView('companionStudio');activateCompanionStudioTab('cs-identity');return c.id;});
+ const visibleState=await page.evaluate(()=>{const node=document.querySelector('.vh-body-studio');return{exists:!!node,bodyVisible:!!node&&!!(node.offsetWidth||node.offsetHeight||node.getClientRects().length),parent:node?.closest('.studio-panel')?.id,parentClass:node?.closest('.studio-panel')?.className,viewClass:document.getElementById('companion-studio-view')?.className};});assert(visibleState.bodyVisible,`Body studio hidden: ${JSON.stringify(visibleState)}; page errors: ${errors.join(' | ')}`);const count=await page.locator('#cs-body-library-count').innerText();assert(Number(count.match(/\d+/)[0])>=70,`Library failed to render: ${errors.join(' | ')}`);
+ const search=page.locator('#cs-body-library-search'),find=async(q,id)=>{await search.fill(q);assert(await page.locator(`[data-body-library="${id}"]`).isVisible(),`Missing ${id} for ${q}`);};
+ await find('wheelchair','manual_wheelchair');await find('armless','bilateral_arm_difference');await find('one leg','one_leg_difference');await find('deaf','deaf_signing');await find('mute','nonspeaking_aac');
+ await search.fill('');await page.locator('#cs-body-library-category').selectOption('supports & devices');assert((await page.locator('[data-body-library]').count())>=10);await page.locator('#cs-body-library-sort').selectOption('a-z');const labels=await page.locator('#cs-body-library-results .vh-body-library-card strong').allTextContents();assert.deepEqual(labels,[...labels].sort((a,b)=>a.localeCompare(b)));
+ await page.locator('#cs-body-library-category').selectOption('all');const scrolling=await page.locator('#cs-body-library-results').evaluate(node=>{const before=node.scrollTop;node.scrollTop=180;return{before,after:node.scrollTop,scrollHeight:node.scrollHeight,clientHeight:node.clientHeight,overflow:getComputedStyle(node).overflowY};});assert(scrolling.scrollHeight>scrolling.clientHeight&&scrolling.after>scrolling.before&&/auto|scroll/.test(scrolling.overflow),JSON.stringify(scrolling));
+ const add=async(q,id)=>{await search.fill(q);await page.locator(`[data-body-library="${id}"] [data-body-library-add]`).click();};
+ await add('one leg','one_leg_difference');await add('manual wheelchair','manual_wheelchair');await add('deaf','deaf_signing');await add('mute','nonspeaking_aac');assert.equal(await page.locator('[data-body-module]').count(),4);
+ const impact=page.locator('[data-body-impact="manual_wheelchair"]');await impact.fill('92');assert.equal(await impact.inputValue(),'92');
+ await page.locator('#cs-body-capabilities').fill('Transfers independently and folds the chair for accessible taxis.');await page.locator('#cs-body-access').fill('Step-free route, lift and transfer space.');await page.locator('#cs-body-communication').fill('ASL, text, or AAC depending on the other person.');
+ await page.evaluate(id=>{const c=getCompanion(id);c.lifeProfile.activityOptions=[{id:'stairs',label:'Run up the stairs',kind:'leisure',startMinute:0,endMinute:1440,priority:30,durationMinutes:20}];renderCompanionEmbodimentStudio(c);},id);assert.match(await page.locator('#cs-body-warnings').innerText(),/Run up the stairs/);
+ await page.locator('#save-companion-btn').click();await page.waitForFunction(()=>document.getElementById('vh-save-status').textContent.startsWith('Saved'));await page.reload();await page.addStyleTag({content:'*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}'});await page.waitForFunction(()=>typeof companionAgencyTimer!=='undefined'&&!!companionAgencyTimer);await page.evaluate(id=>{clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);hideGlobalSettings();openCompanionStudio(id);switchView('companionStudio');activateCompanionStudioTab('cs-identity');},id);
+ assert.equal(await page.locator('[data-body-module]').count(),4);assert.equal(await page.locator('#cs-body-capabilities').inputValue(),'Transfers independently and folds the chair for accessible taxis.');
+ await page.evaluate(id=>{state.activeCompanionId=id;openCompanionSimulationDetails();},id);assert.match(await page.locator('[data-body-diagnostics]').innerText(),/manual wheelchair/i);assert.match(await page.locator('[data-body-diagnostics]').innerText(),/Transfers independently/);
+ await page.locator('#close-companion-simulation-btn').click();
+ for(const width of [1040,390]){await page.setViewportSize({width,height:850});await page.evaluate(id=>{openCompanionStudio(id);activateCompanionStudioTab('cs-identity');},id);const overflow=await page.locator('.vh-body-studio').evaluate(node=>node.scrollWidth-node.clientWidth);assert(overflow<=2,`Body editor overflows by ${overflow}px at ${width}px`);}
+ assert.deepEqual(errors,[]);
+ console.log('PASS embodiment/access: 74-module library, independent traits/devices, aliases, real scrolling, persistence, diagnostics, responsive UI and VH2 action mechanics.');
+}finally{await browser?.close();server.kill('SIGTERM');}})().catch(error=>{console.error(error);process.exitCode=1;});

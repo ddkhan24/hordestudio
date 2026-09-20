@@ -10,8 +10,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link id="horde-fonts" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="preload" as="style">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=20260913-v18-storage">
-    <link rel="stylesheet" href="vh-workspace.css?v=20260913-v18-storage">
+    <link rel="stylesheet" href="style.css?v=20260920-creation-chat">
+    <link rel="stylesheet" href="virtual_humans/frontend/vh-workspace.css?v=20260920-creation-chat">
 </head>
 <body>
 <div id="app">
@@ -2191,18 +2191,18 @@
                 <header class="vh-hero landing-hero">
                     <div class="vh-hero-copy landing-hero-copy">
                         <span class="vh-eyebrow">Persistent human simulation</span>
-                        <h1>Virtual Humans 2.0</h1>
-                        <p>People with their own routines, memories and lives. Pick up a conversation or create someone new.</p>
+                        <h1>Virtual Humans</h1>
+                        <p>Continue a conversation, see what someone is doing, or create a new character.</p>
                     </div>
                     <div class="landing-actions">
                         <button id="open-vh-clips-btn" class="btn vh-clips-launch" type="button">
                             <span class="vh-clips-launch-icon" aria-hidden="true">▶</span>
-                            <span class="vh-clips-launch-copy"><strong>Clips</strong><small>Watch moments from your humans</small></span>
+                            <span class="vh-clips-launch-copy"><strong>Clips</strong><small>Moments from your humans</small></span>
                             <span class="vh-clips-launch-arrow" aria-hidden="true">›</span>
                         </button>
-                        <button id="import-companion-btn" class="btn btn-ghost">Import Human</button>
+                        <button id="import-companion-btn" class="btn btn-ghost">Import</button>
                         <input id="import-companion-input" type="file" hidden accept=".zip,.horde_human,.json,application/json">
-                        <button id="create-new-companion-btn" class="btn btn-primary vh-create-btn">+ New Virtual Human</button>
+                        <button id="create-new-companion-btn" class="btn btn-primary vh-create-btn">+ New human</button>
                     </div>
                 </header>
                 <div class="vh-toolbar landing-toolbar">
@@ -2249,7 +2249,7 @@
                     </div>
                     <div class="studio-nav-actions">
                         <button type="button" class="btn btn-ghost" onclick="vhOpenWorkspace('overview', state.editingCompanionId)">Life workspace</button>
-                        <button id="save-companion-btn" class="btn btn-success btn-full">Save Virtual Human</button>
+                        <button id="save-companion-btn" class="btn btn-success btn-full">Save human</button>
                         <button id="open-companion-chat-btn" class="btn btn-ghost btn-full" style="color:var(--accent);">💬 Open Chat</button>
                         <button id="export-companion-btn" class="btn btn-ghost btn-full" title="Export a clean template or the complete portable human">Export Human</button>
                         <button id="close-companion-studio-btn" class="btn btn-ghost btn-full">← Virtual Humans 2.0</button>
@@ -2259,7 +2259,7 @@
 
                 <div class="studio-content-wrap">
                     <div id="tab-cs-overview" class="studio-panel">
-                        <div class="panel-header"><h2>Build a Virtual Human</h2><p>Create the person first, then opt into the deeper life, media and model systems you want.</p></div>
+                        <div class="panel-header"><h2>Virtual Human architecture</h2><p>Author the person, their relationship context, autonomous life, expression systems, and runtime as one coherent whole.</p></div>
                         <div class="form-body creator-overview-grid">
                             <button type="button" class="creator-overview-card primary" data-companion-studio-target="cs-identity"><span>01</span><strong>Identity &amp; appearance</strong><small>Name them, define their voice and set consistent reference images.</small></button>
                             <button type="button" class="creator-overview-card" data-companion-studio-target="cs-mind"><span>02</span><strong>Mind &amp; relationship</strong><small>Set temperament, boundaries, starting context and emotional architecture.</small></button>
@@ -2288,8 +2288,8 @@
                     <!-- Identity -->
                     <div id="tab-cs-identity" class="studio-panel hidden">
                         <div class="panel-header">
-                            <h2>Identity &amp; Appearance</h2>
-                            <p>Who they are, how they look, and how they text.</p>
+                            <h2>Identity &amp; history</h2>
+                            <p>Author the person who exists before the first conversation: body, temperament, history, work, home, and social world.</p>
                         </div>
                         <div class="form-body">
                             <div class="vh-image-pair">
@@ -2338,9 +2338,39 @@
                                     <textarea id="cs-appearance" class="form-textarea" rows="3" placeholder="auburn hair, freckles across the nose, usually in an oversized hoodie..."></textarea>
                                 </div>
                             </div>
+                            <section class="form-section vh-body-studio" aria-labelledby="cs-body-title">
+                                <div class="vh-agency-heading">
+                                    <div>
+                                        <label class="form-label" id="cs-body-title">Body, senses &amp; access</label>
+                                        <p class="form-hint">Compose anatomy, mobility, sensory access, communication methods, chronic conditions and assistive technology without turning any of them into personality.</p>
+                                    </div>
+                                    <span class="vh-agency-live">Mechanical</span>
+                                </div>
+                                <div class="vh-mind-library-tools" role="search" aria-label="Body and access module library">
+                                    <label><span>Search library</span><input id="cs-body-library-search" class="form-input" type="search" placeholder="Try wheelchair, one leg, armless, Deaf, mute, chronic pain…" autocomplete="off"></label>
+                                    <label><span>Category</span><select id="cs-body-library-category" class="form-select"><option value="all">All categories</option></select></label>
+                                    <label><span>Sort</span><select id="cs-body-library-sort" class="form-select"><option value="relevance">Best match</option><option value="a-z">A–Z</option><option value="category">Category</option></select></label>
+                                </div>
+                                <div class="vh-mind-library-meta"><p id="cs-body-library-count" class="form-hint"></p><p class="form-hint">Traits, devices and accommodations are separate so “one leg” never silently invents a prosthesis or wheelchair.</p></div>
+                                <div id="cs-body-library-results" class="vh-mind-library-results" aria-live="polite"></div>
+                                <h4 class="vh-mind-subtitle">Active body &amp; access profile</h4>
+                                <div id="cs-body-active-modules" class="vh-mind-module-list" aria-live="polite"></div>
+                                <div class="vh-body-details">
+                                    <label><span>Identity wording &amp; history <small>optional</small></span><textarea id="cs-body-identity" class="form-textarea" rows="2" placeholder="How they describe this part of themselves; congenital, acquired, temporary or unknown…"></textarea></label>
+                                    <label><span>Capabilities &amp; techniques <small>optional</small></span><textarea id="cs-body-capabilities" class="form-textarea" rows="2" placeholder="What they do independently and how: transfers, one-handed techniques, residual vision, signing…"></textarea></label>
+                                    <label><span>Access needs &amp; accommodations <small>optional</small></span><textarea id="cs-body-access" class="form-textarea" rows="2" placeholder="Step-free route, captions, rest breaks, seating, interpreter, accessible transport…"></textarea></label>
+                                    <label><span>Communication preferences <small>optional</small></span><textarea id="cs-body-communication" class="form-textarea" rows="2" placeholder="ASL, text first, AAC, direct speech with extra time, captioned calls…"></textarea></label>
+                                    <label><span>Variability, fatigue &amp; flare pattern <small>optional</small></span><textarea id="cs-body-variability" class="form-textarea" rows="2" placeholder="What changes, common triggers, recovery time, good-day/bad-day range…"></textarea></label>
+                                    <label><span>Care, equipment &amp; assistance <small>optional</small></span><textarea id="cs-body-care" class="form-textarea" rows="2" placeholder="Devices used, charging or maintenance, medication schedule, assistance tasks—only what is true for this person…"></textarea></label>
+                                </div>
+                                <div id="cs-body-summary" class="vh-mind-summary">No body or access modules yet. Appearance remains independent.</div>
+                                <div id="cs-body-warnings" class="vh-body-warnings" aria-live="polite"></div>
+                                <p class="form-hint">“Everyday impact” controls how strongly the simulation considers a module during relevant choices. It does not decide whether the trait is real, visible or important to identity.</p>
+                            </section>
                             <div class="form-section">
                                 <label class="form-label">Personality</label>
                                 <textarea id="cs-personality" class="form-textarea" rows="5" placeholder="Warm but guarded until she trusts you. Sarcastic when nervous. Loves late-night conversations, hates being kept waiting."></textarea>
+                                <p class="form-hint">This can be realistic, obsessive, unsettling, eccentric, surreal, antagonistic, or otherwise heightened. Describe motives, triggers, masks, contradictions, and consequences—the system should preserve the archetype instead of sanding it into an agreeable “normal” person.</p>
                                 <label class="form-label" for="cs-behavior-examples">Behavior examples <span class="optional">optional</span></label>
                                 <textarea id="cs-behavior-examples" class="form-textarea" rows="4" placeholder="When busy: leaves messages unread, then returns with context.&#10;When hurt: gets brief instead of explaining immediately.&#10;When wrong: cools off, then apologizes directly.&#10;When excited: sends two short messages and a link."></textarea>
                                 <p class="form-hint">Concrete reactions teach the human more reliably than a long list of adjectives.</p>
@@ -2366,8 +2396,8 @@
                     <!-- Mind & Memory -->
                     <div id="tab-cs-mind" class="studio-panel hidden">
                         <div class="panel-header">
-                            <h2>Inner Life, Mood &amp; Simulated Life</h2>
-                            <p>The machinery underneath the personality: what they want, what they hide, how they attach, and what a normal week actually contains.</p>
+                            <h2>Personality &amp; opening situation</h2>
+                            <p>Add motives, boundaries and an opening situation. Leave details blank when they do not fit your character.</p>
                         </div>
                         <div class="form-body">
                             <div class="form-row">
@@ -2473,6 +2503,77 @@
                                 </div>
                                 <p class="form-hint">The engine permits joy, trust, fear, surprise, sadness, disgust, anger and anticipation to coexist. Derived labels and blends are descriptive, not forced diagnoses.</p>
                             </div>
+                            <section class="form-section vh-cognition-studio" aria-labelledby="cs-cognition-title">
+                                <div class="vh-agency-heading">
+                                    <div>
+                                        <label class="form-label" id="cs-cognition-title">Intelligence &amp; cognition</label>
+                                        <p class="form-hint">Use one overall reasoning anchor for speed, then tune the uneven abilities that make a mind specific.</p>
+                                    </div>
+                                    <label class="vh-test-check"><input id="cs-cognition-enabled" type="checkbox"><span>Use cognitive model</span></label>
+                                </div>
+                                <label class="vh-cognition-primary" for="cs-cognition-iq">
+                                    <span><strong>IQ-style reasoning anchor</strong><output id="cs-cognition-iq-out">100 · Capable</output></span>
+                                    <input id="cs-cognition-iq" type="range" min="55" max="160" value="100">
+                                </label>
+                                <p class="form-hint">Fictional authoring shorthand—not a diagnosis. It sets starting values; the dimensions below override it. The simulation never prints the number.</p>
+                                <details class="vh-cognition-advanced" open>
+                                    <summary>Fine-tune cognitive abilities</summary>
+                                    <p class="form-hint">A mathematical genius can miss social implication. A slow processor can reason deeply. A brilliant speaker can be disorganized. Move only what differs from the overall anchor.</p>
+                                    <div id="cs-cognition-axis-grid" class="vh-cognition-axis-grid"></div>
+                                </details>
+                                <details class="vh-cognition-advanced">
+                                    <summary>Knowledge, learning &amp; blind spots</summary>
+                                    <div class="vh-body-details vh-cognition-details">
+                                        <label><span>Expertise <small>learned, not implied by IQ</small></span><textarea id="cs-cognition-expertise" class="form-textarea" rows="2" placeholder="Deep knowledge, practiced skills, specialist vocabulary…"></textarea></label>
+                                        <label><span>Knowledge gaps <small>what they genuinely do not know</small></span><textarea id="cs-cognition-gaps" class="form-textarea" rows="2" placeholder="Unfamiliar fields, misconceptions, missing education…"></textarea></label>
+                                        <label><span>Learning style &amp; pace</span><textarea id="cs-cognition-learning" class="form-textarea" rows="2" placeholder="Learns by doing, needs repetition, grasps systems quickly…"></textarea></label>
+                                        <label><span>Blind spots &amp; reasoning errors</span><textarea id="cs-cognition-blindspots" class="form-textarea" rows="2" placeholder="Overcomplicates, trusts first impressions, misses sarcasm…"></textarea></label>
+                                        <label class="vh-mind-wide"><span>Adaptive &amp; everyday skills <small>independent of IQ</small></span><textarea id="cs-cognition-adaptive" class="form-textarea" rows="2" placeholder="Money, travel, self-care, tools, paperwork, asking for help…"></textarea></label>
+                                    </div>
+                                </details>
+                                <div id="cs-cognition-summary" class="vh-mind-summary">Cognitive modeling is off. Personality, education and competence still work normally.</div>
+                            </section>
+                            <section class="form-section vh-mind-studio" aria-labelledby="cs-mind-title">
+                                <div class="vh-agency-heading">
+                                    <div>
+                                        <label class="form-label" id="cs-mind-title">Mind architecture</label>
+                                        <p class="form-hint">Mix intense archetypes, behavioral patterns, lived-experience modules and adult desire cues. A cue creates pressure; restraint, values and consequences still decide behavior.</p>
+                                    </div>
+                                    <span class="vh-agency-live">Mechanical</span>
+                                </div>
+                                <div class="vh-mind-library-tools" role="search" aria-label="Mind module library">
+                                    <label><span>Search library</span><input id="cs-mind-library-search" class="form-input" type="search" placeholder="Try yandere, gooner, tweaker, nipple, shut-in…" autocomplete="off"></label>
+                                    <label><span>Category</span><select id="cs-mind-library-category" class="form-select"><option value="all">All categories</option></select></label>
+                                    <label><span>Sort</span><select id="cs-mind-library-sort" class="form-select"><option value="relevance">Best match</option><option value="a-z">A–Z</option><option value="category">Category</option></select></label>
+                                </div>
+                                <div class="vh-mind-library-meta"><p id="cs-mind-library-count" class="form-hint"></p><p id="cs-mind-preset-note" class="form-hint">Fictional danger, clinical lived experience, substance use and consensual adult interests are separate categories. Mix them deliberately.</p></div>
+                                <div id="cs-mind-library-results" class="vh-mind-library-results" aria-live="polite"></div>
+                                <h4 class="vh-mind-subtitle">Active mix</h4>
+                                <div id="cs-mind-active-presets" class="vh-mind-module-list" aria-live="polite"></div>
+                                <details class="vh-mind-advanced">
+                                    <summary>Tune the resolved mind</summary>
+                                    <p class="form-hint">Modules blend into these tendencies. Move a slider to override that dimension directly; reset it to return control to the mix.</p>
+                                    <div id="cs-mind-axis-grid" class="vh-mind-axis-grid"></div>
+                                </details>
+                                <details class="vh-mind-advanced">
+                                    <summary>Add an exact trigger</summary>
+                                    <p class="form-hint">Use concrete words or phrases. When one appears in a received message, the engine activates a time-limited urge and aftermath without forcing an action.</p>
+                                    <div class="vh-mind-trigger-form">
+                                        <label><span>Name</span><input id="cs-mind-trigger-label" class="form-input" maxlength="100" placeholder="e.g. Being compared to an ex"></label>
+                                        <label><span>Cues, comma separated</span><input id="cs-mind-trigger-cues" class="form-input" maxlength="1200" placeholder="my ex, someone else, you remind me of"></label>
+                                        <label><span>Pressure</span><select id="cs-mind-trigger-effect" class="form-select"></select></label>
+                                        <label><span>Intensity <output id="cs-mind-trigger-intensity-out">70</output></span><input id="cs-mind-trigger-intensity" type="range" min="0" max="100" value="70"></label>
+                                        <label><span>Cooldown, minutes</span><input id="cs-mind-trigger-cooldown" class="form-input" type="number" min="0" max="10080" value="45"></label>
+                                        <label class="vh-test-check"><input id="cs-mind-trigger-adult" type="checkbox"><span>Adult desire cue</span></label>
+                                        <label class="vh-mind-wide"><span>Possible expressions—not a forced script</span><textarea id="cs-mind-trigger-expression" class="form-textarea" rows="2" maxlength="500" placeholder="probe, become jealous, withdraw, confront, resist…"></textarea></label>
+                                        <label class="vh-mind-wide"><span>Aftermath</span><input id="cs-mind-trigger-aftermath" class="form-input" maxlength="400" placeholder="shame, temporary relief, rumination, regret…"></label>
+                                        <button id="cs-mind-trigger-add" class="btn btn-ghost vh-mind-wide" type="button">Add trigger</button>
+                                    </div>
+                                    <div id="cs-mind-trigger-list" class="vh-mind-trigger-list"></div>
+                                </details>
+                                <div id="cs-mind-summary" class="vh-mind-summary">No mind modules yet. Existing emotional and personality controls continue to work normally.</div>
+                                <p class="form-hint">Clinical modules model selected experiences, not a full diagnosis. They never automatically create violence, stalking, sexuality, or “split personalities.” Adult cues require an explicitly adult human and the separate desire system.</p>
+                            </section>
                             <div class="form-section">
                                 <div class="vh-agency-heading">
                                     <div>
@@ -2625,6 +2726,18 @@
                                 <label class="form-label" for="cs-starting-scenario">Opening scenario — used once</label>
                                 <textarea id="cs-starting-scenario" class="form-textarea" rows="4" placeholder="The immediate situation for the first exchange. After the first reply, Horde stores it as the first shared autobiographical episode and stops injecting it as the present."></textarea>
                                 <p class="form-hint">This becomes the first event between the player and this human. It will not keep replaying in later prompts.</p>
+                                <div class="form-section vh-first-contact">
+                                    <label class="form-label" for="cs-opening-mode">Who sends the first message?</label>
+                                    <select id="cs-opening-mode" class="form-select">
+                                        <option value="player_first">The player starts</option>
+                                        <option value="vh_first">The Virtual Human messages first</option>
+                                    </select>
+                                    <div id="cs-opening-message-wrap" class="vh-opening-message hidden">
+                                        <label class="form-label" for="cs-opening-message">Opening message</label>
+                                        <textarea id="cs-opening-message" class="form-textarea" rows="4" placeholder="Write the exact first text they send."></textarea>
+                                        <p class="form-hint">Sent exactly once, exactly as written, on a fresh conversation. This does not call an AI provider or use credits. Later proactive messages still follow Agency &amp; initiative.</p>
+                                    </div>
+                                </div>
                                 <p class="form-hint" id="cs-relationship-current">Current relationship: neutral.</p>
                             </div>
                             <div class="form-row">
@@ -2702,19 +2815,19 @@
                         <div class="panel-header vh-life-page-header">
                             <span class="vh-eyebrow">Simulation</span>
                             <h2>Life & everyday world</h2>
-                            <p>Set up their places, wardrobe and routines, or open the life they are living now.</p>
+                            <p>Set up the places, pressures, opportunities and recurring actions through which this specific person lives—including heightened, strange or unsettling patterns when authored.</p>
                         </div>
                         <div class="form-body">
                             <section class="vh-life-studio vh-life-dashboard">
                                 <div class="vh-life-studio-heading">
                                     <div>
                                         <span class="vh-eyebrow">Life generator</span>
-                                        <h3>A week that actually happens</h3>
-                                        <p class="form-hint">Uses Identity and Inner Life as source material, then creates commitments, recurring places, supporting lives, wardrobe and configurable story pacing.</p>
+                                        <h3>Add only the life details you want</h3>
+                                        <p class="form-hint">Generate places, people, clothing, routines or action opportunities separately. Start small; a supporting cast and a full weekly schedule are optional. Their personality should shape what they repeatedly choose—not be normalized away.</p>
                                     </div>
                                     <div class="vh-life-studio-actions">
                                         <button id="cs-start-life-manual-btn" class="btn btn-ghost" type="button">Start manually</button>
-                                        <button id="cs-initialize-life-btn" class="btn btn-primary" type="button">✦ Draft life setup</button>
+                                        <button id="cs-initialize-life-btn" class="btn btn-primary" type="button">Generate a section</button>
                                     </div>
                                 </div>
                                 <div class="vh-life-model-config">
@@ -3452,79 +3565,13 @@
                         </div>
                     </div>
 
-                    <!-- New-human creation entry (not part of permanent Studio navigation) -->
-                    <div id="tab-cs-builder" class="studio-panel hidden">
-                        <div class="panel-header">
-                            <span class="vh-eyebrow">New Virtual Human</span>
-                            <h2>How do you want to begin?</h2>
-                            <p>Start from rough material with AI, or author every field yourself. Both paths lead into the same Studio.</p>
-                        </div>
-                        <div class="form-body">
-                            <div class="vh-creation-methods">
-                                <article class="vh-creation-method active">
-                                    <span>Recommended</span>
-                                    <h3>Create from notes with AI</h3>
-                                    <p>Describe the person and where they live. AI connects their personality, homes, friends, clothes and everyday choices in one reviewed draft.</p>
-                                </article>
-                                <article class="vh-creation-method">
-                                    <span>Manual</span>
-                                    <h3>Start with a blank human</h3>
-                                    <p>Move directly into Identity and write the person yourself.</p>
-                                    <button id="cs-start-manual-btn" class="btn btn-ghost" type="button">Start manually →</button>
-                                </article>
-                            </div>
-                            <div class="person-builder-hero">
-                                <div>
-                                    <div class="person-builder-kicker">CREATE FROM NOTES WITH AI</div>
-                                    <h3>What do you know about them?</h3>
-                                    <p class="form-hint">One brief → a person and a playable world. Review the assumptions, start their life, then fine-tune anything later.</p>
-                                </div>
-                            </div>
-                            <div class="form-section">
-                                <label class="form-label">Your notes</label>
-                                <textarea id="cs-builder-input" class="form-textarea person-builder-input" rows="12" placeholder="e.g. 31, Pakistani-British architect, funny but emotionally avoidant. divorced parents. sends voice notes while walking home. hates performative vulnerability. secretly wants a boring stable life but keeps choosing chaos. lives in Manchester. Make the rest make sense..."></textarea>
-                            </div>
-                            <div class="form-row">
-                                <div class="form-col">
-                                    <label class="form-label" for="cs-builder-model">Builder model</label>
-                                    <div class="searchable-dropdown-wrap vh-searchable-field">
-                                        <input type="search" id="cs-builder-model" class="form-input" placeholder="Search models · blank uses your default" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="cs-builder-model-results" aria-expanded="false">
-                                        <div id="cs-builder-model-results" class="searchable-dropdown-results hidden" role="listbox" aria-label="Builder model suggestions"></div>
-                                    </div>
-                                    <p class="form-hint" id="cs-builder-model-status">Uses the active provider’s text-model catalog.</p>
-                                </div>
-                                <div class="form-col">
-                                    <label class="form-label">Depth</label>
-                                    <select id="cs-builder-depth" class="form-select">
-                                        <option value="deep" selected>Deep — psychologically coherent</option>
-                                        <option value="max">Max — exhaustive human dossier</option>
-                                        <option value="focused">Focused — concise but specific</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <button id="cs-build-person-btn" class="btn btn-primary btn-full person-builder-generate">Build person &amp; world</button>
-                            <div id="cs-builder-status" class="form-hint" style="margin-top:10px;" aria-live="polite">Nothing is sent until you press Build.</div>
-                            <div id="cs-builder-result" class="builder-preview-wrap hidden" style="margin-top:16px;">
-                                <div class="builder-preview-header">
-                                    <div class="builder-preview-title">Built virtual human</div>
-                                </div>
-                                <div class="builder-preview-body">
-                                    <div id="cs-builder-summary" class="preview-card-desc">—</div>
-                                    <div class="preview-action-row">
-                                        <button id="cs-builder-review-btn" class="btn btn-ghost">Review identity</button>
-                                        <button id="cs-builder-rebuild-btn" class="btn btn-ghost">Try again</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
                 </div>
             </div>
         </section>
 
         <section id="vh-workspace-view" class="view hidden">
-          <header class="vh-workspace-head"><div><span class="vh-eyebrow">Human workspace</span><h1 id="vh-workspace-name">Your human</h1><p id="vh-workspace-life"></p></div></header>
-          <div class="vh-workspace-layout"><nav id="vh-workspace-nav" aria-label="Human workspace"></nav><div class="vh-workspace-main"><header class="vh-workspace-section-head"><div><h2 id="vh-workspace-title">Overview</h2><p id="vh-workspace-description"></p></div><label class="vh-workspace-search">Find a setting or feature<input type="search" id="vh-workspace-search" placeholder="Try RSS, bible, routes, memory…"></label></header><div id="vh-workspace-feedback" role="status" aria-live="polite"></div><div id="vh-workspace-overview"></div><div id="vh-workspace-special"></div><div id="vh2-chat-controls"></div></div></div>
+          <header class="vh-workspace-head"><div><span class="vh-eyebrow">Live human</span><h1 id="vh-workspace-name">Your human</h1><p id="vh-workspace-life"></p></div></header>
+          <div class="vh-workspace-layout"><nav id="vh-workspace-nav" aria-label="Live human sections"></nav><div class="vh-workspace-main"><header class="vh-workspace-section-head"><div><h2 id="vh-workspace-title">Overview</h2><p id="vh-workspace-description"></p></div><label class="vh-workspace-search">Find a setting or feature<input type="search" id="vh-workspace-search" placeholder="Try routine, people, places or memory…"></label></header><div id="vh-workspace-feedback" role="status" aria-live="polite"></div><div id="vh-workspace-overview"></div><div id="vh-workspace-special"></div><div id="vh2-chat-controls"></div></div></div>
         </section>
         <!-- ────────── COMPANION CHAT (the actual texting thread) ────────── -->
         <section id="companion-chat-view" class="view hidden">
@@ -3883,7 +3930,7 @@
                     <input id="global-mcp-bridge-url" class="form-input" value="http://127.0.0.1:43127" spellcheck="false">
                     <button id="test-mcp-bridge-btn" class="btn btn-ghost" type="button">Test</button>
                 </div>
-                <p class="form-hint">Start Horde Studio with <code>Start Horde Studio.command</code>. OAuth tokens remain in the localhost bridge and are never placed in this page or exported.</p>
+                <p class="form-hint">Launch with <code>Start Horde Studio.bat</code> on Windows, <code>Start Horde Studio.command</code> on macOS, or <code>./start-horde-studio.sh</code> on Linux. OAuth tokens remain in the localhost bridge and are never placed in this page or exported.</p>
                 <div class="mcp-provider-grid">
                     <article class="mcp-provider-card" data-mcp-provider-card="higgsfield">
                         <div>
@@ -4913,6 +4960,11 @@
                     <span><strong>Character Template</strong><small>For sharing. Includes identity, authored life, starter feed, starter gallery and starter clips. Excludes chats, learned memories and relationship history.</small></span>
                     <em>Smaller</em>
                 </button>
+                <button id="export-companion-json-btn" class="vh-export-option" type="button">
+                    <span class="vh-export-option-icon" aria-hidden="true">{ }</span>
+                    <span><strong>Editable JSON Template</strong><small>Readable character and life settings for editing in a text editor. Import the edited JSON through the same Import button. Images are embedded; keep their data unchanged.</small></span>
+                    <em>Editable</em>
+                </button>
                 <button id="export-companion-portable-btn" class="vh-export-option featured" type="button">
                     <span class="vh-export-option-icon" aria-hidden="true">▣</span>
                     <span><strong>Full Portable Human</strong><small>For moving or backing up a living person. Includes every timeline, current feed, gallery, clips, comments, memories, relationships and simulation state. Local media is embedded.</small></span>
@@ -5182,23 +5234,29 @@
 <script src="labs-core.js?v=20260822-v161"></script>
 <script src="labs-tasks.js?v=20260822-v161"></script>
 <script src="labs-guide.js?v=20260822-v161"></script>
-    <script src="help-system.js?v=20260913-v18-storage"></script>
+    <script src="help-system.js?v=20260920-creation-chat"></script>
 <script src="labs-ui.js?v=20260822-v161"></script>
 <script src="rpg-mechanics.js?v=20260823-v166-rpg-release"></script>
 <script src="multiplayer-engine.js?v=20260902-v171"></script>
 <script src="multiplayer.js?v=20260902-v171"></script>
 <script src="video-worlds.js?v=20260912-consolidated-life"></script>
-    <script src="vh-conversation-engine.js?v=20260910-vh2-history"></script>
-    <script src="vh-activity-engine.js?v=20260912-consolidated-life"></script>
-    <script src="vh-world-engine.js?v=20260912-wardrobe-colors"></script>
-    <script src="vh-simulation-core.js?v=20260912-wardrobe-colors"></script>
-    <script src="vh-life-schema.js?v=20260913-v18-storage"></script>
-    <script src="vh2-horde-integration.js?v=20260913-v18-storage"></script>
-    <script src="vh-workspace.js?v=20260913-v18-storage"></script>
-    <script src="vh-assistant-ui.js?v=20260912-self-recovery"></script>
-    <script src="vh-setup-ui.js?v=20260912-self-recovery"></script>
+    <script src="virtual_humans/engine/vh-conversation-engine.js?v=20260910-vh2-history"></script>
+    <script src="virtual_humans/engine/vh-activity-engine.js?v=20260912-consolidated-life"></script>
+    <script src="virtual_humans/engine/vh-world-engine.js?v=20260912-wardrobe-colors"></script>
+    <script src="virtual_humans/engine/vh-simulation-core.js?v=20260912-wardrobe-colors"></script>
+    <script src="virtual_humans/engine/vh-embodiment-library.js?v=20260920-body-access"></script>
+    <script src="virtual_humans/engine/vh-embodiment-engine.js?v=20260920-body-access"></script>
+    <script src="virtual_humans/engine/vh-cognition-engine.js?v=20260920-cognition"></script>
+    <script src="virtual_humans/engine/vh-mind-library.js?v=20260920-expanded-library"></script>
+    <script src="virtual_humans/engine/vh-mind-engine.js?v=20260920-expanded-library"></script>
+    <script src="virtual_humans/engine/vh-life-schema.js?v=20260913-v18-storage"></script>
+    <script src="virtual_humans/frontend/vh2-horde-integration.js?v=20260920-creation-chat"></script>
+    <script src="virtual_humans/frontend/vh-workspace.js?v=20260920-creation-chat"></script>
+    <script src="virtual_humans/frontend/vh-assistant-ui.js?v=20260920-creation-chat"></script>
+    <script src="virtual_humans/frontend/vh-setup-ui.js?v=20260920-creation-chat"></script>
+    <script src="virtual_humans/frontend/vh-page-builder.js?v=20260920-creation-chat"></script>
     <script src="bundled-humans.js?v=20260913-v18-storage"></script>
     <script src="human-package.js?v=20260913-v18-storage"></script>
-    <script src="app.js?v=20260913-v18-storage"></script>
+    <script src="app.js?v=20260920-creation-chat"></script>
 </body>
 </html>

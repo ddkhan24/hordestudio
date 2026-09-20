@@ -11,7 +11,7 @@ async function observerProbe(change, committedAffect = false) {
     let active = timeline;
     const c = { id: 'h', separatedCognition: true, mood: {}, continuityRuntime: { revision: 0 } };
     let writes = 0, calls = 0;
-    const ctx = { console, VHConversationEngine: require('../vh-conversation-engine'), companionObserverQueues: new Map(), state: {},
+    const ctx = { console, VHConversationEngine: require('../virtual_humans/engine/vh-conversation-engine'), companionObserverQueues: new Map(), state: {},
         getCompanion: () => c, getActiveCompanionTimeline: () => active, getCompanionThread: () => active.messages,
         refreshCompanionObserverCapabilities: async () => {}, companionObserverPrompt: () => [],
         repairCompanionTurnCommit: async () => { calls++; begin(); return new Promise(resolve => { release = resolve; }); },

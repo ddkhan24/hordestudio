@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict');
-const engine=require('../vh-conversation-engine');
-const activities=require('../vh-activity-engine');
+const engine=require('../virtual_humans/engine/vh-conversation-engine');
+const activities=require('../virtual_humans/engine/vh-activity-engine');
 const now=100000;
 function person(){const state=activities.normalize();const goal=activities.addGoal(state,'focus','project',now-1000,'a chapter');goal.status='active';goal.steps[0].progressMs=250;
  return {humanDynamics:{energy:70,socialNeed:60,cooldownUntil:0},emotionExpression:'guarded',commitments:[{id:'promise',text:'Call tomorrow',status:'pending',dueAt:now+1000}],lifeRuntime:{activities:state},continuityRuntime:{conversation:engine.normalize()}};}

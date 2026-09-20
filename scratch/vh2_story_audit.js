@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),fs=require('node:fs'),kernel=require('../vh2-kernel-worker'),story=require('../vh2-story-engine'),plans=require('../vh2-plans-engine'),core=require('../vh-simulation-core');
+const assert=require('node:assert/strict'),fs=require('node:fs'),kernel=require('../virtual_humans/engine/vh2-kernel-worker'),story=require('../virtual_humans/engine/vh2-story-engine'),plans=require('../virtual_humans/engine/vh2-plans-engine'),core=require('../virtual_humans/engine/vh-simulation-core');
 const START=Date.UTC(2026,8,7,12),HOUR=3600000,MIN=60000;
 function fixture(seed='story'){
  const places=[['home','home'],['jo_home','home'],['cafe','social'],['park','outdoor'],['gym','social']].map(([id,kind])=>({id,kind,label:id}));
@@ -16,8 +16,8 @@ let c=fixture();story.ensure(c).policy.intensity=0;const before=structuredClone(
 for(const patch of [{vh2AutonomyPaused:true},{humanDynamics:{...c.humanDynamics,energy:10}},{humanDynamics:{...c.humanDynamics,stress:95}}]){const x={...structuredClone(c),...patch};x.vh2Story.policy.intensity=100;story.advance(x,START+3*HOUR,core);assert.equal(x.vh2Story.threads.length,0);}
 // Fictional closures affect canonical feasibility and expire without changing map facts.
 c.vh2Story.threads.push({id:'closure',kind:'complication',placeId:'park',at:START,endsAt:START+2*HOUR,status:'active'});
-assert.equal(require('../vh2-geography-engine').open(c.vh2Geography.places.park,START,core.companionLocalMinuteInfo,c,'park'),false);
-assert.equal(require('../vh2-geography-engine').open(c.vh2Geography.places.park,START+2*HOUR,core.companionLocalMinuteInfo,c,'park'),null);
+assert.equal(require('../virtual_humans/engine/vh2-geography-engine').open(c.vh2Geography.places.park,START,core.companionLocalMinuteInfo,c,'park'),false);
+assert.equal(require('../virtual_humans/engine/vh2-geography-engine').open(c.vh2Geography.places.park,START+2*HOUR,core.companionLocalMinuteInfo,c,'park'),null);
 assert.equal(c.vh2Geography.places.park.closed,undefined);story.finish(c,START+2*HOUR);assert.equal(c.vh2Story.threads[0].status,'resolved');
 // Pacing statistics isolate the director; physical outcomes are tested below.
 const rates={};for(const intensity of [0,15,40,70,100]){let count=0;for(let seed=0;seed<20;seed++){

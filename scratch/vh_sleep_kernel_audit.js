@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict'),vm=require('node:vm');
-const {buildContext}=require('./app_source'),engine=require('../vh-activity-engine'),worker=require('../vh-host-worker'),conversation=require('../vh-conversation-engine');
+const {buildContext}=require('./app_source'),engine=require('../virtual_humans/engine/vh-activity-engine'),worker=require('../virtual_humans/engine/vh-host-worker'),conversation=require('../virtual_humans/engine/vh-conversation-engine');
 const minute=60000,t=Date.UTC(2026,8,8,22),clone=x=>JSON.parse(JSON.stringify(x));
 const base={energy:65,hunger:20,stress:10,canRest:true,preferred:true};
 const seed=pressure=>engine.normalizeSleep({stage:'tired',pressure,lastAt:t,lastWakeAt:t-15*3600000});

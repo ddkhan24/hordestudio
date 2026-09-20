@@ -49,7 +49,7 @@ class CompleteBuilder(Lifestyle):
   self.assertEqual(c['lifeRuntime']['world']['balance'],250)
   self.assertIn('phone',c['lifeRuntime']['world']['inventory'])
   self.assertEqual(next(i for i in c['lifeProfile']['world']['items'] if i['id']=='phone')['referenceDescription'],'A dark green phone with a scratched matte case')
-  from vh2_assets import reference_prompt,reference_subjects
+  from virtual_humans.backend.vh2_assets import reference_prompt, reference_subjects
   self.assertIn('scratched matte case',reference_prompt('prop','front',reference_subjects(c)['prop']['phone']))
   self.assertEqual(s,self.s.replay(self.w))
   self.assertFalse(c.get('vh2ImagePolicy',{}).get('enabled',False),'Life generation must not enable paid rendering')
@@ -67,7 +67,7 @@ class CompleteBuilder(Lifestyle):
   self.cmd('apply_life_proposal',**self.draft());self.cmd('advance',steps=2)
   finance={'enabled':True,'startingBalance':999,'incomePerHour':0,'dailyIncome':0,'dailyExpense':0,'workPlaceIds':[]}
   before=self.state();version=before['truth']['companion']['vh2SetupVersion']
-  from vh2_runtime import Conflict
+  from virtual_humans.backend.vh2_runtime import Conflict
   with self.assertRaises(Conflict):self.cmd('apply_life_proposal',version=2,baseSetupVersion=version,proposal={'finance':finance})
   with self.assertRaises(Conflict):self.cmd('apply_life_proposal',version=2,baseSetupVersion=version,proposal={'possessions':[{'id':'another-phone','name':'Another phone','category':'object','description':'Silver phone'}]})
   self.assertEqual(self.state(),before)

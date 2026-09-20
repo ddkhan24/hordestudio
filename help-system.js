@@ -226,6 +226,10 @@
     }
 
     function nearbyHint(element) {
+        // A section hint explains its fields, not every action inside it.
+        // Buttons, links and disclosure summaries receive help only when they
+        // have an explicit registry entry, title or data-help value.
+        if (element.matches?.('button, a, summary')) return '';
         const parent = element.closest('label, article, .form-section, .settings-group, .setting-group, .form-grid > div');
         const hint = parent?.querySelector('.form-hint, small');
         const text = clean(hint?.textContent);
@@ -242,6 +246,7 @@
 
     function enhanceElement(element) {
         if (!(element instanceof Element)) return;
+        if (element.hasAttribute('data-vh-help-owned')) return;
         const explanation = explanationFor(element);
         if (!explanation) return;
         element.dataset.help = explanation;
@@ -259,7 +264,7 @@
             label = siblings.slice(0, position).reverse()
                 .find(candidate => candidate.matches?.('label, .form-label')) || null;
         }
-        if (label && label !== element) label.dataset.help = explanation;
+        if (label && label !== element && !label.hasAttribute('data-vh-help-owned')) label.dataset.help = explanation;
     }
 
     function enhance(root = document) {

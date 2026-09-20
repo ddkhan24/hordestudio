@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),engine=require('../vh2-psychology-engine'),decision=require('../vh2-decision-engine');
+const assert=require('node:assert/strict'),engine=require('../virtual_humans/engine/vh2-psychology-engine'),decision=require('../virtual_humans/engine/vh2-decision-engine');
 function fixture(){return {mood:{valence:0},lifeRuntime:{activities:{goals:[{id:'g',opportunityId:'walk',definitionKey:'v1',startedAt:1,steps:[{energy:-2,stress:-12,hunger:1}]}],events:[]},world:{events:[]}}};}
 function outcome(c,id,kind='completed'){c.lifeRuntime.activities.events.push({id,goalId:'g',kind,at:c.lifeRuntime.activities.events.length+100,summary:kind+' walk'});engine.advance(c,1000);}
 const c=fixture();engine.ensure(c);outcome(c,'e1');assert(c.mood.valence>0);assert(engine.experienceScore(c,c.lifeRuntime.activities.goals[0])>0);

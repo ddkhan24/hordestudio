@@ -2,7 +2,7 @@
 import sys,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_calendar,vh2_feeds
+from virtual_humans.backend import vh2_calendar; from virtual_humans.backend import vh2_feeds
 class Calendar(unittest.TestCase):
  def setUp(self):self.source={'id':'s','url':'https://example.org/events.ics','placeId':'venue','tags':['music'],'calendarVenueConfirmed':True};self.now=1789030800000
  def calendar(self,extra='',start='DTSTART:20260910T120000Z',end='DTEND:20260910T140000Z'):

@@ -28,7 +28,7 @@ assert.equal(c.parseCompanionBuilderObject({choices:[{message:{content:[{type:'t
 assert.equal(c.parseCompanionBuilderObject({choices:[{message:{tool_calls:[{function:{arguments:'{"name":"Tool response"}'}}]}}]}).name,'Tool response');
 console.log('PASS complete personality handoff across three distinct lives, explicit absences, no runtime leakage, functional income/contact/food links, chosen solitude and provider-neutral parsing.');
 
-const setupSource=require('node:fs').readFileSync(require('node:path').join(__dirname,'../vh-setup-ui.js'),'utf8');
+const setupSource=require('node:fs').readFileSync(require('node:path').join(__dirname,'../virtual_humans/frontend/vh-setup-ui.js'),'utf8');
 vm.runInContext(setupSource.slice(setupSource.indexOf('function vhProposalDependencyIssues('),setupSource.indexOf('function vhProposalDependencies(')),c);
 const rule={id:'course-attendance',label:'Course attendance',scheduleId:'course',minimumAttendance:.7,fee:0,missedStress:2};
 assert.equal(c.companionLifePolicyProblem('institutions',[rule]),'');

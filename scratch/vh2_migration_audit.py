@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_migration import inspect_archive
-from vh2_runtime import WorldService,Conflict
+from virtual_humans.backend.vh2_migration import inspect_archive
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict
 ROOT=Path(__file__).resolve().parents[1]
 SOURCE=(ROOT/'scratch/fixtures/vh2/portable-v3.json').read_text()
 

@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');
-const engine=require('../vh-conversation-engine');
+const engine=require('../virtual_humans/engine/vh-conversation-engine');
 const now=10000;
 const line="don't let it go to your head";
 const messages=[

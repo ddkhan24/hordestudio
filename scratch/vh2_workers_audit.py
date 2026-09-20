@@ -3,9 +3,9 @@ from test_runtime import node_executable
 import json,sys,tempfile,time,unittest,uuid
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService,Conflict
-from vh2_provider import UnknownOutcome
-import vh2_workers,vh2_backup
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict
+from virtual_humans.backend.vh2_provider import UnknownOutcome
+from virtual_humans.backend import vh2_workers; from virtual_humans.backend import vh2_backup
 PNG='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
 ROOT=Path(__file__).resolve().parents[1]
 class Workers(unittest.TestCase):
@@ -34,6 +34,16 @@ class Workers(unittest.TestCase):
   self.assertEqual(self.state(),self.s.replay(self.w));import gzip;self.assertNotIn(b'PRIVATE_FIXTURE_KEY',gzip.decompress(vh2_backup.export(self.s,self.w)))
  def test_unknown_is_never_resubmitted_after_restart(self):
   photo=self.prepare();self.s.image_executor=lambda *args:(_ for _ in ()).throw(UnknownOutcome('Unknown'));self.cmd('queue_photo_render',photoId=photo);self.finish();self.assertEqual(vh2_workers.status(self.s,self.w)[0]['status'],'unknown');self.s.close();self.s=self.open();self.s.image_executor=lambda *args:self.fail('Must not resubmit');vh2_workers.poll(self.s);self.assertEqual(self.state()['photos'][-1]['status'],'submitted')
+ def test_prompt_only_result_is_failed_without_delivering_a_photo(self):
+  photo=self.prepare();calls=[]
+  def render(*args):calls.append(1);return 'Portrait of a person standing in a sunlit room.'
+  self.s.image_executor=render;self.cmd('queue_photo_render',photoId=photo);self.finish()
+  job=vh2_workers.status(self.s,self.w)[0]
+  self.assertEqual(job['status'],'failed');self.assertIn('No photo was delivered',job['error'])
+  self.assertFalse(self.state()['photos'][-1].get('assetId'))
+  self.assertFalse(any(m.get('type')=='photo' for m in self.state()['communication']['messages']))
+  vh2_workers.poll(self.s);self.assertEqual(len(calls),1)
+  with self.s.connect() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM vh2_provider_outputs').fetchone()[0],0)
  def test_paused_manual_job_runs_in_background_loop(self):
   photo=self.prepare();self.s.image_executor=lambda *args:PNG;self.cmd('queue_photo_render',photoId=photo);self.s.start()
   deadline=time.monotonic()+13
@@ -52,7 +62,7 @@ class Workers(unittest.TestCase):
   from unittest.mock import patch,MagicMock
   response=MagicMock();response.__enter__.return_value.read.return_value=json.dumps({'data':[{'b64_json':PNG.split(',')[1],'media_type':'image/png'}]}).encode()
   opener=MagicMock();opener.open.return_value=response
-  with patch('vh2_workers.urllib.request.build_opener',return_value=opener):
+  with patch('virtual_humans.backend.vh2_workers.urllib.request.build_opener',return_value=opener):
    self.assertEqual(vh2_workers.image_transport({'baseUrl':'https://openrouter.ai/api/v1'},'FIXTURE',{'model':'fixture/image','prompt':'Test','n':1}),PNG)
   self.assertEqual(opener.open.call_args[0][0].full_url,'https://openrouter.ai/api/v1/images')
  def test_route_resolves_existing_journey(self):

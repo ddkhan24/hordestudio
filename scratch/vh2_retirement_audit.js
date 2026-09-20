@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),fs=require('node:fs'),kernel=require('../vh2-kernel-worker'),core=require('../vh-simulation-core');
+const assert=require('node:assert/strict'),fs=require('node:fs'),kernel=require('../virtual_humans/engine/vh2-kernel-worker'),core=require('../virtual_humans/engine/vh-simulation-core');
 const at=Date.UTC(2026,8,12,12),profile={lifeWildcardsEnabled:true,lifeProfile:{initializedAt:at,wildcardDeck:[{id:'old',label:'Invented argument',category:'conflict'}]}};
 const c=kernel.run({create:true,name:'Test',entityId:'retired',now:at,profile}).companion;
 c.lifeRuntime.activeWildcard={label:'Invented argument',startedAt:at,endsAt:at+3600000,availability:'private',placeLabel:'Somewhere else'};

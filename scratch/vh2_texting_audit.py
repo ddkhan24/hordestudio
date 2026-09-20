@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_conversation
+from virtual_humans.backend import vh2_conversation
 import vh2_dialogue_audit as fixtures
-import vh2_transcript
+from virtual_humans.backend import vh2_transcript
 
 
 class Texting(unittest.TestCase):

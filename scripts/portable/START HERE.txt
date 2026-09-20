@@ -1,0 +1,18 @@
+HORDE STUDIO — START HERE
+
+1. Extract the entire ZIP before opening anything.
+2. Start Horde Studio for your system:
+   Windows: double-click Start Horde Studio.bat
+   macOS: double-click Start Horde Studio.command
+   Linux: run ./start-horde-studio.sh in a terminal
+3. Keep the terminal open while using Horde Studio in your browser.
+
+Python 3 (or uv) is required. Virtual Humans also require Node.js 18+.
+The launcher opens the browser automatically.
+
+The app folder contains the supporting code, media, and documentation.
+Keep it beside the launchers. You do not need to open its individual files.
+More help: app/README.md. MCP setup: app/MCP_SETUP.md.
+
+Upgrading? Keep your old folder until your saves and settings are confirmed.
+A local .venv can live beside these launchers or inside app.

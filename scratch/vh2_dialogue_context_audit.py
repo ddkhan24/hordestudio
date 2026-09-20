@@ -7,8 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vh2_provider_audit as fixtures
-import vh2_conversation
-from vh2_dialogue import MAX_MESSAGE_BYTES, encode, plain_text_parts
+from virtual_humans.backend import vh2_conversation
+from virtual_humans.backend.vh2_dialogue import MAX_MESSAGE_BYTES, encode, plain_text_parts
 
 
 class DialogueContext(unittest.TestCase):
@@ -88,6 +88,67 @@ class DialogueContext(unittest.TestCase):
         self.assertTrue(audit['conversationBrief']['respondTo'])
         self.assertEqual(before, self.s.projection(self.w))
         self.assertEqual(request, self.snapshot())
+
+    def test_mind_architecture_reaches_provider_as_private_pressure_not_diagnosis_or_command(self):
+        mind = {'version': 1, 'enabled': True,
+            'presetMix': [{'id': 'possessive_fixation', 'intensity': 88}],
+            'axes': {'selfRestraint': 37},
+            'triggers': [{'id': 'comparison', 'label': 'Comparison', 'cues': ['my ex'],
+                'effect': 'jealousy', 'intensity': 80, 'cooldownMinutes': 45,
+                'expression': 'probe, withdraw, confront, or resist',
+                'aftermath': 'rumination or regret', 'adultOnly': False}]}
+        self.cmd('configure_expression_profile', fields={'mindProfile': mind})
+        request = self.snapshot()
+        self.assertEqual(request['context']['mind']['profile'], mind)
+        model = json.loads(request['messages'][1]['content'])
+        self.assertEqual(model['mind']['profile'], mind)
+        prompt = request['messages'][0]['content']
+        self.assertIn('active pressures must have visible behavioral weight', prompt)
+        self.assertIn('remain urges', prompt)
+        self.assertIn('Desire/arousal is never consent', prompt)
+        self.assertIn('never implies violence, stalking, sexuality or split personalities', prompt)
+
+    def test_embodiment_reaches_provider_as_capability_and_access_context_without_stereotypes(self):
+        embodiment = {'version': 1, 'enabled': True,
+            'modules': [
+                {'id': 'manual_wheelchair', 'impact': 82},
+                {'id': 'deaf_signing', 'impact': 70},
+            ],
+            'details': {
+                'identity': 'A wheelchair user and Deaf signer.',
+                'capabilities': 'Transfers independently and signs fluently.',
+                'accessNeeds': 'Step-free routes and visual alerts.',
+                'communication': 'Prefers sign language; uses text when an interpreter is unavailable.',
+                'variability': '',
+                'care': 'Ask before moving the chair or offering physical help.',
+            }}
+        self.cmd('configure_expression_profile', fields={'embodimentProfile': embodiment})
+        request = self.snapshot()
+        self.assertEqual(request['context']['embodiment']['profile'], embodiment)
+        model = json.loads(request['messages'][1]['content'])
+        self.assertEqual(model['embodiment']['profile'], embodiment)
+        prompt = request['messages'][0]['content']
+        self.assertIn('Keep established anatomy and equipment coherent', prompt)
+        self.assertIn('without infantilizing them', prompt)
+        self.assertIn('Do not invent symptoms, cures, helpers, barriers', prompt)
+
+    def test_cognition_reaches_provider_as_uneven_ability_not_a_caricature(self):
+        cognition = {'version': 1, 'enabled': True, 'iq': 138,
+            'axes': {'socialInference': 24, 'executiveFunction': 38, 'verbalReasoning': 91},
+            'details': {'expertise': 'Algebraic topology and obscure train timetables.',
+                'gaps': 'Poor knowledge of popular culture.', 'learning': 'Fast from formal systems.',
+                'blindSpots': 'Overcomplicates ordinary explanations.',
+                'adaptiveSkills': 'Often misses bills without calendar reminders.'}}
+        self.cmd('configure_expression_profile', fields={'cognitionProfile': cognition})
+        request = self.snapshot()
+        self.assertEqual(request['context']['cognition']['profile'], cognition)
+        model = json.loads(request['messages'][1]['content'])
+        self.assertEqual(model['cognition']['profile'], cognition)
+        prompt = request['messages'][0]['content']
+        self.assertIn('Use specific dimensions over its overall anchor', prompt)
+        self.assertIn('Never print the IQ-style score', prompt)
+        self.assertIn('use baby talk for low reasoning', prompt)
+        self.assertIn('make high reasoning omniscient', prompt)
 
     def test_brief_without_matching_conversation_retains_full_original_turn(self):
         context = {'conversationBrief': {'respondTo': [{'text': 'What is for dinner?'}]}}

@@ -3,9 +3,9 @@ from test_runtime import node_executable
 import sys, tempfile, unittest, uuid, json
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService, Conflict, encode
-from vh2_dialogue import LEASE_MS
-from vh2_provider import parse_response, RejectedOutput, NoRedirect
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict, encode
+from virtual_humans.backend.vh2_dialogue import LEASE_MS
+from virtual_humans.backend.vh2_provider import parse_response, RejectedOutput, NoRedirect
 ROOT=Path(__file__).resolve().parents[1]
 class Provider(unittest.TestCase):
     def setUp(self):

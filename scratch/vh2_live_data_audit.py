@@ -2,7 +2,7 @@
 import sys,json,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_live_data as live
+from virtual_humans.backend import vh2_live_data as live
 import vh2_ecosystem_audit as fixtures
 NOW=1788764400000
 class Adapters(unittest.TestCase):

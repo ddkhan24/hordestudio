@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from vh2_runtime import WorldService, Conflict, QUANTUM
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict, QUANTUM
 
 ROOT=Path(__file__).resolve().parents[1]
 NODE=node_executable(ROOT)

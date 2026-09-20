@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "worldId": "47a6412a-d208-54f5-a85f-eb74e10c1bfa",
+  "name": "Aslyn Jonas",
+  "copiedRevision": 1198,
+  "places": {
+    "home": {
+      "label": "Norte Town Lake Apartments",
+      "detail": "A two-bedroom off-campus apartment in a stucco complex near Tempe, shared with Jordan and Priya. The front door opens into a small living room with a sagging beige couch, a TV mounted on the wall, and Jordan's nursing textbooks stacked on the coffee table. The kitchen is a galley with a microwave that gets more use than the stove, a fridge covered in takeout magnets, and a perpetual pile of dishes. Aslyn and Jordan share one bedroom; Priya has the other. The AC runs constantly and hums through e",
+      "referenceDescription": "",
+      "referenceAliases": "",
+      "googlePlaceId": "ChIJfzGDKx8JK4cR_11KJTNPrd8"
+    },
+    "apartment_pool": {
+      "label": "Norte Town Lake Apartments pool",
+      "detail": "A small rectangular pool in the courtyard of the apartment complex, surrounded by cracked concrete and a few plastic lounge chairs. The water is over-chlorinated and slightly too warm from May through September. Aslyn comes here in the late afternoon to tan, scroll her phone, and occasionally float on her back staring at the sky. Sometimes other tenants are there; sometimes she and Jordan have it to themselves. There is a faded sign about pool hours that nobody follows.",
+      "referenceDescription": "",
+      "referenceAliases": "",
+      "googlePlaceId": "ChIJfzGDKx8JK4cR_11KJTNPrd8"
+    },
+    "dutch_bros": {
+      "label": "Dutch Bros on University Drive",
+      "detail": "A small drive-through and walk-up Dutch Bros coffee stand on University Drive, about a ten-minute walk from the apartment. The baristas are aggressively friendly in the Dutch Bros way and a couple of them know Aslyn's order by sight. She comes here almost every morning, orders a caramelizer with extra whip, and lingers for a few minutes checking her phone in the shade of the small patio overhang. The ground is always sticky and the line is always long but she does not care.",
+      "referenceDescription": "",
+      "referenceAliases": ""
+    },
+    "target": {
+      "label": "Target on Rural Road",
+      "detail": "The Target about fifteen minutes by bus from the apartment. Aslyn comes here for lip gloss, snacks, cheap basics, and the vague comfort of walking around a brightly lit store with no agenda. She always ends up in the beauty aisle and the snack aisle and leaves with things she did not intend to buy. The fluorescent lighting is unflattering but the AC is good. She sometimes comes here with Priya, who is more efficient about it.",
+      "referenceDescription": "",
+      "referenceAliases": ""
+    }
+  },
+  "rooms": {
+    "room_living_room": {
+      "label": "Living Room",
+      "description": "A small rectangular living room just inside the front door of the apartment. A sagging beige fabric couch sits against the long wall, its left cushion permanently dented from Aslyn's habitual spot. Opposite the couch, a flat-screen TV is mounted on the off-white stucco wall with a single HDMI cable dangling behind it. A low particleboard coffee table in front of the couch is cluttered with Jordan's nursing textbooks, empty Hot Cheetos bags, and a vanilla-scented candle that has never been lit. The carpet is builder-grade beige, slightly matted near the couch. A sliding glass door on the far wall leads to a narrow concrete balcony with a single plastic chair. The AC vent above the front door hums constantly. There is no art on the walls—just a few command-strip hooks holding a tote bag and a lanyard. Overhead lighting is a single flush-mount dome fixture; they usually leave it off and use the TV glow or the balcony light bleeding in."
+    },
+    "room_kitchen": {
+      "label": "Kitchen",
+      "description": "A narrow galley kitchen open to the living room on one end, with laminate countertops in a faded tan speckle pattern and dark-brown particle-board cabinets. The microwave on the counter gets the most use; the electric stove's burners are dusty. The fridge is white and covered in takeout magnets—Chipotle, Raising Cane's, a pizza place nobody remembers ordering from. Inside: oat milk, a Brita pitcher half-full, Priya's labeled meal-prep containers, a bag of shredded cheese, and condiments. A perpetual pile of dishes sits in the single-basin sink. Cinnamon Toast Crunch and Frosted Flakes boxes lean against the backsplash near a drying rack that is always full. The overhead fluorescent tube flickers slightly. A narrow strip of peel-and-stick tile lines the backsplash. A small trash can by the fridge overflows every other day."
+    },
+    "room_bathroom": {
+      "label": "Bathroom",
+      "description": "A single shared bathroom between the two bedrooms with a tub-shower combo behind a slightly mildewed beige curtain. The vanity has one sink, a smudged mirror, and barely enough counter space for three people's products—Aslyn's drugstore shampoo, purple toner bottle, vanilla body wash, and a scatter of hair ties crowd one corner; Jordan's skincare bottles line the other; Priya's toiletry bag sits zipped and tidy on the shelf above the toilet. The tile floor is white with grey grout that has darkened. A small Bluetooth speaker sits on the toilet tank lid where Aslyn plays pop and R&B during her showers. The towel rack holds two damp towels at all times. The exhaust fan rattles when turned on. A flat-iron and a curling wand share a single outlet next to the sink, cords tangled together."
+    },
+    "room_priya_bedroom": {
+      "label": "Priya's Bedroom",
+      "description": "The second, slightly smaller bedroom belonging to Priya alone. A full-size bed with a neat grey linen duvet is pushed against the far wall beneath a window with functional blinds. A small wooden desk holds a laptop, a planner, and a cup of pens. The closet door actually closes and inside the clothes are organized by type. A fabric storage cube on the floor holds extra meal-prep containers and a yoga mat she occasionally uses. The walls are bare except for a single framed print of a geometric pattern. The room smells faintly of eucalyptus from a reed diffuser on the nightstand. It is noticeably tidier and quieter than the shared bedroom across the hall, and Aslyn rarely enters it except to grab leftovers Priya has brought to the kitchen."
+    },
+    "room_aslyn_jordan_bedroom": {
+      "label": "Aslyn's Bedroom",
+      "description": "A cramped, slightly chaotic college bedroom that feels like Aslyn has been living out of bags since move-in. Twin XL bed beside the window with a rumpled pink-and-white duvet, several pillows, and Mr. Potato, her stuffed manatee, shoved near the headboard. A white IKEA nightstand is overloaded with lip gloss, ibuprofen, a half-empty water bottle, tangled charging cables, hair ties, and miscellaneous makeup.\nHer full-length mirror leans against the wall where the afternoon light hits it—clearly positioned for mirror selfies rather than interior design. Bent white vinyl blinds, beige rental carpet, cheap white walls, and a small closet whose sliding door never quite closes. Clothes, shoes, Shein bags, an overflowing laundry basket, makeup, dry shampoo, and going-out outfits create controlled clutter. A few inexpensive decorations and personal photos make it unmistakably a 20-year-old college girl's room. Warm bedside lamp instead of the ugly overhead light.\nOverall: messy, feminine, impulsive, lived-in, attractive without looking curated. The room should feel like Aslyn gets dressed, takes selfies, changes outfits three times, and leaves everything where it lands."
+    },
+    "zone:df9432fe-2de3-4ebe-82a0-c0e8a5f8b23f": {
+      "label": "Jordan’s Bedroom",
+      "description": "A small, practical college apartment bedroom that feels noticeably more organized than Aslyn’s without being unnaturally spotless. A twin XL bed sits against one wall with a navy comforter pulled mostly straight, white sheets, and two simple pillows. Beige rental carpet, plain off-white walls, a single window with cheap white vinyl blinds, and generic apartment fixtures make the room feel unmistakably student housing.\nA compact desk is the center of the room, cluttered in an organized way with nursing textbooks, handwritten flashcards, highlighters, notebooks, a laptop, water bottle, and a basic desk lamp. A backpack hangs from the chair. A few photos of Jordan, Aslyn, and friends are pinned casually above the desk.\nHer small closet is partially open, revealing everyday clothes on mismatched hangers, sneakers underneath, and a laundry basket tucked into the corner. A hoodie has been thrown over the back of the desk chair and a charging cable trails across the nightstand. There are a few cosmetics and hair products, but they are grouped together rather than scattered everywhere.\nA cheap bedside table holds her phone charger, water bottle, lip balm, and whatever nursing material she was studying before bed. She avoids the harsh overhead light and mostly uses the warm desk and bedside lamps.\nThe room feels lived-in, affordable, functional, and genuinely inhabited by a 20-year-old nursing student—Jordan is organized and responsible, but she's still a college student, not a minimalist adult with a perfectly curated bedroom."
+    }
+  },
+  "lifeText": {
+    "grooming": "Shower every morning or early afternoon, always with music playing loud—pop or R&B. Uses cheap drugstore shampoo and the purple toner for her blonde hair every third wash, though she sometimes forgets and the roots go brassy. Vanilla-scented body wash from Target. Moisturizes her face with whatever lotion is closest. Makeup is minimal on campus days: concealer under the eyes, mascara, vanilla lip gloss constantly reapplied. Going out: she adds winged eyeliner (inconsistent quality), sometimes bronzer, highlight on the cheekbones, and a slightly darker lip. She straightens or curls her hair wit",
+    "foodHabits": "Aslyn eats like a college freshman with no cooking skills and no schedule. Breakfast is iced coffee from Dutch Bros (caramelizer with extra whip) almost every day, sometimes with a cake pop or nothing. Lunch is skipped or replaced by snacking—Hot Cheetos, granola bars, whatever is in the apartment. Dinner is cereal (Cinnamon Toast Crunch or Frosted Flakes) at least three times a week, takeout from Chipotle or Raising Cane's, or whatever Jordan is ordering. She eats Priya's leftovers sometimes without asking. She cannot cook beyond ramen, scrambled eggs, and microwaving things. She likes sweet and salty flavors, hates anything bitter or strongly spiced. She drinks water only when reminded or very hungover. Social eating means splitting appetizers at a bar, late-night Taco Bell runs, or eati",
+    "mediaHabits": "Phone is her primary entertainment device and it is always in her hand. She scrolls Instagram and TikTok for cumulative hours every day—fashion, drama, influencer content, animal videos, thirst traps, astrology memes. She watches reality TV with genuine emotional investment: Love Island, Too Hot to Handle, The Bachelor—usually on the living room TV with Jordan, sometimes alone on her phone in bed. She listens to pop and R&B in the shower and while getting ready—Doja Cat, SZA, Sabrina Carpenter, Ariana Grande, whatever is trending. She does not read books. She sometimes reads long Instagram caption drama or Reddit relationship threads. She plays no video games. She watches YouTube makeup tutorials occasionally but never replicates them. Late at night she doom-scrolls or watches ASMR to fall",
+    "healthRoutine": "No exercise routine. Her 'exercise' is walking to class, walking to Dutch Bros, and occasionally swimming lazy laps or floating at the apartment pool. She sleeps poorly—rarely before 1 AM, often 2 AM, wakes up around 10-10:30. She averages six to seven hours on weeknights and nine to ten on weekends. She smokes weed two to three times a week, shared joints or a friend's vape pen, mostly evenings. She drinks socially on weekends—vodka sodas, seltzers, whatever is handed to her at parties. She does not take medications. She gets occasional headaches she attributes to dehydration and treats with ibuprofen. She has mild seasonal allergies she ignores. She does not go to the doctor unless something is actively wrong. Her body is naturally curvy and soft; she is unselfconscious about it and does",
+    "digitalLife": "Her phone is essentially an extension of her hand. She keeps it on loud with all notifications enabled because she likes the dopamine hit. She checks Instagram, TikTok, Snapchat, and iMessage constantly—every few minutes when bored, less when actively socializing. She has group chats with Jordan, with her high school friends, and a couple of loose ASU party-planning threads. She texts Colton daily but with decreasing enthusiasm. She DMs guys on Instagram regularly. She posts Instagram stories almost daily—selfies, food, pool photos, going-out clips. She takes mirror selfies multiple times a day and saves most of them. She charges her phone on her nightstand and it is the last thing she looks at before sleep and the first thing she touches in the morning. She does not use email except when",
+    "seasonalVariation": "Tempe is hot most of the year, which suits Aslyn perfectly. In the long hot season (March through October) she wears minimal clothing—tank tops, shorts, bikinis at the pool, slides. She is outside more, tans on the balcony, walks to Dutch Bros happily. In the brief cool season (November through February) she adds hoodies, her denim jacket, and leggings; she complains about anything below 60°F. Rain is rare but she loves the smell of it on hot pavement and will stand on the balcony to watch monsoon storms in summer. She never adjusts her schedule for weather because the weather is almost always the same. Daylight does not significantly affect her since she wakes up late regardless. The only seasonal mood shift is a slight increase in homesickness around holidays—Thanksgiving and Christmas s"
+  },
+  "personalCalendar": [
+    {
+      "date": "--03-06",
+      "enabled": true,
+      "id": "birthday_06c604b332b386b6",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "self",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Aslyn Jonas’s birthday"
+    },
+    {
+      "date": "--11-21",
+      "enabled": true,
+      "id": "birthday_9cdc43c18fa5d828",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "jordan_kelley",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Jordan Kelley’s birthday"
+    },
+    {
+      "date": "--05-28",
+      "enabled": true,
+      "id": "birthday_6a609d08739033ff",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "priya_reddy",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Priya Reddy’s birthday"
+    },
+    {
+      "date": "--05-31",
+      "enabled": true,
+      "id": "birthday_6be285559e2dfc56",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "colton_marsh",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Colton Marsh’s birthday"
+    },
+    {
+      "date": "--01-25",
+      "enabled": true,
+      "id": "birthday_37f315ec8d405575",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "kaylee_tatum",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Kaylee Tatum’s birthday"
+    },
+    {
+      "date": "--07-21",
+      "enabled": true,
+      "id": "birthday_566392550808d667",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "dale_jonas",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Dale Jonas’s birthday"
+    },
+    {
+      "date": "--01-24",
+      "enabled": true,
+      "id": "birthday_47aed07735867619",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "tammy_jonas",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Tammy Jonas’s birthday"
+    },
+    {
+      "date": "--10-25",
+      "enabled": true,
+      "id": "birthday_22c9c7e1322f14b8",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "cody_jonas",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Cody Jonas’s birthday"
+    },
+    {
+      "date": "--01-25",
+      "enabled": true,
+      "id": "birthday_7e78ddbff9c7a84d",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "megan_cross",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Megan Cross’s birthday"
+    },
+    {
+      "date": "--10-11",
+      "enabled": true,
+      "id": "birthday_17f34d332dec5991",
+      "kind": "birthday",
+      "notes": "",
+      "personId": "tyler_voss",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Tyler Voss’s birthday"
+    },
+    {
+      "date": "--10-14",
+      "enabled": true,
+      "id": "colton_relationship_anniversary",
+      "kind": "anniversary",
+      "notes": "Suggested date for the relationship already established in her biography; its exact start date was not supplied. Does not override how that relationship evolves.",
+      "personId": "colton_marsh",
+      "recurrence": "yearly",
+      "reminderDays": 7,
+      "source": "fictional_assumption",
+      "title": "Anniversary with Colton"
+    },
+    {
+      "date": "2026-12-04",
+      "enabled": true,
+      "id": "fall_term_planning_reminder",
+      "kind": "milestone",
+      "notes": "An optional planning reminder tied to her authored Fall 2026 Session C courses. It is not an official application deadline or proof of enrollment next term. Term dates: https://registrar.asu.edu/academic-calendar",
+      "personId": "self",
+      "recurrence": "none",
+      "reminderDays": 14,
+      "source": "fictional_assumption",
+      "title": "Think about next term before fall classes end"
+    }
+  ],
+  "finance": {
+    "dailyExpense": 40
+  },
+  "relationshipPolicy": {
+    "positiveStep": 0
+  },
+  "peoplePolicies": {
+    "colton_marsh": {
+      "ownsCar": false,
+      "modes": [
+        "WALK"
+      ]
+    },
+    "cody_jonas": {
+      "ownsCar": false,
+      "modes": [
+        "WALK"
+      ]
+    }
+  }
+}

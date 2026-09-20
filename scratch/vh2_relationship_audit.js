@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),core=require('../vh-simulation-core'),psy=require('../vh2-psychology-engine'),worker=require('../vh2-kernel-worker');
+const assert=require('node:assert/strict'),core=require('../virtual_humans/engine/vh-simulation-core'),psy=require('../virtual_humans/engine/vh2-psychology-engine'),worker=require('../virtual_humans/engine/vh2-kernel-worker');
 const start=1788764400000;
 const make=traits=>{const c=worker.run({create:true,name:'Alex',entityId:'alex',now:start}).companion;psy.ensure(c).relationshipPolicy={...psy.RELATIONSHIP_DEFAULTS,...traits};return c;};
 let seq=0;

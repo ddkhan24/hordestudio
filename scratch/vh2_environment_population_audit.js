@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),health=require('../vh2-health-engine'),population=require('../vh2-population-engine'),kernel=require('../vh2-kernel-worker');
+const assert=require('node:assert/strict'),health=require('../virtual_humans/engine/vh2-health-engine'),population=require('../virtual_humans/engine/vh2-population-engine'),kernel=require('../virtual_humans/engine/vh2-kernel-worker');
 const NOW=Date.UTC(2026,8,13,12),HOUR=3600000;
 function fixture(){return {id:'weather-person',humanDynamics:{energy:80,stress:10,heatDiscomfort:0},lifeProfile:{places:[{id:'home',kind:'home',mapCoordinates:[-111.93,33.43]},{id:'distant',kind:'social',mapCoordinates:[-80.19,25.76]}],socialCircle:[]},lifeRuntime:{world:{placeId:'home',people:{}},activities:{goals:[]},environment:{temperature:40,observedAt:NOW,coordinates:[-111.93,33.43],scope:'weather_model_observation',stale:false}},vh2Health:{policy:{enabled:false},lastAt:NOW,lastDay:null,events:[]}};}
 for(const scenario of ['fresh','stale','expired','future','remote','unknown']){

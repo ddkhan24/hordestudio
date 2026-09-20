@@ -15,8 +15,8 @@ function fixture() {
     let resolveProvider;
     const response = new Promise(resolve => { resolveProvider = resolve; });
     const ctx = {
-        VHWorldEngine: require('../vh-world-engine'),
-        VHConversationEngine: require('../vh-conversation-engine.js'),
+        VHWorldEngine: require('../virtual_humans/engine/vh-world-engine'),
+        VHConversationEngine: require('../virtual_humans/engine/vh-conversation-engine.js'),
         companionCompactPrompt: () => 'Synthetic profile',
         companionRequestContextSize: () => 8192,
         state: { globalSettings: {}, companions: [human] },
@@ -51,6 +51,7 @@ function fixture() {
         companionHasDeliverableReply: text => !!text,
         companionAlcoholContext: () => false,
         companionSexualSystemActive: () => false,
+        companionApplyMindCues: () => [],
         companionDecisionPressures: () => [],
         applyCompanionTurnCommit() {}, applyCompanionSocialPostCommit() {},
         splitCompanionReplyIntoBubbles: text => [text],

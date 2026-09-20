@@ -3,7 +3,7 @@ from test_runtime import node_executable
 import sys,tempfile,unittest,uuid,datetime
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService
+from virtual_humans.backend.vh2_runtime import WorldService
 ROOT=Path(__file__).resolve().parents[1];NOW=1788764400000
 class Npcs(unittest.TestCase):
  def test_routine_change_starts_travel_and_restart_preserves_it(self):

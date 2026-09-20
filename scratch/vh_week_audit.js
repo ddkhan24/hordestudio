@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const {buildContext}=require('./app_source'),worker=require('../vh-host-worker');
+const {buildContext}=require('./app_source'),worker=require('../virtual_humans/engine/vh-host-worker');
 const ctx={console,state:{globalSettings:{},personas:[],companions:[],companionTimelines:{},companionThreads:{}}};
 buildContext(vm,['normalizeCompanion','advanceCompanionLife','advanceCompanionHumanDynamics','advanceCompanionEmotionState','companionSituationAt','advanceCompanionMessageAttention'],ctx);
 const minute=60000,start=Date.UTC(2026,8,7,7),clone=x=>JSON.parse(JSON.stringify(x));

@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict');
-const worker=require('../vh2-kernel-worker'),core=require('../vh-simulation-core');
+const worker=require('../virtual_humans/engine/vh2-kernel-worker'),core=require('../virtual_humans/engine/vh-simulation-core');
 const start=Date.UTC(2026,8,7,12),minute=60000;
 function fixture({returnRoute=true,budget=100,enabled=true,schedule=false}={}){
  let c=worker.run({create:true,entityId:'outing-test',name:'Alex',now:start}).companion;

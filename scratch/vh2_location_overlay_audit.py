@@ -10,7 +10,7 @@ import unittest
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from test_runtime import node_executable
-from vh2_runtime import WorldService,Conflict
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict
 spec=importlib.util.spec_from_file_location('location_overlay',ROOT/'scripts/apply-bundled-location-overlay.py')
 overlay=importlib.util.module_from_spec(spec);spec.loader.exec_module(overlay)
 

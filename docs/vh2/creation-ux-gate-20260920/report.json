@@ -1,0 +1,98 @@
+{
+  "offline": true,
+  "checks": [
+    {
+      "name": "vh_creation_journey_browser_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 5.19,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_creation_journey_browser_audit.log"
+    },
+    {
+      "name": "vh2_chat_experience_browser_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 2.64,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh2_chat_experience_browser_audit.log"
+    },
+    {
+      "name": "vh_accessibility_browser_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 2.22,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_accessibility_browser_audit.log"
+    },
+    {
+      "name": "vh_page_builder_browser_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 3.65,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_page_builder_browser_audit.log"
+    },
+    {
+      "name": "vh_ai_builder_stress_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 5.94,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_ai_builder_stress_audit.log"
+    },
+    {
+      "name": "vh_opening_message_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 1.94,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_opening_message_audit.log"
+    },
+    {
+      "name": "vh_mind_architecture_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 2.54,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_mind_architecture_audit.log"
+    },
+    {
+      "name": "vh_embodiment_access_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 2.36,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_embodiment_access_audit.log"
+    },
+    {
+      "name": "vh_cognition_architecture_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 2.26,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_cognition_architecture_audit.log"
+    },
+    {
+      "name": "vh_partial_builder_browser_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 1.67,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_partial_builder_browser_audit.log"
+    },
+    {
+      "name": "vh_save_paths_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 4.38,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_save_paths_audit.log"
+    },
+    {
+      "name": "vh_feedback_lifecycle_browser",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 4.13,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh_feedback_lifecycle_browser.log"
+    },
+    {
+      "name": "vh2_budget_browser_audit",
+      "passed": true,
+      "exitCode": 0,
+      "seconds": 2.31,
+      "log": "/Users/razashah/Horde Studio 7.8 (with local)/docs/vh2/creation-ux-gate-20260920/vh2_budget_browser_audit.log"
+    }
+  ],
+  "complete": true,
+  "passed": true
+}

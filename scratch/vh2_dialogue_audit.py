@@ -3,8 +3,8 @@ from test_runtime import node_executable
 import sys, tempfile, unittest, uuid, json, threading, sqlite3
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService, Conflict, encode, QUANTUM
-from vh2_dialogue import LEASE_MS
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict, encode, QUANTUM
+from virtual_humans.backend.vh2_dialogue import LEASE_MS
 ROOT=Path(__file__).resolve().parents[1]
 class Dialogue(unittest.TestCase):
     def setUp(self):
@@ -34,7 +34,7 @@ class Dialogue(unittest.TestCase):
         other['truth']['companion']['vh2Calendar']['ages']['friend']['currentAge']=27
         self.assertNotEqual(first,self.s.dialogue.snapshot(self.w,2,other)[1])
     def test_malformed_retry_is_bounded_and_excludes_uncertainty(self):
-        from vh2_dialogue import reply_retry_allowed
+        from virtual_humans.backend.vh2_dialogue import reply_retry_allowed
         malformed=('failed','Malformed structured reply; no metadata was delivered.')
         self.assertTrue(reply_retry_allowed([malformed]))
         self.assertFalse(reply_retry_allowed([malformed,malformed]))

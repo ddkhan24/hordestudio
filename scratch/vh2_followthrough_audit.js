@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),worker=require('../vh2-kernel-worker'),f=require('../vh2-followthrough-engine');
+const assert=require('node:assert/strict'),worker=require('../virtual_humans/engine/vh2-kernel-worker'),f=require('../virtual_humans/engine/vh2-followthrough-engine');
 const now=1788764400000,minute=60000;
 const make=()=>worker.run({create:true,name:'Alex',entityId:'alex',now}).companion;
 const source={id:'promise',role:'user',text:"I'll text you in an hour.",timestamp:now,readAt:now,playerPersonaId:'p'};

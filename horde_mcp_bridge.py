@@ -19,13 +19,14 @@ import hashlib
 import ipaddress
 import json
 import math
-import vh_maps_budget
+from virtual_humans.backend import vh_maps_budget
 import platform
 import mimetypes
 import os
 import re
 import secrets
 import socket
+import ssl
 import shutil
 import subprocess
 import stat
@@ -38,9 +39,9 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from vh2_runtime import WorldService, Conflict as VH2Conflict
-from vh2_migration import inspect_archive
-from vh2_provider import RejectedOutput, UnknownOutcome
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict as VH2Conflict
+from virtual_humans.backend.vh2_migration import inspect_archive
+from virtual_humans.backend.vh2_provider import RejectedOutput, UnknownOutcome
 
 # ── Load .env if present ────────────────────────────────────
 APP_DIR = Path(__file__).resolve().parent
@@ -117,20 +118,21 @@ PROVIDERS = {
     },
 }
 STATIC_FILES = {
-    "/vh2.html": ("vh2.html", "text/html"),
-    "/vh2-dashboard.js": ("vh2-dashboard.js", "text/javascript"),
+    "/vh2.html": ("virtual_humans/frontend/vh2.html", "text/html"),
+    "/vh2-dashboard.js": ("virtual_humans/frontend/vh2-dashboard.js", "text/javascript"),
     "/": ("index.html", "text/html"),
     "/index.html": ("index.html", "text/html"),
     "/style.css": ("style.css", "text/css"),
     "/app.js": ("app.js", "text/javascript"),
     "/bundled-humans.js": ("bundled-humans.js", "text/javascript"),
     "/human-package.js": ("human-package.js", "text/javascript"),
-    "/vh-life-schema.js": ("vh-life-schema.js", "text/javascript"),
-    "/vh-workspace.js": ("vh-workspace.js", "text/javascript"),
-    "/vh-assistant-ui.js": ("vh-assistant-ui.js", "text/javascript"),
-    "/vh-setup-ui.js": ("vh-setup-ui.js", "text/javascript"),
-    "/vh-workspace.css": ("vh-workspace.css", "text/css"),
-    "/vh2-horde-integration.js": ("vh2-horde-integration.js", "text/javascript"),
+    "/vh-life-schema.js": ("virtual_humans/engine/vh-life-schema.js", "text/javascript"),
+    "/vh-workspace.js": ("virtual_humans/frontend/vh-workspace.js", "text/javascript"),
+    "/vh-assistant-ui.js": ("virtual_humans/frontend/vh-assistant-ui.js", "text/javascript"),
+    "/vh-setup-ui.js": ("virtual_humans/frontend/vh-setup-ui.js", "text/javascript"),
+    "/vh-page-builder.js": ("virtual_humans/frontend/vh-page-builder.js", "text/javascript"),
+    "/vh-workspace.css": ("virtual_humans/frontend/vh-workspace.css", "text/css"),
+    "/vh2-horde-integration.js": ("virtual_humans/frontend/vh2-horde-integration.js", "text/javascript"),
     "/video-worlds.js": ("video-worlds.js", "text/javascript"),
     "/presets.js": ("presets.js", "text/javascript"),
     "/boot-diagnostics.js": ("boot-diagnostics.js", "text/javascript"),
@@ -148,16 +150,110 @@ STATIC_FILES = {
     "/multiplayer.js": ("multiplayer.js", "text/javascript"),
     "/multiplayer-engine.js": ("multiplayer-engine.js", "text/javascript"),
     "/rpg-mechanics.js": ("rpg-mechanics.js", "text/javascript"),
-    "/vh-world-engine.js": ("vh-world-engine.js", "application/javascript"),
-    "/vh-simulation-core.js": ("vh-simulation-core.js", "application/javascript"),
-    "/vh-conversation-engine.js": ("vh-conversation-engine.js", "application/javascript"),
-    "/vh-activity-engine.js": ("vh-activity-engine.js", "text/javascript"),
+    "/vh-world-engine.js": ("virtual_humans/engine/vh-world-engine.js", "application/javascript"),
+    "/vh-simulation-core.js": ("virtual_humans/engine/vh-simulation-core.js", "application/javascript"),
+    "/vh-conversation-engine.js": ("virtual_humans/engine/vh-conversation-engine.js", "application/javascript"),
+    "/vh-activity-engine.js": ("virtual_humans/engine/vh-activity-engine.js", "text/javascript"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
     "/worlds/policy-panic.horde_world": ("Policy Panic at Bramble and Pike.horde_world", "application/json"),
     "/Start%20Horde%20Studio.command": ("Start Horde Studio.command", "application/octet-stream"),
     "/Start%20Horde%20Studio.bat": ("Start Horde Studio.bat", "application/octet-stream"),
     "/start-horde-studio.sh": ("start-horde-studio.sh", "application/octet-stream"),
 }
+
+# Public Virtual Humans assets; legacy URLs route to the same relocated files.
+STATIC_FILES.update({
+    '/virtual_humans/engine/vh-activity-engine.js': ('virtual_humans/engine/vh-activity-engine.js', 'text/javascript'),
+    '/vh-activity-engine.js': ('virtual_humans/engine/vh-activity-engine.js', 'text/javascript'),
+    '/virtual_humans/frontend/vh-assistant-ui.js': ('virtual_humans/frontend/vh-assistant-ui.js', 'text/javascript'),
+    '/vh-assistant-ui.js': ('virtual_humans/frontend/vh-assistant-ui.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-conversation-engine.js': ('virtual_humans/engine/vh-conversation-engine.js', 'text/javascript'),
+    '/vh-conversation-engine.js': ('virtual_humans/engine/vh-conversation-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-host-worker.js': ('virtual_humans/engine/vh-host-worker.js', 'text/javascript'),
+    '/vh-host-worker.js': ('virtual_humans/engine/vh-host-worker.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-life-schema.js': ('virtual_humans/engine/vh-life-schema.js', 'text/javascript'),
+    '/vh-life-schema.js': ('virtual_humans/engine/vh-life-schema.js', 'text/javascript'),
+    '/virtual_humans/frontend/vh-page-builder.js': ('virtual_humans/frontend/vh-page-builder.js', 'text/javascript'),
+    '/vh-page-builder.js': ('virtual_humans/frontend/vh-page-builder.js', 'text/javascript'),
+    '/virtual_humans/frontend/vh-setup-ui.js': ('virtual_humans/frontend/vh-setup-ui.js', 'text/javascript'),
+    '/vh-setup-ui.js': ('virtual_humans/frontend/vh-setup-ui.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-simulation-core.js': ('virtual_humans/engine/vh-simulation-core.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-embodiment-library.js': ('virtual_humans/engine/vh-embodiment-library.js', 'text/javascript'),
+    '/vh-embodiment-library.js': ('virtual_humans/engine/vh-embodiment-library.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-embodiment-engine.js': ('virtual_humans/engine/vh-embodiment-engine.js', 'text/javascript'),
+    '/vh-embodiment-engine.js': ('virtual_humans/engine/vh-embodiment-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-cognition-engine.js': ('virtual_humans/engine/vh-cognition-engine.js', 'text/javascript'),
+    '/vh-cognition-engine.js': ('virtual_humans/engine/vh-cognition-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-mind-library.js': ('virtual_humans/engine/vh-mind-library.js', 'text/javascript'),
+    '/vh-mind-library.js': ('virtual_humans/engine/vh-mind-library.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-mind-engine.js': ('virtual_humans/engine/vh-mind-engine.js', 'text/javascript'),
+    '/vh-mind-engine.js': ('virtual_humans/engine/vh-mind-engine.js', 'text/javascript'),
+    '/vh-simulation-core.js': ('virtual_humans/engine/vh-simulation-core.js', 'text/javascript'),
+    '/virtual_humans/frontend/vh-workspace.css': ('virtual_humans/frontend/vh-workspace.css', 'text/css'),
+    '/vh-workspace.css': ('virtual_humans/frontend/vh-workspace.css', 'text/css'),
+    '/virtual_humans/frontend/vh-workspace.js': ('virtual_humans/frontend/vh-workspace.js', 'text/javascript'),
+    '/vh-workspace.js': ('virtual_humans/frontend/vh-workspace.js', 'text/javascript'),
+    '/virtual_humans/engine/vh-world-engine.js': ('virtual_humans/engine/vh-world-engine.js', 'text/javascript'),
+    '/vh-world-engine.js': ('virtual_humans/engine/vh-world-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-agency-engine.js': ('virtual_humans/engine/vh2-agency-engine.js', 'text/javascript'),
+    '/vh2-agency-engine.js': ('virtual_humans/engine/vh2-agency-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-communication-engine.js': ('virtual_humans/engine/vh2-communication-engine.js', 'text/javascript'),
+    '/vh2-communication-engine.js': ('virtual_humans/engine/vh2-communication-engine.js', 'text/javascript'),
+    '/virtual_humans/frontend/vh2-dashboard.js': ('virtual_humans/frontend/vh2-dashboard.js', 'text/javascript'),
+    '/vh2-dashboard.js': ('virtual_humans/frontend/vh2-dashboard.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-decision-engine.js': ('virtual_humans/engine/vh2-decision-engine.js', 'text/javascript'),
+    '/vh2-decision-engine.js': ('virtual_humans/engine/vh2-decision-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-episodes-engine.js': ('virtual_humans/engine/vh2-episodes-engine.js', 'text/javascript'),
+    '/vh2-episodes-engine.js': ('virtual_humans/engine/vh2-episodes-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-exploration-engine.js': ('virtual_humans/engine/vh2-exploration-engine.js', 'text/javascript'),
+    '/vh2-exploration-engine.js': ('virtual_humans/engine/vh2-exploration-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-followthrough-engine.js': ('virtual_humans/engine/vh2-followthrough-engine.js', 'text/javascript'),
+    '/vh2-followthrough-engine.js': ('virtual_humans/engine/vh2-followthrough-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-geography-engine.js': ('virtual_humans/engine/vh2-geography-engine.js', 'text/javascript'),
+    '/vh2-geography-engine.js': ('virtual_humans/engine/vh2-geography-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-health-engine.js': ('virtual_humans/engine/vh2-health-engine.js', 'text/javascript'),
+    '/vh2-health-engine.js': ('virtual_humans/engine/vh2-health-engine.js', 'text/javascript'),
+    '/virtual_humans/frontend/vh2-horde-integration.js': ('virtual_humans/frontend/vh2-horde-integration.js', 'text/javascript'),
+    '/vh2-horde-integration.js': ('virtual_humans/frontend/vh2-horde-integration.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-institutions-engine.js': ('virtual_humans/engine/vh2-institutions-engine.js', 'text/javascript'),
+    '/vh2-institutions-engine.js': ('virtual_humans/engine/vh2-institutions-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-kernel-worker.js': ('virtual_humans/engine/vh2-kernel-worker.js', 'text/javascript'),
+    '/vh2-kernel-worker.js': ('virtual_humans/engine/vh2-kernel-worker.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-lifestyle-engine.js': ('virtual_humans/engine/vh2-lifestyle-engine.js', 'text/javascript'),
+    '/vh2-lifestyle-engine.js': ('virtual_humans/engine/vh2-lifestyle-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-network-engine.js': ('virtual_humans/engine/vh2-network-engine.js', 'text/javascript'),
+    '/vh2-network-engine.js': ('virtual_humans/engine/vh2-network-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-npc-travel.js': ('virtual_humans/engine/vh2-npc-travel.js', 'text/javascript'),
+    '/vh2-npc-travel.js': ('virtual_humans/engine/vh2-npc-travel.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-people-engine.js': ('virtual_humans/engine/vh2-people-engine.js', 'text/javascript'),
+    '/vh2-people-engine.js': ('virtual_humans/engine/vh2-people-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-plans-engine.js': ('virtual_humans/engine/vh2-plans-engine.js', 'text/javascript'),
+    '/vh2-plans-engine.js': ('virtual_humans/engine/vh2-plans-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-population-engine.js': ('virtual_humans/engine/vh2-population-engine.js', 'text/javascript'),
+    '/vh2-population-engine.js': ('virtual_humans/engine/vh2-population-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-presence-engine.js': ('virtual_humans/engine/vh2-presence-engine.js', 'text/javascript'),
+    '/vh2-presence-engine.js': ('virtual_humans/engine/vh2-presence-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-profile-fields.json': ('virtual_humans/engine/vh2-profile-fields.json', 'application/json'),
+    '/vh2-profile-fields.json': ('virtual_humans/engine/vh2-profile-fields.json', 'application/json'),
+    '/virtual_humans/engine/vh2-psychology-engine.js': ('virtual_humans/engine/vh2-psychology-engine.js', 'text/javascript'),
+    '/vh2-psychology-engine.js': ('virtual_humans/engine/vh2-psychology-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-relationship-lifecycle.js': ('virtual_humans/engine/vh2-relationship-lifecycle.js', 'text/javascript'),
+    '/vh2-relationship-lifecycle.js': ('virtual_humans/engine/vh2-relationship-lifecycle.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-social-bonds.js': ('virtual_humans/engine/vh2-social-bonds.js', 'text/javascript'),
+    '/vh2-social-bonds.js': ('virtual_humans/engine/vh2-social-bonds.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-story-engine.js': ('virtual_humans/engine/vh2-story-engine.js', 'text/javascript'),
+    '/vh2-story-engine.js': ('virtual_humans/engine/vh2-story-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-story-policy.json': ('virtual_humans/engine/vh2-story-policy.json', 'application/json'),
+    '/vh2-story-policy.json': ('virtual_humans/engine/vh2-story-policy.json', 'application/json'),
+    '/virtual_humans/engine/vh2-transport-engine.js': ('virtual_humans/engine/vh2-transport-engine.js', 'text/javascript'),
+    '/vh2-transport-engine.js': ('virtual_humans/engine/vh2-transport-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-travel-engine.js': ('virtual_humans/engine/vh2-travel-engine.js', 'text/javascript'),
+    '/vh2-travel-engine.js': ('virtual_humans/engine/vh2-travel-engine.js', 'text/javascript'),
+    '/virtual_humans/engine/vh2-vh1-fields.json': ('virtual_humans/engine/vh2-vh1-fields.json', 'application/json'),
+    '/vh2-vh1-fields.json': ('virtual_humans/engine/vh2-vh1-fields.json', 'application/json'),
+    '/virtual_humans/frontend/vh2.html': ('virtual_humans/frontend/vh2.html', 'text/html'),
+    '/vh2.html': ('virtual_humans/frontend/vh2.html', 'text/html'),
+})
 
 # Portable builds keep authored showcase media outside the single-file app.
 # Serve only these explicit public trees; never expose arbitrary files from the
@@ -397,8 +493,8 @@ class AlwaysOnRuntime:
         if not node:
             raise RuntimeError("Shared VH simulation needs Node.js 18+ (PATH or HORDE_NODE_EXECUTABLE).")
         payload = {**snapshot, "now": now_ms, "commit": commit}
-        result = subprocess.run([node, str(APP_DIR / "vh-host-worker.js")],
-                                input=json.dumps(payload), text=True, capture_output=True, timeout=30, cwd=APP_DIR)
+        result = subprocess.run([node, str(APP_DIR / "virtual_humans/engine/vh-host-worker.js")],
+                                input=json.dumps(payload), text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=30, cwd=APP_DIR)
         if result.returncode:
             raise RuntimeError("Simulation failed: " + result.stderr[:300])
         state = json.loads(result.stdout)
@@ -414,8 +510,8 @@ class AlwaysOnRuntime:
             followup = {"companion": state["companion"], "messages": state["messages"],
                         "experience": snapshot.get("experience", {}), "now": now_ms,
                         "routeResult": {"id": route["id"], "result": route_result}}
-            routed = subprocess.run([node, str(APP_DIR / "vh-host-worker.js")],
-                                    input=json.dumps(followup), text=True, capture_output=True, timeout=30, cwd=APP_DIR)
+            routed = subprocess.run([node, str(APP_DIR / "virtual_humans/engine/vh-host-worker.js")],
+                                    input=json.dumps(followup), text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=30, cwd=APP_DIR)
             if routed.returncode:
                 raise RuntimeError("Route application failed in shared simulation.")
             state = json.loads(routed.stdout)
@@ -565,9 +661,9 @@ class AlwaysOnRuntime:
             "temperature": provider["temperature"], "max_tokens": provider["maxTokens"]
         }
         if human.get("simulation"):
-            fitted = subprocess.run([self._node_path(), str(APP_DIR / "vh-host-worker.js")],
+            fitted = subprocess.run([self._node_path(), str(APP_DIR / "virtual_humans/engine/vh-host-worker.js")],
                                     input=json.dumps({"request": payload, "contextSize": human.get("contextSize", 8192)}),
-                                    text=True, capture_output=True, timeout=30, cwd=APP_DIR)
+                                    text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=30, cwd=APP_DIR)
             if fitted.returncode:
                 raise RuntimeError(fitted.stderr[:500])
             payload = json.loads(fitted.stdout)["body"]
@@ -640,7 +736,7 @@ def vh2_note_image_acceptance(config, result):
 
 
 def vh2_background_image(config, key, body):
-    import vh2_workers, vh2_image_adapters
+    from virtual_humans.backend import vh2_workers; from virtual_humans.backend import vh2_image_adapters
     provider = config.get('provider', 'openrouter')
     if provider not in ('magnific', 'higgsfield'):
         return vh2_workers.image_transport(config, key, body)
@@ -672,7 +768,7 @@ def vh2_background_image(config, key, body):
 
 def vh2_photo_preview(service, world_id, photo_id):
     """Compile the service's current image request without changing or sending it."""
-    import vh2_workers
+    from virtual_humans.backend import vh2_workers
     with service.connect() as db:
         db.execute('BEGIN')
         revision, state = service.read(db, world_id)
@@ -683,7 +779,7 @@ def vh2_photo_preview(service, world_id, photo_id):
         capture = db.execute('SELECT snapshot FROM photo_jobs WHERE id=? AND world_id=?', (photo_id, world_id)).fetchone()
         if not capture:
             raise ValueError('Unknown photo capture.')
-        photo = next((p for p in state.get('photos', []) if p['id'] == photo_id), None) or __import__('vh2_library').get(db, world_id, 'photo', photo_id)
+        photo = next((p for p in state.get('photos', []) if p['id'] == photo_id), None) or __import__('virtual_humans.backend.vh2_library',fromlist=['*']).get(db, world_id, 'photo', photo_id)
         request, _, references = vh2_workers.compile_image(db, world_id, state, json.loads(capture['snapshot']), config, photo)
         model = config['model']
         if model == 'provider default':
@@ -1335,13 +1431,48 @@ def read_limited(response: Any) -> bytes:
     return data
 
 
+def bridge_tls_context():
+    """Use OS trust plus an explicit bundle or the installed certifi roots."""
+    context = ssl.create_default_context()
+    bundle = os.environ.get("HORDE_CA_BUNDLE", "").strip()
+    if not bundle:
+        try:
+            import certifi
+            bundle = certifi.where()
+        except ImportError:
+            pass
+    if bundle:
+        try:
+            context.load_verify_locations(cafile=bundle)
+        except (OSError, ssl.SSLError) as error:
+            raise RuntimeError("Could not load the HTTPS certificate bundle. Check HORDE_CA_BUNDLE or reinstall certifi using the Python interpreter that launches Horde Studio.") from error
+    return context
+
+
+def bridge_urlopen(request, timeout=120):
+    url = request.full_url if isinstance(request, urllib.request.Request) else str(request)
+    try:
+        if urllib.parse.urlsplit(url).scheme.lower() == 'https':
+            return urllib.request.urlopen(request, timeout=timeout, context=bridge_tls_context())
+        return urllib.request.urlopen(request, timeout=timeout)
+    except (urllib.error.URLError, ssl.SSLCertVerificationError) as error:
+        reason = error.reason if isinstance(error, urllib.error.URLError) else error
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            host = urllib.parse.urlsplit(url).hostname or 'the provider'
+            expired = getattr(reason, 'verify_code', None) == 10 or 'expired' in str(reason).lower()
+            detail = ('A certificate in its HTTPS chain has expired. If your date/time is correct, the provider or an HTTPS proxy must renew that certificate; updating certifi cannot renew it.'
+                      if expired else 'Its HTTPS certificate could not be verified. Update certifi in the Python interpreter used by the launcher, or set HORDE_CA_BUNDLE to your trusted organization CA bundle if you use an HTTPS proxy.')
+            raise RuntimeError('Secure connection to '+host+' failed. '+detail+' Certificate verification remains enabled.') from None
+        raise
+
+
 def http_request(
     url: str, method: str = "GET", headers: dict[str, str] | None = None,
     body: bytes | None = None, timeout: int = 120
 ) -> tuple[int, dict[str, str], bytes]:
     request = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with bridge_urlopen(request, timeout=timeout) as response:
             return response.status, dict(response.headers.items()), read_limited(response)
     except urllib.error.HTTPError as error:
         return error.code, dict(error.headers.items()), read_limited(error)
@@ -1848,7 +1979,7 @@ def reference_upload_progress(callback, provider, index, total, stage, attempt=1
 
 def upload_reference_bytes(provider, content, mime, index, total, create_slot, confirm, on_progress=None):
     """Retry only a transient binary upload, once, using an entirely new slot."""
-    from vh2_image_adapters import safe_error_detail
+    from virtual_humans.backend.vh2_image_adapters import safe_error_detail
     used_urls = set()
     label = provider.title() + ' reference ' + str(index) + ' of ' + str(total)
     for attempt in (1, 2):
@@ -1945,7 +2076,7 @@ def prepare_magnific_references(arguments: dict[str, Any], on_progress=None) -> 
             try:
                 uploaded = mcp_result_data(call_tool("magnific", "creations_upload_image", {"url": value}, timeout=REFERENCE_UPLOAD_TIMEOUT))
             except Exception as error:
-                from vh2_image_adapters import safe_error_detail
+                from virtual_humans.backend.vh2_image_adapters import safe_error_detail
                 raise RuntimeError('Magnific reference '+str(index)+' of '+str(len(references))+' upload failed while importing its URL: '+safe_error_detail(error)+'. No image generation was submitted.') from None
         elif value.startswith("data:"):
             match = re.fullmatch(r"data:(image/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)", value)
@@ -2298,7 +2429,7 @@ def download_fal_video(url: str, media_id: str) -> tuple[Path, int]:
     })
     total = 0
     try:
-        with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
+        with bridge_urlopen(request, timeout=180) as response, temporary.open("wb") as output:
             safe_fal_url(response.geturl(), media=True)
             content_type = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if content_type and not content_type.startswith("video/") and content_type != "application/octet-stream":
@@ -2759,7 +2890,7 @@ def download_hotapi_video(url: str, media_id: str) -> tuple[Path, int]:
     })
     total = 0
     try:
-        with urllib.request.urlopen(request, timeout=240) as response, temporary.open("wb") as output:
+        with bridge_urlopen(request, timeout=240) as response, temporary.open("wb") as output:
             safe_hotapi_url(response.geturl())
             content_type = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if content_type and not content_type.startswith("video/") and content_type != "application/octet-stream":
@@ -3521,11 +3652,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         if not row:return self.respond(404,{'error':'Unknown photo asset.'})
                         return self.respond_bytes(200,row['bytes'],row['mime'])
                 if parsed.path == "/vh2/backup":
-                    import vh2_backup
+                    from virtual_humans.backend import vh2_backup
                     return self.respond_bytes(200,vh2_backup.export(service,world_id),"application/gzip")
                 if parsed.path == "/vh2/library":
-                    import vh2_library
-                    import vh2_social
+                    from virtual_humans.backend import vh2_library
+                    from virtual_humans.backend import vh2_social
                     kind=query.get("kind",["photo"])[0]
                     if kind not in ("photo","post"):raise ValueError("Invalid media kind.")
                     if query.get("id"):
@@ -3540,15 +3671,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         result['items']=[vh2_social.persona_post(p,snapshot,query.get('personaId',[None])[0]) for p in result['items']]
                     return self.respond(200,result)
                 if parsed.path == "/vh2/transcript":
-                    import vh2_transcript
+                    from virtual_humans.backend import vh2_transcript
                     return self.respond(200, vh2_transcript.page(service,world_id,int(query.get("before",["0"])[0]),persona_id=query.get('personaId',[None])[0]))
                 if parsed.path == "/vh2/agency-pause":
-                    import vh2_controls
+                    from virtual_humans.backend import vh2_controls
                     return self.respond(200,vh2_controls.settings(service))
                 if parsed.path == "/vh2/status":
                     return self.respond(200, service.status())
                 if parsed.path == "/vh2/world-packs":
-                    import vh2_world_packs
+                    from virtual_humans.backend import vh2_world_packs
                     ident=query.get("id",[""])[0]
                     return self.respond(200,vh2_world_packs.detail(service,ident) if ident else vh2_world_packs.library(service))
                 if parsed.path == "/vh2/projection":
@@ -3563,19 +3694,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     source = service.checkpoint_source(query.get("id", [""])[0])
                     return self.respond_bytes(200, source.encode("utf-8"), "application/json")
                 if parsed.path == "/vh2/provider-jobs":
-                    import vh2_workers
+                    from virtual_humans.backend import vh2_workers
                     return self.respond(200,{"jobs":vh2_workers.status(service,world_id)})
                 if parsed.path == "/vh2/ticketmaster-provider":
-                    import vh2_ticketmaster
+                    from virtual_humans.backend import vh2_ticketmaster
                     return self.respond(200,vh2_ticketmaster.settings(service,scope=query.get("scope",[None])[0]))
                 if parsed.path == "/vh2/flight-provider":
-                    import vh2_flights
+                    from virtual_humans.backend import vh2_flights
                     return self.respond(200,vh2_flights.settings(service,scope=query.get("scope",[None])[0]))
                 if parsed.path == "/vh2/image-provider":
-                    import vh2_workers
+                    from virtual_humans.backend import vh2_workers
                     return self.respond(200,vh2_workers.settings(service,scope=query.get("scope",[None])[0]))
                 if parsed.path == "/vh2/dialogue-provider":
-                    return self.respond(200, service.dialogue_provider.status())
+                    return self.respond(200, service.dialogue_provider.status(query.get("scope",[None])[0]))
                 if parsed.path == "/vh2/dialogue-jobs":
                     return self.respond(200, {"jobs": service.dialogue.list(world_id)})
                 if parsed.path == "/vh2/context":
@@ -3654,18 +3785,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     return self.respond(409, {"error": str(error)})
             if parsed_path == "/vh2/agency-pause":
                 if not self.client_is_loopback():return self.respond(403,{"error":"Agency control is loopback-only."})
-                import vh2_controls
+                from virtual_humans.backend import vh2_controls
                 return self.respond(200,vh2_controls.settings(get_vh2_service(),self.read_json().get('paused')))
             if parsed_path == "/vh2/workspace/restore":
                 if not self.client_is_loopback():return self.respond(403,{"error":"Workspace restore is loopback-only."})
                 length=int(self.headers.get("Content-Length","0"))
                 if not 0<length<=256*1024*1024:raise ValueError("Workspace timeline data exceeds 256 MB.")
-                import vh2_backup
+                from virtual_humans.backend import vh2_backup
                 try:return self.respond(200,vh2_backup.restore_workspace(get_vh2_service(),json.loads(self.rfile.read(length))))
                 except VH2Conflict as error:return self.respond(409,{"error":str(error)})
             if parsed_path == "/vh2/character/restore":
                 if not self.client_is_loopback():return self.respond(403,{'error':'Character restore is loopback-only.'})
-                import vh2_backup
+                from virtual_humans.backend import vh2_backup
                 length=int(self.headers.get('Content-Length','0'));binary=self.headers.get('Content-Type','').split(';',1)[0].strip().lower()=='application/zip'
                 limit=vh2_backup.MAX_CHARACTER_UPLOAD if binary else 256*1024*1024
                 if not 0<length<=limit:raise ValueError('Character life upload exceeds the supported limit.')
@@ -3689,32 +3820,32 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if not self.client_is_loopback():return self.respond(403,{"error":"VH2 restore is loopback-only."})
                 length=int(self.headers.get("Content-Length","0"))
                 if not 0<length<=256*1024*1024:raise ValueError("Choose a world archive smaller than 256 MB.")
-                import vh2_backup
+                from virtual_humans.backend import vh2_backup
                 try:return self.respond(200,vh2_backup.restore(get_vh2_service(),self.rfile.read(length)))
                 except VH2Conflict as error:return self.respond(409,{"error":str(error)})
             if parsed_path == "/vh2/open-flight-route":
                 if not self.client_is_loopback():return self.respond(403,{"error":"Travel setup is loopback-only."})
-                import vh2_open_airports
+                from virtual_humans.backend import vh2_open_airports
                 return self.respond(200,vh2_open_airports.route(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/feed-preview":
                 if not self.client_is_loopback():return self.respond(403,{"error":"Feed preview is loopback-only."})
-                import vh2_feed_discovery
+                from virtual_humans.backend import vh2_feed_discovery
                 return self.respond(200,vh2_feed_discovery.preview(self.read_json()))
             if parsed_path == "/vh2/feed-discovery":
                 if not self.client_is_loopback():return self.respond(403,{"error":"Feed discovery is loopback-only."})
-                import vh2_feed_discovery
+                from virtual_humans.backend import vh2_feed_discovery
                 return self.respond(200,vh2_feed_discovery.discover(self.read_json()))
             if parsed_path == "/vh2/ticketmaster-provider":
                 if not self.client_is_loopback():return self.respond(403,{"error":"VH2 settings are loopback-only."})
-                import vh2_ticketmaster
+                from virtual_humans.backend import vh2_ticketmaster
                 return self.respond(200,vh2_ticketmaster.settings(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/flight-provider":
                 if not self.client_is_loopback():return self.respond(403,{"error":"VH2 settings are loopback-only."})
-                import vh2_flights
+                from virtual_humans.backend import vh2_flights
                 return self.respond(200,vh2_flights.settings(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/image-provider":
                 if not self.client_is_loopback():return self.respond(403,{"error":"VH2 settings are loopback-only."})
-                import vh2_workers
+                from virtual_humans.backend import vh2_workers
                 return self.respond(200,vh2_workers.settings(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/dialogue-provider":
                 if not self.client_is_loopback():
@@ -3724,7 +3855,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return self.respond(200, provider.disable(body['disableScope']) if 'disableScope' in body else provider.save(body))
             if parsed_path == "/vh2/world-packs":
                 if not self.client_is_loopback():return self.respond(403,{"error":"World library is loopback-only."})
-                import vh2_world_packs
+                from virtual_humans.backend import vh2_world_packs
                 return self.respond(200,vh2_world_packs.library(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/command":
                 if not self.client_is_loopback():
@@ -3805,7 +3936,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if parsed_path == "/google-image/generate":
                 if not self.client_is_loopback():return self.respond(403,{"error":"Image generation is loopback-only."})
                 body=self.read_json();service=get_vh2_service()
-                import vh2_workers, vh2_image_adapters
+                from virtual_humans.backend import vh2_workers; from virtual_humans.backend import vh2_image_adapters
                 with service.connect() as db:row=vh2_workers.current(db,body.get('scope'))
                 if not row:raise ValueError("Save a Google image connection first.")
                 config=json.loads(row['config'])

@@ -2,9 +2,9 @@
 from test_runtime import node_executable
 import sys,pathlib,unittest,copy
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
-import vh2_realtime as rt
-import vh2_feeds,tempfile,uuid
-from vh2_runtime import WorldService
+from virtual_humans.backend import vh2_realtime as rt
+from virtual_humans.backend import vh2_feeds; import tempfile; import uuid
+from virtual_humans.backend.vh2_runtime import WorldService
 NOW=1789030800000
 def vi(n):
  n=n if n>=0 else (1<<64)+n;out=bytearray()

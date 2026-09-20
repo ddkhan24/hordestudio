@@ -2,12 +2,12 @@
 from test_runtime import node_executable
 import sys,pathlib,tempfile,unittest,base64,json,uuid,copy
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService,Conflict
-from vh2_provider import RejectedOutput
-import vh2_backup,vh2_image_adapters,vh2_workers,vh2_visual
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict
+from virtual_humans.backend.vh2_provider import RejectedOutput
+from virtual_humans.backend import vh2_backup; from virtual_humans.backend import vh2_image_adapters; from virtual_humans.backend import vh2_workers; from virtual_humans.backend import vh2_visual
 import io,zipfile,datetime
 from unittest.mock import patch
-import vh2_gtfs
+from virtual_humans.backend import vh2_gtfs
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 class Gaps(unittest.TestCase):
  def setUp(self):
@@ -46,7 +46,7 @@ class Gaps(unittest.TestCase):
   with self.s.connect() as db:self.s.commit_event(db,self.w,p['revision'],p['state'],after,'FIXTURE_CATALOG')
  def test_purchase_uses_recorded_fx_and_exact_ledger(self):
   self.seed_catalog()
-  with patch('vh2_feeds.fetch',return_value=json.dumps({'base':'GBP','date':'2026-09-10','rates':{'USD':1.25}}).encode()):self.cmd('refresh_fx_rate',currency='GBP')
+  with patch('virtual_humans.backend.vh2_feeds.fetch',return_value=json.dumps({'base':'GBP','date':'2026-09-10','rates':{'USD':1.25}}).encode()):self.cmd('refresh_fx_rate',currency='GBP')
   self.cmd('purchase_item',itemId='coat',amount=12.34,currency='GBP');c=self.state()['truth']['companion']
   self.assertEqual(c['lifeRuntime']['world']['balance'],84.57);self.assertEqual(c['vh2Finance']['ledger'][-1]['amountMinor'],-1543);self.assertEqual(c['vh2Commerce']['purchases'][-1]['originalAmount'],12.34)
   with self.assertRaises(ValueError):self.cmd('purchase_item',itemId='coat',amount=12.34,currency='GBP')

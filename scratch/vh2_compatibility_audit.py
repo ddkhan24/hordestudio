@@ -1,7 +1,7 @@
 import sys,pathlib,unittest,json
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 import vh2_ecosystem_audit as fixtures
-import vh2_controls,vh2_social,vh2_attachments
+from virtual_humans.backend import vh2_controls; from virtual_humans.backend import vh2_social; from virtual_humans.backend import vh2_attachments
 class Compatibility(unittest.TestCase):
  setUp=fixtures.Ecosystem.setUp
  tearDown=fixtures.Ecosystem.tearDown
@@ -52,7 +52,7 @@ class Compatibility(unittest.TestCase):
   self.cmd('delete_clip',clipId='first')
   self.assertTrue(self.state()['clips'][0]['deletedAt']);self.assertEqual(self.state()['clips'][1]['status'],'draft')
   self.assertEqual(self.state()['communication']['messages'],[])
-  import vh2_runtime
+  from virtual_humans.backend import vh2_runtime
   path,node,root,clock=self.s.path,self.s.node,self.s.app_dir,self.s.clock;self.s.close();self.s=vh2_runtime.WorldService(path,node,root,clock=clock)
   self.assertTrue(self.state()['clips'][0]['deletedAt']);self.assertEqual(self.state(),self.s.replay(self.w))
  def test_social_reactions_wait_for_awareness(self):
@@ -60,7 +60,7 @@ class Compatibility(unittest.TestCase):
   state=self.state();state['truth']['present']['availability']='asleep';vh2_social.observe(state);self.assertEqual(vh2_social.context(state)[0]['comments'],[])
   state['truth']['present']['availability']='available';vh2_social.observe(state);context=vh2_social.context(state)[0];self.assertTrue(context['likedByPlayer']);self.assertEqual(context['comments'][0]['text'],'Nice photo')
  def test_activity_preferences_survive_service_restart(self):
-  import vh2_runtime
+  from virtual_humans.backend import vh2_runtime
   state=self.state();c=state['truth']['companion']
   self.cmd('configure_life_expression',policy={**c['vh2Agency']['policy'],'enabled':True})
   self.cmd('configure_exploration',policy={**c['vh2Exploration']['policy'],'enabled':True})

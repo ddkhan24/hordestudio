@@ -3,8 +3,8 @@ from test_runtime import node_executable
 import sys,json,tempfile,unittest,uuid
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService,Conflict
-import vh2_library
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict
+from virtual_humans.backend import vh2_library
 ROOT=Path(__file__).resolve().parents[1]
 class Library(unittest.TestCase):
  def setUp(self):

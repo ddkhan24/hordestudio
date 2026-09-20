@@ -2,7 +2,7 @@
 import sys,pathlib,json,unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 import vh2_ecosystem_audit as fixtures
-import vh2_social_worker as worker
+from virtual_humans.backend import vh2_social_worker as worker
 class SocialWorker(unittest.TestCase):
  setUp=fixtures.Ecosystem.setUp
  tearDown=fixtures.Ecosystem.tearDown
@@ -23,6 +23,14 @@ class SocialWorker(unittest.TestCase):
   worker.draft(state);self.assertEqual(post['status'],'published');self.assertEqual(post['visibility'],'private')
   evidence=json.loads(calls[0][1]['content']);self.assertEqual(evidence['writingStyle'],'Short lowercase captions');self.assertEqual(evidence['sourceEvent']['id'],'walk1')
   worker.poll(self.s);self.assertEqual(len(calls),1);self.assertEqual(self.state(),self.s.replay(self.w))
+ def test_separate_background_zero_blocks_then_explicit_allowance_allows_one(self):
+  self.seed();config=dict(scope='horde:alex',baseUrl='https://example.invalid/v1',model='fixture',apiKey='test',enabled=True,maxTokens=512,dailyLimit=4,temperature=.7,budgetPolicy={'version':1,'dialogueDailyLimit':None,'backgroundDailyLimit':0})
+  self.s.dialogue_provider.save(config);calls=[]
+  self.s.social_executor=lambda *args:(calls.append(1) or {'decision':'skip','caption':''})
+  worker.poll(self.s);self.assertFalse(self.s._social_pending);self.assertEqual(calls,[])
+  config['budgetPolicy']['backgroundDailyLimit']=1;self.s.dialogue_provider.save(config);worker.poll(self.s)
+  for future,world in self.s._social_pending.values():future.result(timeout=3)
+  worker.poll(self.s);self.assertEqual(calls,[1]);status=self.s.dialogue_provider.status('horde:alex');self.assertEqual(status['usage']['background'],1);self.assertEqual(status['usage']['dialogue'],0)
  def test_manual_and_pause_do_not_draft(self):
   self.seed(socialPostFrequency='manual');self.assertEqual(self.state()['social']['posts'],[])
   state=self.state();state['truth']['companion'].update(socialPostFrequency='active',vh2AutonomyPaused=True);worker.draft(state);self.assertEqual(state['social']['posts'],[])

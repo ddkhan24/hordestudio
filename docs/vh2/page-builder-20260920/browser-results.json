@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "checks": [
+    "six mounted page actions",
+    "identity entry without whole-character call",
+    "per-field selected requests",
+    "failure and isolated retry",
+    "selected review only",
+    "saved reload preserves text",
+    "filled field unchanged",
+    "stale edit blocked",
+    "cancellation",
+    "mobile no overflow"
+  ],
+  "requests": [
+    "appearance",
+    "occupation",
+    "occupation",
+    "appearance",
+    "occupation",
+    "textingStyle"
+  ],
+  "overflow": {
+    "width": 362,
+    "scroll": 360,
+    "client": 360,
+    "body": 390,
+    "viewport": 390
+  }
+}

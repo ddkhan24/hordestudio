@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),{fixture,local,start,MIN}=require('./vh2_people_audit'),engine=require('../vh2-people-engine');
+const assert=require('node:assert/strict'),{fixture,local,start,MIN}=require('./vh2_people_audit'),engine=require('../virtual_humans/engine/vh2-people-engine');
 const rows=[];
 for(let seed=0;seed<8;seed++){
  const c=fixture();c.id='network-seed-'+seed;const a=c.vh2People.actors.sam;

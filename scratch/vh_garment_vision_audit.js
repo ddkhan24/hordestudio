@@ -7,5 +7,5 @@ assert.throws(()=>c.companionGarmentVisionRequest({provider:'openrouter',openrou
 assert.throws(()=>c.companionGarmentVisionRequest({provider:'local'},photo,{},''),/model first/);
 assert.throws(()=>c.companionGarmentVisionRequest({provider:'local',localModel:'test'},photo,{localBaseUrl:'https://example.com/v1'},'REMOTE_SECRET'),/localhost/);
 const local=c.companionGarmentVisionRequest({provider:'local',localModel:'test'},photo,{localApiKey:'LOCAL_SECRET'},'REMOTE_SECRET');assert.equal(local.options.headers.Authorization,'Bearer LOCAL_SECRET');assert(!JSON.stringify(local).includes('REMOTE_SECRET'));
-const world=require('../vh-world-engine');const saved=world.config({vision:{provider:'openrouter',localModel:'local',openrouterModel:'remote'}});assert.deepEqual(world.config(JSON.parse(JSON.stringify(saved))).vision,saved.vision);
+const world=require('../virtual_humans/engine/vh-world-engine');const saved=world.config({vision:{provider:'openrouter',localModel:'local',openrouterModel:'remote'}});assert.deepEqual(world.config(JSON.parse(JSON.stringify(saved))).vision,saved.vision);
 console.log('PASS garment vision routes, credential isolation, missing settings, reference forwarding and persistence');

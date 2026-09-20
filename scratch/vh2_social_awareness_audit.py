@@ -3,7 +3,7 @@ import sys,json,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from vh2_library_audit import Library
-import vh2_social,vh2_conversation
+from virtual_humans.backend import vh2_social; from virtual_humans.backend import vh2_conversation
 class Awareness(Library):
  def test_old_post_reaction_survives_until_noticed(self):
   self.seed();self.cmd('comment_post',postId='post0',text='Remember this?')

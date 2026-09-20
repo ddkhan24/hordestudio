@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),agency=require('../vh2-agency-engine');
+const assert=require('node:assert/strict'),agency=require('../virtual_humans/engine/vh2-agency-engine');
 const now=1788764400000;
 function human(seed='alex'){return {id:seed,humanDynamics:{energy:80,stress:10,socialNeed:80},mood:{valence:10},lifeProfile:{socialCircle:[{id:'jo',name:'Jo',closeness:80,tension:5}]},lifeRuntime:{world:{placeId:'home'},activities:{goals:[],conversationUntil:0}},vh2Presence:{visits:[]}};}
 const event={id:'notice',at:now,kind:'encounter',personId:'jo',summary:'Noticed Jo at Home.'};
@@ -22,4 +22,4 @@ console.log('PASS event-driven invitations, capture/share decisions, attention g
 
 const backlog=human();enable(backlog);backlog.vh2Agency.captures=[{id:'unrendered',status:'pending',at:1},...Array.from({length:110},(_,i)=>({id:'rendered'+i,status:'rendered',at:now}))];agency.advance(backlog,now,'available',[]);assert.equal(backlog.vh2Agency.captures.filter(x=>x.status==='pending').length,1,'history compaction must retain pending capture capacity reservations');
 
-const worker=require('../vh2-kernel-worker');const old=worker.run({create:true,name:'Alex',entityId:'old-timeline',now}).companion;delete old.vh2Agency;delete old.vh2NpcTravel;const upgraded=worker.run({companion:old,now,inspect:true});assert.equal(upgraded.companion.vh2Agency.policy.enabled,false,'upgrades initialize controls while paused');assert.deepEqual(upgraded.companion.vh2NpcTravel.people,{});
+const worker=require('../virtual_humans/engine/vh2-kernel-worker');const old=worker.run({create:true,name:'Alex',entityId:'old-timeline',now}).companion;delete old.vh2Agency;delete old.vh2NpcTravel;const upgraded=worker.run({companion:old,now,inspect:true});assert.equal(upgraded.companion.vh2Agency.policy.enabled,false,'upgrades initialize controls while paused');assert.deepEqual(upgraded.companion.vh2NpcTravel.people,{});

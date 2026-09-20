@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),npc=require('../vh2-npc-travel');
+const assert=require('node:assert/strict'),npc=require('../virtual_humans/engine/vh2-npc-travel');
 const start=1788764400000,minute=60000;
 const c={id:'alex',lifeProfile:{socialCircle:[{id:'jo',name:'Jo'}],world:{people:[{personId:'jo',placeId:'home',days:[1],start:0,end:10},{personId:'jo',placeId:'work',days:[1],start:10,end:1440}]},travelLegs:[{from:'home',to:'park',minutes:5,mode:'WALK',cost:0},{from:'park',to:'work',minutes:7,mode:'WALK',cost:0}]},lifeRuntime:{world:{people:{jo:{placeId:'home',lastAt:start}}}}};
 const local=(c,at)=>({weekday:1,hour:0,minute:(at-start)/minute});

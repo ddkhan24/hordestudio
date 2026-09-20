@@ -8,7 +8,7 @@ fixtures, not model performance. Human ratings are intentionally not fabricated.
 import argparse,json,random,sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_conversation as engine
+from virtual_humans.backend import vh2_conversation as engine
 
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--input',type=Path,default=Path(__file__).resolve().parents[1]/'scratch/fixtures/vh2/conversation-quality.json');p.add_argument('--output',type=Path,required=True);args=p.parse_args()

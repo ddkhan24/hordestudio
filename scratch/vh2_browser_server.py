@@ -6,8 +6,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import tempfile
 from http.server import ThreadingHTTPServer
 import horde_mcp_bridge as bridge
-from vh2_runtime import WorldService,QUANTUM
-import vh2_feeds
+from virtual_humans.backend.vh2_runtime import WorldService, QUANTUM
+from virtual_humans.backend import vh2_feeds
 def fixture_feed(url):
     if url!="https://example.org/feed":raise ValueError("Offline fixture feed only")
     return b"<rss><channel><item><guid>fixture</guid><title>Local exhibition announced</title></item></channel></rss>"

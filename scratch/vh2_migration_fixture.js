@@ -16,6 +16,6 @@ const archive={_format:'horde-studio-virtual-human',_version:3,_kind:'portable-h
 const inventory={version:1,source:'VH1 normalizeCompanion / captureCompanionRuntime / normalizeCompanionTimeline',
  companionFields:Object.keys(c).sort(),runtimeFields:Object.keys(sessions[0].runtime).sort(),timelineFields:Object.keys(sessions[0]).sort(),
  lifeProfileFields:Object.keys(c.lifeProfile).sort(),worldConfigFields:Object.keys(c.lifeProfile.world).sort()};
-const files=[['scratch/fixtures/vh2/portable-v3.json',archive],['vh2-vh1-fields.json',inventory]];
+const files=[['scratch/fixtures/vh2/portable-v3.json',archive],['virtual_humans/engine/vh2-vh1-fields.json',inventory]];
 for(const [path,value] of files){const text=JSON.stringify(value,null,2)+'\n';if(process.argv.includes('--write'))fs.writeFileSync(path,text);else assert.deepEqual(JSON.parse(fs.readFileSync(path)),JSON.parse(text),`VH1 schema fixture drift: ${path}; review before regenerating`);}
 console.log('PASS synthetic portable archive and VH1 field inventory match current exporter contracts');

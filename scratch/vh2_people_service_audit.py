@@ -3,7 +3,7 @@ from test_runtime import node_executable
 import json,sys,tempfile,unittest,uuid
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService,Conflict
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict
 ROOT=Path(__file__).resolve().parents[1]
 POLICY={'homePlaceId':'home','foodPlaceIds':[],'leisurePlaceIds':['park'],'modes':['WALK','TRANSIT'],'ownsCar':False,'ownsBicycle':False,'curiosity':90,'conscientiousness':70,'temperature':8,'sleepStart':23,'sleepEnd':7,'mealCost':2,'incomePerHour':0,'paidPlaceIds':[],'dailyExpense':0}
 class People(unittest.TestCase):

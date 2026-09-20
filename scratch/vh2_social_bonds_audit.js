@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),b=require('../vh2-social-bonds');
+const assert=require('node:assert/strict'),b=require('../virtual_humans/engine/vh2-social-bonds');
 const D=86400000;
 function fixture(){return {id:'a',lifeProfile:{socialCircle:[{id:'b',name:'Sam',closeness:0,trust:0}]},lifeRuntime:{world:{people:{b:{stress:95}}}},humanDynamics:{stress:0},vh2Plans:{plans:[]}};}
 let c=fixture();b.advance(c,D);b.advance(c,30*D);assert.equal(c.vh2SocialBonds.pairs.b.self.meetings,0);

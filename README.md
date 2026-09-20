@@ -8,7 +8,7 @@
 
 Character cards & group rooms · Living Worlds · Virtual Humans 2.0 · Optional RPG rules · Multiplayer · Video Adventures
 
-[**Download v18**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.0.4) · [Release notes](docs/releases/v18.0.4.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
+[**Download v18.1**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.1.0) · [Release notes](docs/releases/v18.1.0.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
 
 Horde Studio brings your characters, stories and simulations into one local application. Import a character card and start a conversation, build a world with places and consequences, host a campaign with friends, or create a virtual human whose conversations draw on an ongoing life. Connect your own local models or cloud providers; the application does not include paid inference.
 
@@ -128,7 +128,7 @@ Horde Studio is free to run and its source is available in this repository. The 
 
 ## Quick start
 
-Download the [v18 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.0.4), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
+Download the [v18.1 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.1.0), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
 
 ### Requirements
 
@@ -302,12 +302,18 @@ hordestudio/
 ├── multiplayer.js              # LAN/Internet party UI and synchronization
 ├── presets.js                  # Included system presets
 ├── horde_mcp_bridge.py         # Local server, MCP auth, and image relay
+├── virtual_humans/             # VH2 and shared Virtual Human code
+│   ├── frontend/               # Workspace, page builders, browser UI and CSS
+│   ├── engine/                 # Simulation engines, Node workers and schemas
+│   └── backend/                # Python services, persistence and providers
 ├── MCP_SETUP.md                # Detailed bridge and media setup
 ├── Start Horde Studio.command  # macOS launcher
 ├── Start Horde Studio.bat      # Windows launcher
 ├── start-horde-studio.sh       # Linux/macOS shell launcher
 └── scratch/                    # Audits, fixtures, and stress tests
 ```
+
+Virtual Human implementation files are grouped in `virtual_humans/`; none need to be kept loose beside the launchers. Portable builds preserve the same structure inside `app/`, with the platform launchers and `START HERE.txt` at the package top level.
 
 ---
 

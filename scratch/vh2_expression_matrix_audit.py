@@ -3,7 +3,7 @@ import sys,json,copy,unittest,itertools
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_workers
+from virtual_humans.backend import vh2_workers
 import vh2_ecosystem_audit as fixtures
 class Matrix(unittest.TestCase):
  setUp=fixtures.Ecosystem.setUp
@@ -28,10 +28,10 @@ class Matrix(unittest.TestCase):
    with self.subTest(change=field):
     snapshot=copy.deepcopy(base)
     if change is not None:snapshot['photoContext'][field]=change
-    with patch('vh2_workers.asset_data',side_effect=lambda db,w,i:'data:image/png;base64,'+i):
+    with patch('virtual_humans.backend.vh2_workers.asset_data',side_effect=lambda db,w,i:'data:image/png;base64,'+i):
      body,hashes,ids=vh2_workers.compile_image(None,self.w,{'photos':[prior]},snapshot,{'model':'offline-fixture','maxReferences':4})
     self.assertEqual(ids[0],'identity');self.assertIn('room',ids)
     self.assertEqual('previous' in ids,field=='none');self.assertIn('28-year-old',body['prompt']);self.assertEqual(body['provider']['allow_fallbacks'],False)
-  with patch('vh2_workers.asset_data',side_effect=lambda db,w,i:i):
+  with patch('virtual_humans.backend.vh2_workers.asset_data',side_effect=lambda db,w,i:i):
    with self.assertRaises(ValueError):vh2_workers.compile_image(None,self.w,{'photos':[prior]},base,{'model':'fixture','maxReferences':1})
 if __name__=='__main__':unittest.main()

@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),plans=require('../vh2-plans-engine'),activity=require('../vh-activity-engine');
+const assert=require('node:assert/strict'),plans=require('../virtual_humans/engine/vh2-plans-engine'),activity=require('../virtual_humans/engine/vh-activity-engine');
 const now=1788764400000,minute=60000;
 const core={companionLocalMinuteInfo:()=>({weekday:1,hour:8,minute:0}),companionSeededRoll:()=>.1};
 function make(){return {id:'alex',lifeProfile:{seed:'test',socialCircle:[{id:'jo',name:'Jo',closeness:80,tension:0,contactWindows:[{days:[1],startMinute:0,endMinute:1440}]}],travelLegs:[],world:{people:[{personId:'jo',placeId:'home',days:[1],start:0,end:1440}]}},lifeRuntime:{activities:activity.normalize({}),world:{placeId:'home',people:{jo:{placeId:'home',energy:80}}}}};}

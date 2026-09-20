@@ -2,8 +2,8 @@
 import copy,datetime,json,sys,tempfile,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_calendar as cal
-from vh2_runtime import WorldService
+from virtual_humans.backend import vh2_calendar as cal
+from virtual_humans.backend.vh2_runtime import WorldService
 from test_runtime import node_executable
 
 ROOT=Path(__file__).resolve().parents[1]

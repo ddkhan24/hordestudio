@@ -899,6 +899,20 @@ test('a shareable Virtual Human template keeps authorship but strips every lived
     assert.equal(context.state.companions.length, 2);
 });
 
+test('long authored appearance survives reload and template export/import without truncation', async () => {
+    const appearance = 'Silver hair, a weathered coat, and a moon-shaped scar. 🌙\n'.repeat(100) + 'UNIQUE FINAL DETAIL';
+    const source = freshCompanion({ id: 'long_appearance', name: 'Long appearance', appearance });
+    assert.equal(source.appearance, appearance);
+    const reloaded = context.normalizeCompanion(JSON.parse(JSON.stringify(source)));
+    assert.equal(reloaded.appearance, appearance, 'Reload must retain the final authored detail');
+    context.state.companions = [reloaded];
+    context.state.companionTimelines = {};
+    context.state.companionThreads = {};
+    const payload = await context.buildCompanionArchivePayload(reloaded, 'character-template', 4000);
+    const imported = context.restoreCompanionArchive(JSON.parse(JSON.stringify(payload)), 5000);
+    assert.equal(imported.appearance, appearance, 'A shareable template must round-trip the complete appearance');
+});
+
 test('a full portable Virtual Human archive preserves timelines, social state and chat photos', async () => {
     const source = freshCompanion({ id: 'portable_source', name: 'Portable Human' });
     source.socialPosts = [context.normalizeCompanionSocialPost({

@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),fs=require('node:fs'),{fixture,START}=require('./vh2_story_audit'),kernel=require('../vh2-kernel-worker'),core=require('../vh-simulation-core'),world=require('../vh-world-engine'),story=require('../vh2-story-engine');
+const assert=require('node:assert/strict'),fs=require('node:fs'),{fixture,START}=require('./vh2_story_audit'),kernel=require('../virtual_humans/engine/vh2-kernel-worker'),core=require('../virtual_humans/engine/vh-simulation-core'),world=require('../virtual_humans/engine/vh-world-engine'),story=require('../virtual_humans/engine/vh2-story-engine');
 const HOUR=3600000,MIN=60000;
 const block={id:'seminar',days:[0,1,2,3,4,5,6],startMinute:600,endMinute:660,activity:'Seminar',availability:'busy',flexibility:'fixed',placeId:'home',startsOn:'2026-09-01',endsOn:'2026-12-04',breaks:[{label:'Autumn break',startsOn:'2026-10-10',endsOn:'2026-10-13'}]};
 let c=fixture('dates');c.lifeProfile.weeklySchedule=[core.normalizeCompanionScheduleBlock(block)];
@@ -7,7 +7,7 @@ for(const [date,expected] of [['2026-08-31',false],['2026-09-01',true],['2026-10
 assert.equal(world.activeOn({...block,startsOn:'invalid'},'2026-10-01'),false);
 assert.deepEqual(world.calendarFields(world.config({people:[{...block,personId:'jo',start:600,end:660}]}).people[0]),world.calendarFields(block));
 c.vh2Institutions={rules:[{id:'university',scheduleId:'seminar',label:'University',minimumAttendance:.5,fee:50,missedStress:10}],sessions:{},events:[],lastAt:null};
-for(let m=0;m<120;m++)require('../vh2-institutions-engine').advance(c,Date.parse('2026-10-12T10:00:00Z')+m*MIN,{dateKey:'2026-10-12',weekday:1,hour:10+Math.floor(m/60),minute:m%60},{availability:'available'});
+for(let m=0;m<120;m++)require('../virtual_humans/engine/vh2-institutions-engine').advance(c,Date.parse('2026-10-12T10:00:00Z')+m*MIN,{dateKey:'2026-10-12',weekday:1,hour:10+Math.floor(m/60),minute:m%60},{availability:'available'});
 assert.equal(Object.keys(c.vh2Institutions.sessions).length,0);assert.equal(c.vh2Institutions.events.length,0);
 // Specific flexible classes survive as choices; legacy all-day umbrellas cannot shadow them.
 let student=fixture('student'),classAt=Date.parse('2026-09-08T10:05:00Z');

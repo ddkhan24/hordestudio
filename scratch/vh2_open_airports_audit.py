@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_open_airports as a
+from virtual_humans.backend import vh2_open_airports as a
 RAW=b'ident,type,name,latitude_deg,longitude_deg,scheduled_service,iata_code\nEGLL,large_airport,Heathrow,51.47,-0.45,yes,LHR\nOPKC,large_airport,Jinnah,24.9,67.16,yes,KHI\nNO,small_airport,Private,0,0,no,\n'
 class Airports(unittest.TestCase):
  def test_parser(self):

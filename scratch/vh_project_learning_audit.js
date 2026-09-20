@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');
-const engine=require('../vh-activity-engine');
+const engine=require('../virtual_humans/engine/vh-activity-engine');
 const minute=60000,day=86400000,start=Date.UTC(2026,8,8);
 const options=[{id:'draft',kind:'focus',label:'a short story',projectMinutes:240,learnFromOutcomes:true,startMinute:600,endMinute:630,priority:70,minEnergy:0}];
 function simulate(interrupt,reload=false){let state=engine.normalize();let energy=0;

@@ -1,9 +1,12 @@
 'use strict';
 // Execute the actual client create/save paths with only transport and UI mocked.
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const plain=v=>JSON.parse(JSON.stringify(v));
+const plain=v=>v===undefined?undefined:JSON.parse(JSON.stringify(v));
+const transfer=JSON.parse(fs.readFileSync('virtual_humans/engine/vh2-profile-fields.json','utf8'));
 const authored={socialWorld:'Shares a home with two friends.',privateLife:'An unspoken academic concern.',routine:'Usually studies late.',
- playerKnowledge:'This contact said they grew up in York.',initialMotive:'Curious but guarded.',connectionAuthenticity:'mixed',startingScenario:'A reply to a public post.'};
+ playerKnowledge:'This contact said they grew up in York.',initialMotive:'Curious but guarded.',connectionAuthenticity:'mixed',startingScenario:'A reply to a public post.',
+ openingMode:'vh_first',openingMessage:'I noticed you before you noticed me.',libidoEnabled:true,desirePattern:'responsive',sexualInitiative:true,intimacyBoundaries:'Ask before escalating.',alcoholPattern:'rare',
+ embodimentProfile:{modules:[{id:'manual_wheelchair',impact:90}],details:{capabilities:'Transfers independently.'}},cognitionProfile:{enabled:true,iq:142,axes:{socialInference:31}}};
 const voice={emojiDensity:10};
 const person={id:'test',name:'Test Person',age:28,...authored,
  apiKey:'DO_NOT_COPY',memory:{longTerm:[{text:'Private runtime transcript must not travel with a template.'}]},
@@ -11,22 +14,25 @@ const person={id:'test',name:'Test Person',age:28,...authored,
  lifeSetupPolicies:{rooms:[{id:'bedroom',placeId:'home',label:'Private bedroom',description:'Authored details.'}]}};
 const timeline={id:'timeline',personaId:'selected',profileOverrides:{selected:'This selected persona.'},messages:[]};
 const commands=[];let actual={};
-const ctx={safeJsonClone:plain,state:{personas:[{id:'selected',name:'Selected Person',text:'Default persona'}]},
+const ctx={safeJsonClone:plain,VH2_PROFILE_TRANSFER_FIELDS:transfer,state:{personas:[{id:'selected',name:'Selected Person',text:'Default persona'}]},
  companionTimelineBusy:()=>false,ensureCompanionTimelineStore:()=>({sessions:[timeline]}),getActiveCompanionTimeline:()=>timeline,
  freshCompanionRuntime:()=>({}),applyCompanionRuntime:()=>{},createCompanionTimeline:()=>{throw Error('Unexpected duplicate timeline');},
  vh2SyncProvider:async()=>{},vh2Enqueue:async(t,type,body)=>{commands.push({type,...plain(body)});if(type==='configure_expression_profile')actual={...plain(body.fields),lifeProfile:{world:{voice:plain(body.fields.voice)}}};},
  vh2Poll:async()=>{},vh2Flush:async()=>{},vh2ImportStarterProfile:async()=>{},renderCompanionThread:()=>{},saveState:async()=>{},
  mcpBridgeRequest:async()=>({revision:42,state:{truth:{companion:actual}}})};
 vm.createContext(ctx);
-const integration=fs.readFileSync('vh2-horde-integration.js','utf8'),begin=integration.indexOf('async function vh2CreateTimeline('),end=integration.indexOf('\nfunction vh2RenderControls(',begin);
+const integration=fs.readFileSync('virtual_humans/frontend/vh2-horde-integration.js','utf8'),begin=integration.indexOf('async function vh2CreateTimeline('),end=integration.indexOf('\nfunction vh2RenderControls(',begin);
+const declared=plain(vm.runInNewContext(integration.match(/const VH2_PROFILE_TRANSFER_FIELDS=Object\.freeze\((\[[^;]+\])\);/s)[1]));assert.deepEqual(declared,transfer,'Browser transfer contract drifted from the service-owned field list.');
 assert(begin>=0&&end>begin);vm.runInContext(integration.slice(begin,end),ctx);
-const workspace=fs.readFileSync('vh-workspace.js','utf8'),stop=workspace.indexOf('\nfunction vhStudioScope(');
+const workspace=fs.readFileSync('virtual_humans/frontend/vh-workspace.js','utf8'),stop=workspace.indexOf('\nfunction vhStudioScope(');
 assert(stop>0);vm.runInContext(workspace.slice(0,stop),ctx);
 (async()=>{
  const before=plain(person);await ctx.vh2CreateTimeline(person);
  const profile=commands.find(c=>c.type==='create_profile').profile;
- for(const [key,value] of Object.entries(authored))assert.equal(profile[key],value,'Creation lost '+key);
+ for(const [key,value] of Object.entries(authored))assert.deepEqual(profile[key],value,'Creation lost '+key);
  assert.equal(profile.apiKey,undefined);assert.equal(profile.memory,undefined);
+ assert.equal(commands.find(c=>c.type==='create_profile').deferAdvance,true);
+ assert.equal(commands.find(c=>c.type==='create_profile').deferOpening,true);
  assert.equal(profile.lifeProfile.places[0].photo,undefined);assert.equal(profile.lifeProfile.world.items[0].photo,undefined);
  assert.deepEqual(person,before,'Creation changed the authored person');
  assert.equal(commands.find(c=>c.type==='configure_player_profile').profile.text,'This selected persona.');
@@ -34,11 +40,11 @@ assert(stop>0);vm.runInContext(workspace.slice(0,stop),ctx);
  const changed={...person,privateLife:'A revised concern.',initialMotive:'Wants a quiet conversation.'};
  timeline.vh2.worldId='world';const result=await ctx.vhApplyExpression(changed,timeline);
  const fields=commands.filter(c=>c.type==='configure_expression_profile').at(-1).fields;
- for(const key of Object.keys(authored))assert.equal(fields[key],changed[key],'Save lost '+key);
+ for(const key of Object.keys(authored))assert.deepEqual(fields[key],changed[key],'Save lost '+key);
  assert.equal(fields.apiKey,undefined);assert.equal(fields.memory,undefined);assert.deepEqual(fields.voice,voice);assert.equal(result,42);
  fields.voice.emojiDensity=80;assert.equal(person.lifeProfile.world.voice.emojiDensity,10);
  actual.privateLife='Unexpected stale server value';
  ctx.vh2Enqueue=async()=>{};
  await assert.rejects(()=>ctx.vhApplyExpression(changed,timeline),/active expression differs/);
- console.log('PASS actual create/save commands retain seven authored fields, isolate selected persona, exclude credentials/runtime/media, deep-copy nested fields and reject stale acknowledgements.');
+ console.log(`PASS actual create/save commands retain all ${transfer.length} service profile fields, defer VH-first opening until setup, isolate the selected persona, exclude credentials/runtime/media, deep-copy nested fields and reject stale acknowledgements.`);
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict');
-const p=require('../vh2-psychology-engine');
+const p=require('../virtual_humans/engine/vh2-psychology-engine');
 const make=()=>({mood:{valence:0},emotionState:{felt:{joy:0,fear:10,anger:0,sadness:0,anticipation:0,surprise:0}},relationshipDynamics:{trust:5,attraction:0},lifeRuntime:{activities:{events:[],goals:[]},world:{events:[]}}});
 const message={id:'m',role:'user',text:'I am here for you',readAt:100};
 const proposal={sourceMessageId:'m',evidence:'here for you',interpretation:'support',confidence:1};

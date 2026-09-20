@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');
-const engine=require('../vh-activity-engine');
+const engine=require('../virtual_humans/engine/vh-activity-engine');
 const minute=60000,now=Date.UTC(2026,8,8,9),clone=x=>JSON.parse(JSON.stringify(x));
 const context={availability:'available',energy:90,hunger:0,stress:10,socialNeed:0,placeId:'home',seed:'person',policy:{variation:0}};
 const opportunities=Array.from({length:5},(_,i)=>({id:`task${i}`,label:`Task ${i}`,kind:'focus',priority:40,days:[2],startMinute:540+i*60,endMinute:600+i*60}));

@@ -3,7 +3,7 @@ from test_runtime import node_executable
 import sys,tempfile,unittest,json,uuid
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService,encode
+from virtual_humans.backend.vh2_runtime import WorldService, encode
 ROOT=Path(__file__).resolve().parents[1]
 class Memory(unittest.TestCase):
  def setUp(self):

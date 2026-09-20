@@ -1,7 +1,7 @@
 // Offline checks for ordinary conversation context; no provider calls.
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-const engine = require('../vh-conversation-engine');
+const engine = require('../virtual_humans/engine/vh-conversation-engine');
 const { buildContext } = require('./app_source');
 const now = Date.UTC(2026, 8, 8, 12);
 const message = { id: 'u1', role: 'user', text: 'I remembered your interview. How did it go?', timestamp: now - 1000, readAt: now, awaitingReply: true };

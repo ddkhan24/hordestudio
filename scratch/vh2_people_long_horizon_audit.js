@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),fs=require('node:fs'),e=require('../vh2-people-engine');
+const assert=require('node:assert/strict'),fs=require('node:fs'),e=require('../virtual_humans/engine/vh2-people-engine');
 const {fixture,local,start,MIN}=require('./vh2_people_audit');
 let signatures=new Set(),balances=[],earned=[],actions=new Set();
 for(let seed=0;seed<100;seed++){

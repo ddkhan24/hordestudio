@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),core=require('../vh-simulation-core'),plans=require('../vh2-plans-engine');
+const assert=require('node:assert/strict'),core=require('../virtual_humans/engine/vh-simulation-core'),plans=require('../virtual_humans/engine/vh2-plans-engine');
 const vm=require('node:vm'),{buildContext}=require('./app_source');
 const c={id:'self',age:24,libidoEnabled:true,lifeProfile:{socialCircle:[{id:'jo',name:'Jo',age:23,role:'friend'}]},vh2Calendar:{ages:{self:{currentAge:25},jo:{currentAge:24}}},vh2Plans:{privateVisitPermissions:[{personId:'jo',personAge:23,enabled:true,allowIntimacy:false}],policy:{privateVisits:true}}};
 const p=c.lifeProfile.socialCircle[0];assert.equal(core.companionCurrentAge(c),25);assert.equal(core.companionCurrentAge(c,p),24);assert.equal(c.age,24);assert.equal(p.age,23);

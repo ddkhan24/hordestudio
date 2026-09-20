@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');
-const D=require('../vh2-decision-engine'),A=require('../vh-activity-engine');
+const D=require('../virtual_humans/engine/vh2-decision-engine'),A=require('../virtual_humans/engine/vh-activity-engine');
 const t=1788764400000,clone=x=>JSON.parse(JSON.stringify(x));
 function goal(id,hunger=0,energy=0){return {id,label:id,status:'planned',stepIndex:0,createdAt:t,priority:50,kind:'leisure',steps:[{label:id,durationMs:20*60000,progressMs:0,costs:{},produces:{},hunger,energy,stress:0,charged:false}]};}
 function sample(seed){const r={policy:D.policy({temperature:12,exploration:0})};const g=[goal('a'),goal('b')];D.select(r,g,t,{seed,hunger:20,energy:70},g=>({score:g.id==='a'?60:48,components:{preference:g.id==='a'?60:48}}));return r;}
@@ -21,9 +21,9 @@ const c={timezoneOffsetMinutes:0,lifeProfile:{weeklySchedule:[],activityOptions:
 assert.equal(D.nextWake(c,t).at,t+120000);assert(D.nextWake(c,t).reasons.includes('action_step_complete'));
 c.lifeRuntime.activities.goals=[];c.humanDynamics.sleep={stage:'asleep'};assert.equal(D.nextWake(c,t).at,t+300000);
 const pausedProgress=state.goals[0].steps[0].progressMs;assert(A.pauseForContext(state,t+180000,'Scheduled obligation started.'));assert.equal(state.goals[0].steps[0].progressMs,pausedProgress);assert(!A.pauseForContext(state,t+180000,'Scheduled obligation started.'));
-const worker=require('../vh2-kernel-worker');
+const worker=require('../virtual_humans/engine/vh2-kernel-worker');
 let actual=worker.run({create:true,name:'Boundary test',entityId:'boundary-human',now:t}).companion;
-actual.lifeProfile.weeklySchedule=[require('../vh-simulation-core').normalizeCompanionScheduleBlock({id:'meeting',days:[1],startMinute:422,endMinute:430,placeId:'home',activity:'Meeting',availability:'busy',breakAllowed:false})];
+actual.lifeProfile.weeklySchedule=[require('../virtual_humans/engine/vh-simulation-core').normalizeCompanionScheduleBlock({id:'meeting',days:[1],startMinute:422,endMinute:430,placeId:'home',activity:'Meeting',availability:'busy',breakAllowed:false})];
 actual=worker.run({companion:actual,now:t+60000}).companion;
 assert(actual.lifeRuntime.activities.goals.some(g=>g.status==='active'));
 actual=worker.run({companion:actual,now:t+120000}).companion;

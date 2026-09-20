@@ -3,9 +3,9 @@ import json,sys,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import vh2_workers_audit as fixtures
-import vh2_workers as images
-import vh2_social_worker as social
-from vh2_provider import UnknownOutcome
+from virtual_humans.backend import vh2_workers as images
+from virtual_humans.backend import vh2_social_worker as social
+from virtual_humans.backend.vh2_provider import UnknownOutcome
 class Gallery(unittest.TestCase):
  setUp=fixtures.Workers.setUp
  tearDown=fixtures.Workers.tearDown

@@ -1,0 +1,40 @@
+{
+  "passed": true,
+  "scenarios": [
+    "whole-human generation blocked before provider",
+    "legacy whole-life completion blocked before provider",
+    "no-call open",
+    "exact request count",
+    "identity archetype preservation contract",
+    "life/action archetype preservation contract",
+    "stop batch on provider failure",
+    "isolated retry",
+    "apply refreshes counters",
+    "double activation",
+    "stale-edit stop",
+    "manual cancellation",
+    "rate-limit stop",
+    "invalid-output stop",
+    "oversized-direction preflight",
+    "disconnected-provider preflight",
+    "mobile overflow",
+    "secret-free payloads"
+  ],
+  "requestCount": 0,
+  "geometry": {
+    "scrollWidth": 360,
+    "clientWidth": 360,
+    "rect": {
+      "x": 14,
+      "y": 42.203125,
+      "width": 362,
+      "height": 759.59375,
+      "top": 42.203125,
+      "right": 376,
+      "bottom": 801.796875,
+      "left": 14
+    },
+    "body": 390,
+    "viewport": 390
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "passed": true,
+  "viewports": [
+    {
+      "width": 1440,
+      "scroll": 1440,
+      "small": []
+    },
+    {
+      "width": 768,
+      "scroll": 768,
+      "small": []
+    },
+    {
+      "width": 390,
+      "scroll": 390,
+      "small": []
+    },
+    {
+      "width": 320,
+      "scroll": 320,
+      "small": []
+    }
+  ],
+  "dialog": {
+    "width": 292,
+    "client": 290,
+    "scroll": 290
+  },
+  "checks": [
+    "44px authoring actions",
+    "no horizontal overflow at 320–1440px",
+    "keyboard modal containment in both directions",
+    "visible keyboard focus",
+    "Escape dismissal and focus restoration",
+    "no provider calls on navigation",
+    "reduced motion"
+  ]
+}

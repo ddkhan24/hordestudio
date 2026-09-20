@@ -3,12 +3,12 @@ from test_runtime import node_executable
 import sys,tempfile,unittest,uuid,json,subprocess
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService,encode
+from virtual_humans.backend.vh2_runtime import WorldService, encode
 ROOT=Path(__file__).resolve().parents[1];NODE=node_executable(ROOT)
 class Integrated(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.now=1788764400000;self.s=self.open()
-        self.profile=json.loads(subprocess.check_output([NODE,'-e',"process.stdout.write(JSON.stringify(require('./vh2-kernel-worker').run({create:true,name:'Alex',entityId:'source',now:1788764400000}).companion))"],cwd=ROOT))
+        self.profile=json.loads(subprocess.check_output([NODE,'-e',"process.stdout.write(JSON.stringify(require('./virtual_humans/engine/vh2-kernel-worker').run({create:true,name:'Alex',entityId:'source',now:1788764400000}).companion))"],cwd=ROOT))
         self.profile.update(personality='Quiet and curious',chatExamples='yep\nwait, really?',apiKey='NEVER_IMPORT')
         self.settings=dict(scope='horde:alex',baseUrl='https://example.invalid/v1',model='model-a',apiKey='SECRET_A',enabled=True,maxTokens=512,dailyLimit=6,temperature=.7)
         self.s.dialogue_provider.save(self.settings)

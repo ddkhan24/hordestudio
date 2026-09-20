@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const engine = require('../vh-activity-engine');
+const engine = require('../virtual_humans/engine/vh-activity-engine');
 const t = 1800000000000, minute = 60000;
 const free = { availability: 'available', energy: 70 };
 const busy = { availability: 'private', label: 'a meeting', energy: 70 };

@@ -2,9 +2,9 @@
 import copy,json,sys,time,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_story as story
+from virtual_humans.backend import vh2_story as story
 import vh2_lifestyle_audit as fixtures
-from vh2_runtime import Conflict
+from virtual_humans.backend.vh2_runtime import Conflict
 class Adviser(unittest.TestCase):
  setUp=fixtures.Lifestyle.setUp
  tearDown=fixtures.Lifestyle.tearDown
@@ -66,8 +66,16 @@ class Adviser(unittest.TestCase):
  def test_daily_budget_includes_life_advice(self):
   self.setup_adviser()
   with self.s.connect() as db:
-   db.executemany('INSERT INTO dialogue_usage VALUES (?,?)',[(str(i),self.s.clock()) for i in range(20)])
-  story.poll(self.s);self.assertIn('allowance',self.state()['truth']['companion']['vh2Story']['adviser']['error']);self.assertFalse(self.s._story_pending)
+   provider=self.s.dialogue_provider.current(db,'horde:alex')
+   for i in range(20):
+    ident='prior-review:'+str(i)
+    db.execute('INSERT INTO vh2_story_jobs(id,world_id,status,snapshot,created_at) VALUES (?,?,?,?,?)',(ident,self.w,'completed',json.dumps({'providerId':provider['id']}),self.s.clock()))
+    db.execute('INSERT INTO dialogue_usage VALUES (?,?)',(ident,self.s.clock()))
+  story.poll(self.s);self.assertIn('Daily shared request limit reached: 20/20',self.state()['truth']['companion']['vh2Story']['adviser']['error']);self.assertFalse(self.s._story_pending)
+ def test_separate_background_zero_blocks_adviser_without_capping_dialogue(self):
+  self.setup_adviser();config=self.s.dialogue_provider.status('horde:alex');config['budgetPolicy']={'version':1,'dialogueDailyLimit':None,'backgroundDailyLimit':0};self.s.dialogue_provider.save(config)
+  story.poll(self.s);self.assertFalse(self.s._story_pending);self.assertIn('Daily background request limit reached: 0/0',self.state()['truth']['companion']['vh2Story']['adviser']['error'])
+  self.assertFalse(self.s.dialogue_provider.status('horde:alex')['budgets']['dialogue']['exhausted'])
  def test_rejected_candidate_retains_diagnostic_reason_without_becoming_advice(self):
   self.setup_adviser();candidate=self.result();candidate['suggestion']['kind']='teleport';self.s.story_executor=lambda *args:candidate
   before=self.state();story.poll(self.s);self.finish();after=self.state();a=after['truth']['companion']['vh2Story']['adviser']

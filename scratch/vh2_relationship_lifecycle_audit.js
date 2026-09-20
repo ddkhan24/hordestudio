@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),b=require('../vh2-social-bonds'),l=require('../vh2-relationship-lifecycle');
+const assert=require('node:assert/strict'),b=require('../virtual_humans/engine/vh2-social-bonds'),l=require('../virtual_humans/engine/vh2-relationship-lifecycle');
 const DAY=86400000;
 function make(){const c={id:'alex',age:30,lifeProfile:{socialCircle:[{id:'sam',name:'Sam',role:'acquaintance',closeness:0,trust:0,contactWindows:[]}]},lifeRuntime:{world:{people:{sam:{stress:0}}}},humanDynamics:{stress:0},vh2Plans:{plans:[]}};b.ensure(c,DAY);c.vh2SocialBonds.pairs.sam.lifecycle={status:'none',contactExchangedAt:null,events:[],policy:{enabled:true,personAge:30,selfPotential:100,otherPotential:100}};return c;}
 function meet(c,index,stress=0){const at=(1+index*7)*DAY;c.humanDynamics.stress=stress;c.lifeRuntime.world.people.sam.stress=stress;c.vh2Plans.plans.push({id:'m'+index,personId:'sam',status:'completed',completedAt:at,durationMinutes:30});b.advance(c,at);}

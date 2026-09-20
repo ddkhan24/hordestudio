@@ -2,9 +2,9 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { buildContext } = require('./app_source');
-const activity = require('../vh-activity-engine');
-const conversation = require('../vh-conversation-engine');
-const worker = require('../vh-host-worker');
+const activity = require('../virtual_humans/engine/vh-activity-engine');
+const conversation = require('../virtual_humans/engine/vh-conversation-engine');
+const worker = require('../virtual_humans/engine/vh-host-worker');
 const ctx = { console, state: { globalSettings: {}, personas: [], companions: [], companionTimelines: {}, companionThreads: {} } };
 buildContext(vm, ['normalizeCompanion', 'normalizeCompanionCommitment', 'advanceCompanionLife', 'advanceCompanionHumanDynamics', 'companionAttentionContext', 'advanceCompanionMessageAttention', 'buildCompanionContextPacket'], ctx);
 const t = Date.UTC(2026,8,8,9), minute = 60000;

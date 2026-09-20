@@ -3,8 +3,8 @@ import copy,json,sys,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import vh2_lifestyle_audit as fixture
-from vh2_runtime import Conflict
-import vh2_weather
+from virtual_humans.backend.vh2_runtime import Conflict
+from virtual_humans.backend import vh2_weather
 
 class CoordinateEdits(unittest.TestCase):
  setUp=fixture.Lifestyle.setUp

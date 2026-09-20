@@ -1,7 +1,7 @@
 import sys,pathlib,unittest,copy
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 import vh2_ecosystem_audit as f
-import vh2_world_packs
+from virtual_humans.backend import vh2_world_packs
 class Geography(unittest.TestCase):
  setUp=f.Ecosystem.setUp
  tearDown=f.Ecosystem.tearDown
@@ -32,7 +32,7 @@ class Geography(unittest.TestCase):
   with self.assertRaisesRegex(ValueError,'150 metres'):self.cmd('import_world_pack',pack=pack,bindings={'pack-home':'home'})
   self.assertEqual(self.state(),before)
  def test_binding_unknown_position_invalidates_prior_routes_and_requires_arrival(self):
-  from vh2_runtime import Conflict
+  from virtual_humans.backend.vh2_runtime import Conflict
   pack={'version':1,'source':'fixture fill','license':'CC0','places':[{'id':'pack-home','label':'Map home','mapCoordinates':[1,1]}],'routes':[{'from':'pack-home','to':'park','mode':'WALK','minutes':5}]}
   self.cmd('import_world_pack',pack=pack,bindings={'pack-home':'home'})
   self.assertEqual(next(p for p in self.c()['lifeProfile']['places'] if p['id']=='home')['mapCoordinates'],[1,1]);self.assertEqual(len(self.c()['lifeProfile']['travelLegs']),1);self.assertEqual(self.c()['vh2Geography']['lastRouteInvalidation']['removedRouteCount'],2);self.assertEqual(self.state(),self.s.replay(self.w))
@@ -58,7 +58,7 @@ class Geography(unittest.TestCase):
   self.assertTrue(any(r['from']=='home' and r['to']=='park' and r['geometry']==[[.01,.01],[1,1]] for r in routes));self.assertTrue(any(r['mode']=='BICYCLE' and r['source']=='authored_duration' for r in routes));self.assertIn('food',c['vh2Geography']['places']['home']['capabilities'])
   self.cmd('import_world_pack',pack=pack,refresh=True);self.assertEqual(self.c()['lifeProfile']['travelLegs'],routes);self.assertEqual(self.state(),self.s.replay(self.w))
  def test_refresh_rejects_changed_pack_content_and_active_route_binding_atomically(self):
-  from vh2_runtime import Conflict
+  from virtual_humans.backend.vh2_runtime import Conflict
   pack=self.binding_pack();self.cmd('import_world_pack',pack=pack,bindings={'map-home':'home','map-park':'park'});before=self.state()
   with self.assertRaisesRegex(ValueError,'immutable'):self.cmd('import_world_pack',pack={**pack,'license':'different content'},refresh=True)
   self.assertEqual(self.state(),before)

@@ -28,3 +28,24 @@ jobs:
           node scratch/browser_engine_smoke_audit.js
           node scratch/human_package_browser_audit.js
           node scratch/v18_bundle_browser_audit.js
+          python3 scripts/check-vh-ux.py --output /tmp/vh-ux-acceptance
+
+  windows-workers:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify native Windows launchers and worker encoding
+        env:
+          PYTHONUTF8: '0'
+          PYTHONPATH: scratch
+        run: |
+          python -m unittest discover -s scratch -p test_worker_encoding.py
+          python scratch/windows_launcher_audit.py
+          python scratch/vh2_foundation_audit.py
+          python scratch/bridge_tls_audit.py

@@ -3,7 +3,7 @@ import json,sys,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import vh2_lifestyle_audit as fixtures
-import vh2_conversation as conversation
+from virtual_humans.backend import vh2_conversation as conversation
 class StoryService(unittest.TestCase):
  setUp=fixtures.Lifestyle.setUp
  tearDown=fixtures.Lifestyle.tearDown

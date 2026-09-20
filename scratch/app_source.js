@@ -33,8 +33,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const app = fs.readFileSync(path.join(__dirname, '..', 'vh-simulation-core.js'), 'utf8') + '\n'
-    + fs.readFileSync(path.join(__dirname, '..', 'vh-life-schema.js'), 'utf8') + '\n'
+const app = fs.readFileSync(path.join(__dirname, '..', 'virtual_humans/engine/vh-simulation-core.js'), 'utf8') + '\n'
+    + fs.readFileSync(path.join(__dirname, '..', 'virtual_humans/engine/vh-life-schema.js'), 'utf8') + '\n'
     + fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
 
 /**
@@ -320,9 +320,9 @@ function buildContext(vm, seeds, context = {}, options = {}) {
     context.HordeHumanPackage ||= require('../human-package.js');
     context.Blob ||= Blob;
     context.crypto ||= require('node:crypto').webcrypto;
-    context.VHWorldEngine ||= require('../vh-world-engine.js');
-    context.VHActivityEngine ||= require('../vh-activity-engine.js');
-    context.VHConversationEngine ||= require('../vh-conversation-engine.js');
+    context.VHWorldEngine ||= require('../virtual_humans/engine/vh-world-engine.js');
+    context.VHActivityEngine ||= require('../virtual_humans/engine/vh-activity-engine.js');
+    context.VHConversationEngine ||= require('../virtual_humans/engine/vh-conversation-engine.js');
     context.HordeHumanPackage ||= require('../human-package.js');
     const resolved = resolveDependencies(seeds, {
         provided: Object.keys(context),

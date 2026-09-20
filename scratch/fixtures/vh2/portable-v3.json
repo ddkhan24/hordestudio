@@ -123,6 +123,7 @@
         ],
         "frame": {
           "openerMode": "player_first",
+          "openingMessage": "",
           "openingDelayMinutes": 1,
           "openerScenario": "",
           "mode": "direct",
@@ -422,6 +423,8 @@
     "initialMotive": "",
     "connectionAuthenticity": "genuine",
     "startingScenario": "",
+    "openingMode": "player_first",
+    "openingMessage": "",
     "voiceGender": "neutral",
     "ttsVoiceURI": "",
     "ttsMode": "browser",
@@ -445,6 +448,39 @@
     "sexualRiskAppetite": "moderate",
     "sexualInitiative": false,
     "intimacyBoundaries": "",
+    "embodimentProfile": {
+      "version": 1,
+      "enabled": false,
+      "modules": [],
+      "details": {
+        "identity": "",
+        "capabilities": "",
+        "accessNeeds": "",
+        "communication": "",
+        "variability": "",
+        "care": ""
+      }
+    },
+    "cognitionProfile": {
+      "version": 1,
+      "enabled": false,
+      "iq": 100,
+      "axes": {},
+      "details": {
+        "expertise": "",
+        "gaps": "",
+        "learning": "",
+        "blindSpots": "",
+        "adaptiveSkills": ""
+      }
+    },
+    "mindProfile": {
+      "version": 1,
+      "enabled": false,
+      "presetMix": [],
+      "axes": {},
+      "triggers": []
+    },
     "textProvider": "provider",
     "imageSource": "provider",
     "imageModel": "",
@@ -628,6 +664,13 @@
       },
       "pendingReactions": []
     },
+    "mindRuntime": {
+      "version": 1,
+      "cooldowns": {},
+      "activePressures": [],
+      "lastEvaluatedAt": 0,
+      "lastInputId": ""
+    },
     "relationshipDynamics": {
       "trust": 0,
       "warmth": 0,
@@ -716,6 +759,7 @@
             "attention": null,
             "deferredReason": "",
             "responseGroupId": "",
+            "origin": "",
             "turnSnapshot": null,
             "turnAudit": null,
             "generationError": "",
@@ -805,6 +849,13 @@
               "at": 0
             },
             "pendingReactions": []
+          },
+          "mindRuntime": {
+            "version": 1,
+            "cooldowns": {},
+            "activePressures": [],
+            "lastEvaluatedAt": 0,
+            "lastInputId": ""
           },
           "relationshipDynamics": {
             "trust": 0,
@@ -1062,6 +1113,7 @@
             "attention": null,
             "deferredReason": "",
             "responseGroupId": "",
+            "origin": "",
             "turnSnapshot": null,
             "turnAudit": null,
             "generationError": "",
@@ -1151,6 +1203,13 @@
               "at": 0
             },
             "pendingReactions": []
+          },
+          "mindRuntime": {
+            "version": 1,
+            "cooldowns": {},
+            "activePressures": [],
+            "lastEvaluatedAt": 0,
+            "lastInputId": ""
           },
           "relationshipDynamics": {
             "trust": 0,

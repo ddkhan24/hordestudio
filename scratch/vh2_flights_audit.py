@@ -3,7 +3,7 @@ import sys,json,unittest,gzip,time,uuid
 from pathlib import Path
 from unittest.mock import patch,MagicMock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_flights as flights,vh2_feeds as feeds,vh2_backup
+from virtual_humans.backend import vh2_flights as flights; from virtual_humans.backend import vh2_feeds as feeds; from virtual_humans.backend import vh2_backup
 import vh2_ecosystem_audit as fixtures
 DATA={'pagination':{'total':1,'offset':0},'data':[{'flight_status':'scheduled','flight':{'iata':'AB123'},'departure':{'iata':'AAA','scheduled':'2026-09-07T09:00:00Z','estimated':None},'arrival':{'iata':'BBB','scheduled':'2026-09-07T11:00:00Z','estimated':None}}]}
 class Flights(unittest.TestCase):
@@ -44,7 +44,7 @@ class Flights(unittest.TestCase):
   self.assertEqual(self.c()['vh2Transport']['services'][0]['cost'],50);self.assertEqual(self.c()['vh2Signals']['sources'][0]['error'],'');self.assertEqual(self.state(),self.s.replay(self.w))
  def test_transport_hides_key_on_errors_and_fixed_host(self):
   config={'api_key':'SYNTHETIC_SECRET','version':'v'};source={'departureIata':'AAA','arrivalIata':'BBB'}
-  with patch('vh2_feeds.PublicConnection') as cls:
+  with patch('virtual_humans.backend.vh2_feeds.PublicConnection') as cls:
    conn=cls.return_value;conn.request.side_effect=ValueError('accidental SYNTHETIC_SECRET')
    with self.assertRaises(ValueError) as caught:flights.fetch(config,source)
    self.assertNotIn('SYNTHETIC_SECRET',str(caught.exception));self.assertEqual(cls.call_args.args[0],'api.aviationstack.com')

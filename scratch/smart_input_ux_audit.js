@@ -42,7 +42,7 @@ check('smart controls have responsive and keyboard-visible styling',
 const primaryModelInputs = [
     'w-visual-image-model', 'w-studio-model', 'w-agent-model', 'w-builder-model-search',
     'studio-model', 'builder-model-search', 'cs-life-builder-model', 'cs-text-model-search',
-    'cs-builder-model', 'global-default-model', 'global-consolidation-model',
+    'global-default-model', 'global-consolidation-model',
     'global-embedding-model', 'room-model'
 ];
 check('every primary free-form model control has a results surface', primaryModelInputs.every(id => {

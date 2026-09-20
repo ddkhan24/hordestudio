@@ -42,12 +42,11 @@ test('legacy duplicate IDs are separated and only the first record retains share
     assert.match(source, /return repairedDuplicateIds/);
 });
 
-test('New Virtual Human clears transient builder, photo, voice and file state', () => {
+test('New Virtual Human clears transient photo, voice and file state', () => {
     const start = app.indexOf('function resetNewCompanionStudioState()');
     const end = app.indexOf('function setupCompanionStudioTabs()', start);
     const source = app.slice(start, end);
     for (const id of [
-        'cs-builder-input', 'cs-builder-status', 'cs-builder-result', 'cs-builder-summary',
         'cs-photo-test-prompt', 'cs-photo-test-result', 'cs-photo-test-image',
         'cs-voice-sample-text', 'cs-voice-preview-status', 'cs-voice-preview-player',
         'cs-photo-input', 'cs-reference-input'

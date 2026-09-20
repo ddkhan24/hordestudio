@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict');
-const world=require('../vh-world-engine'),voice=require('../vh-conversation-engine');
-global.VHConversationEngine=voice;global.VHActivityEngine=require('../vh-activity-engine');const core=require('../vh-simulation-core');
+const world=require('../virtual_humans/engine/vh-world-engine'),voice=require('../virtual_humans/engine/vh-conversation-engine');
+global.VHConversationEngine=voice;global.VHActivityEngine=require('../virtual_humans/engine/vh-activity-engine');const core=require('../virtual_humans/engine/vh-simulation-core');
 const minute=60000,day=86400000,base=Date.UTC(2026,8,8),at=m=>base+m*minute;
 function person(){return {id:'a',humanDynamics:{energy:80,stress:0},relationshipDynamics:{trust:50,comfort:20},commitments:[],continuityRuntime:{conversation:{status:'paused',topic:'weekend plans'}},lifeProfile:{world:world.config({transport:{enabled:false},gifts:{enabled:true,mailAllowed:true,deliveryHours:0,openingMinutes:3},items:[{id:'shirt',name:'Blue shirt',category:'top',owned:false}],people:[]}),places:[{id:'home',kind:'home',label:'Home'},{id:'gym',label:'Gym'}],weeklySchedule:[],travelLegs:[],socialCircle:[]},lifeRuntime:{world:world.runtime(),environment:{weatherCode:0}}};}
 const local=(c,t)=>{const d=new Date(t);return {dateKey:d.toISOString().slice(0,10),weekday:d.getUTCDay(),hour:d.getUTCHours(),minute:d.getUTCMinutes()};};

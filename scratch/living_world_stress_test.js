@@ -119,7 +119,7 @@ const context = {
     renderWorldLocations() {}
 };
 vm.createContext(context);
-Object.assign(context, { livingClamp: require('../vh-simulation-core').livingClamp, livingId: require('../vh-simulation-core').livingId });
+Object.assign(context, { livingClamp: require('../virtual_humans/engine/vh-simulation-core').livingClamp, livingId: require('../virtual_humans/engine/vh-simulation-core').livingId });
 vm.runInContext(source.slice(helperStart, helperEnd), context, { filename: 'living-world-helpers.js' });
 vm.runInContext(source.slice(actionsStart, actionsEnd), context, { filename: 'living-world-actions.js' });
 // Load the actual navigation dependencies instead of assuming schedules teleport.

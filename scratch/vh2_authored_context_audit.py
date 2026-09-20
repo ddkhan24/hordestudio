@@ -4,8 +4,8 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from test_runtime import node_executable
-from vh2_runtime import WorldService
-import vh2_profile,vh2_story
+from virtual_humans.backend.vh2_runtime import WorldService
+from virtual_humans.backend import vh2_profile; from virtual_humans.backend import vh2_story
 
 FIELDS={'privateLife':'Privately worried about an academic warning. Has not told family.',
         'routine':'Usually studies late, but this is a tendency, not a schedule.',
@@ -40,6 +40,16 @@ class AuthoredContext(unittest.TestCase):
         self.assertEqual(context['authoredConnection']['opening']['phase'],'first_exchange')
         self.assertIn('does not supply',context['authoredConnection']['knowledgeScope'])
         self.assertEqual(before,self.s.replay(self.w))
+    def test_exact_authored_opening_is_delivered_once_without_a_provider_job(self):
+        text='you took 11 minutes to answer last time. I counted.'
+        world=self.create({**FIELDS,'openingMode':'vh_first','openingMessage':text})
+        before=self.s.projection(world)['state'];messages=before['communication']['messages']
+        self.assertEqual(len(messages),1);self.assertEqual(messages[0]['role'],'assistant')
+        self.assertEqual(messages[0]['text'],text);self.assertEqual(messages[0]['origin'],'authored_opening')
+        self.assertEqual(messages[0]['sourceMessageIds'],[])
+        self.assertTrue(before['truth']['companion']['continuityRuntime']['originScenarioConsumedAt'])
+        self.assertEqual(self.s.dialogue.list(world),[],'Exact opening must not queue a paid provider job.')
+        self.assertEqual(before,self.s.replay(world))
     def test_contact_background_does_not_transfer_to_another_persona(self):
         self.cmd('open_conversation',personaId='new',profile={'templateId':'new','name':'New contact','text':'A different person.'})
         other=self.snapshot('new')['context'];primary=self.snapshot()['context']

@@ -1,6 +1,6 @@
 'use strict';
 // Long-run mechanism acceptance. This is not a test of culture, dialogue or sentience.
-const assert=require('node:assert/strict'),fs=require('node:fs'),e=require('../vh2-people-engine');
+const assert=require('node:assert/strict'),fs=require('node:fs'),e=require('../virtual_humans/engine/vh2-people-engine');
 const {fixture,local,start,MIN}=require('./vh2_people_audit');
 const DAY=1440*MIN,runs=[];
 for(const curiosity of [5,50,95])for(let seed=0;seed<8;seed++){

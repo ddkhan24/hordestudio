@@ -1,4 +1,6 @@
 node_modules/
+__pycache__/
+*.py[cod]
 .env
 .DS_Store
 dist/
@@ -10,6 +12,8 @@ assets/readme/horde-studio-v12-poster.png
 scratch/debug_*.js
 scratch/simulate.py
 scratch/verify_*.py
+scratch/v18-marketing-results/
+scratch/v18-release-results/
 
 # Optional platform-specific local Node runtime for VH background simulation
 runtime/

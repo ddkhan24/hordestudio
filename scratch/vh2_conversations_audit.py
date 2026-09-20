@@ -3,8 +3,8 @@ from test_runtime import node_executable
 import sys, tempfile, unittest, uuid, json, base64
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService, Conflict
-import vh2_transcript, vh2_backup
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict
+from virtual_humans.backend import vh2_transcript; from virtual_humans.backend import vh2_backup
 ROOT=Path(__file__).resolve().parents[1]
 
 class Conversations(unittest.TestCase):

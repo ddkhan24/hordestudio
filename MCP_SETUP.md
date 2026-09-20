@@ -20,6 +20,20 @@ All launchers require Python 3. You can also start it directly:
 python3 horde_mcp_bridge.py --open
 ```
 
+### HTTPS certificate errors
+
+The bridge verifies HTTPS using operating-system trust and, when installed,
+the `certifi` bundle from the same Python interpreter that runs the launcher.
+Updating certifi in a different Python installation does not affect the bridge.
+For a trusted organization HTTPS proxy, set `HORDE_CA_BUNDLE` to its PEM CA
+bundle before starting Horde Studio. An unreadable or invalid bundle produces
+an error; certificate verification is never disabled.
+
+An **expired certificate** is different from a missing issuer. If your computer's
+date and time are correct, the provider or HTTPS proxy must renew the expired
+certificate in its chain. Updating certifi cannot renew a server certificate.
+The bridge now identifies the failing host and distinguishes these cases.
+
 Running a launcher again is safe: if Horde Studio already owns its local port,
 the launcher opens the existing app instead of starting a duplicate bridge.
 If another program owns that port, it reports the conflict rather than opening

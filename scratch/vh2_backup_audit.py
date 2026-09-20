@@ -4,8 +4,8 @@ import sys,tempfile,unittest,json,gzip,uuid,io,zipfile,base64,hashlib
 from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService,Conflict
-import vh2_backup,vh2_library
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict
+from virtual_humans.backend import vh2_backup; from virtual_humans.backend import vh2_library
 ROOT=Path(__file__).resolve().parents[1]
 PNG='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
 class Backup(unittest.TestCase):
@@ -28,6 +28,17 @@ class Backup(unittest.TestCase):
   before=self.dest.projection(self.w)
   with self.assertRaises(Conflict):vh2_backup.restore(self.dest,archive)
   self.assertEqual(before,self.dest.projection(self.w))
+ def test_provider_token_receipts_survive_archive_and_character_copy(self):
+  self.source.dialogue_provider.save(dict(baseUrl='http://127.0.0.1:9999/v1',model='fixture',apiKey='SECRET',enabled=True,maxTokens=100,dailyLimit=10,temperature=.5))
+  self.cmd('receive_message',text='Hello');self.cmd('advance',steps=1);self.cmd('queue_dialogue',adapter='chat_completions')
+  self.assertTrue(self.source.dialogue.run_once(provider_transport=lambda *args:{'choices':[{'finish_reason':'stop','message':{'content':'Hello'}}],'usage':{'prompt_tokens':30,'completion_tokens':4,'total_tokens':34}}))
+  archive=vh2_backup.export(self.source,self.w);vh2_backup.restore(self.dest,archive)
+  self.assertEqual(self.dest.dialogue.list(self.w)[0]['usage'],{'prompt_tokens':30,'completion_tokens':4,'total_tokens':34})
+  copied=vh2_backup.restore_character(self.dest,{'companionId':'receipt-copy','importId':'receipt-copy','archives':[{'worldId':self.w,'data':archive}]})['worlds'][0]['worldId']
+  self.assertEqual(self.dest.dialogue.list(copied)[0]['usage']['total_tokens'],34)
+ def test_archives_before_token_receipts_remain_readable(self):
+  envelope=json.loads(gzip.decompress(vh2_backup.export(self.source,self.w)));payload=envelope['payload'];payload['tables'].pop('dialogue_receipts')
+  vh2_backup.restore(self.dest,vh2_backup.compress_payload(payload));self.assertEqual(self.dest.dialogue.list(self.w),[])
  def test_corruption_and_failed_commit_leave_no_partial_world(self):
   archive=vh2_backup.export(self.source,self.w);bad=json.loads(gzip.decompress(archive));bad['payload']['state']['simAt']+=1
   with self.assertRaises(ValueError):vh2_backup.restore(self.dest,gzip.compress(json.dumps(bad).encode()))
@@ -62,7 +73,7 @@ class Backup(unittest.TestCase):
   legacy={**body,'archives':[{'worldId':self.w,'data':base64.b64encode(raw).decode()}]}
   self.assertEqual(result,vh2_backup.restore_character(self.dest,legacy))
   # A receipt written before binary transport was introduced must also recover.
-  from vh2_runtime import encode
+  from virtual_humans.backend.vh2_runtime import encode
   old_fingerprint=hashlib.sha256(encode(legacy).encode()).hexdigest()
   self.assertEqual(old_fingerprint,vh2_backup.legacy_character_fingerprint(body,body['archives']))
   with self.dest.connect() as db:db.execute('UPDATE commands SET fingerprint=? WHERE key=?',(old_fingerprint,'character-import:binary-receipt'))
@@ -136,7 +147,7 @@ class Backup(unittest.TestCase):
    self.assertEqual(db.execute('SELECT COUNT(*) FROM worlds').fetchone()[0],0)
    self.assertEqual(db.execute('SELECT COUNT(*) FROM commands').fetchone()[0],0)
  def test_old_receipt_alias_repair_is_evented_scoped_and_idempotent(self):
-  from vh2_runtime import encode
+  from virtual_humans.backend.vh2_runtime import encode
   alias=self.new_source('Archived');self.fixture_state(self.source,alias,mergedInto=self.w)
   self.fixture_state(self.source,self.w,mergeRecord={'sourceWorldId':alias})
   body=self.bundle([alias,self.w]);first=vh2_backup.restore_character(self.dest,body);rows={r['sourceWorldId']:r for r in first['worlds']};copied=rows[alias]['worldId'];target=rows[self.w]['worldId']

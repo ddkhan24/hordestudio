@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),presence=require('../vh2-presence-engine');
+const assert=require('node:assert/strict'),presence=require('../virtual_humans/engine/vh2-presence-engine');
 function make(kind='home'){return {id:'alex',lifeProfile:{places:[{id:'a',label:'Place A',kind},{id:'b',label:'Place B',kind}],socialCircle:[{id:'maya',name:'Maya'}]},lifeRuntime:{world:{placeId:'a',people:{maya:{placeId:'a',lastAt:1000}}}}};}
 function step(c,at,availability='available'){if(c.lifeRuntime.world.people.maya)c.lifeRuntime.world.people.maya.lastAt=at;return presence.advance(c,at,availability);}
 const c=make();step(c,1000);assert.equal(c.vh2Presence.visit.placeId,'a');assert.equal(presence.observed(c).length,0);

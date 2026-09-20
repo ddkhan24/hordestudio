@@ -1,6 +1,6 @@
 "use strict";
 // Perception observes sources. The canonical geography/activity planner owns movement.
-const assert=require('node:assert/strict'),engine=require('../vh2-exploration-engine'),geo=require('../vh2-geography-engine'),kernel=require('../vh2-kernel-worker'),travel=require('../vh2-travel-engine');
+const assert=require('node:assert/strict'),engine=require('../virtual_humans/engine/vh2-exploration-engine'),geo=require('../virtual_humans/engine/vh2-geography-engine'),kernel=require('../virtual_humans/engine/vh2-kernel-worker'),travel=require('../virtual_humans/engine/vh2-travel-engine');
 const now=1788764400000,local=()=>({hour:10,minute:0,weekday:1});
 function fixture(seed,hot=false){
  const c=kernel.run({create:true,entityId:'exploration:'+seed,name:'Example',now}).companion;

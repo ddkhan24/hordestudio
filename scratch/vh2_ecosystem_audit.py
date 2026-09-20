@@ -4,8 +4,8 @@ import json,sys,tempfile,unittest,uuid,platform,shutil
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService
-import vh2_feeds,vh2_assets
+from virtual_humans.backend.vh2_runtime import WorldService
+from virtual_humans.backend import vh2_feeds; from virtual_humans.backend import vh2_assets
 ROOT=Path(__file__).resolve().parents[1]
 NODE=node_executable(ROOT)
 PNG='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
@@ -61,7 +61,7 @@ class Ecosystem(unittest.TestCase):
   self.cmd('submit_photo',photoId=photo['id'],manifest={});self.cmd('import_photo',photoId=photo['id'],image=PNG)
   self.cmd('add_bible_asset',role='identity',entityId=self.c()['id'],label='Generated profile',tags=['profile'],photoId=photo['id'])
   entry=self.c()['vh2Assets']['entries'][-1];self.assertEqual(entry['status'],'pending');self.assertEqual(entry['parents'],[seed['id']])
-  from vh2_runtime import Conflict
+  from virtual_humans.backend.vh2_runtime import Conflict
   with self.assertRaises(Conflict):self.cmd('publish_photo',photoId=photo['id'],caption='wrong')
   self.assertEqual(self.state(),self.s.replay(self.w))
  def test_contextual_reference_selection(self):

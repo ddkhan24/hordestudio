@@ -2,7 +2,7 @@
 import copy,pathlib,sys,unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 import vh2_ecosystem_audit as fixtures
-import vh2_weather
+from virtual_humans.backend import vh2_weather
 
 class WeatherContext(unittest.TestCase):
  setUp=fixtures.Ecosystem.setUp

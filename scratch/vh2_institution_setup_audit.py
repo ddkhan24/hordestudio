@@ -1,8 +1,8 @@
 """AI-reviewed attendance setup reaches the existing engine without resetting history."""
 import copy,datetime,json,gzip,unittest
 from vh2_lifestyle_audit import Lifestyle
-from vh2_runtime import Conflict
-import vh2_backup
+from virtual_humans.backend.vh2_runtime import Conflict
+from virtual_humans.backend import vh2_backup
 
 class InstitutionSetup(Lifestyle):
  def draft(self,place='home'):

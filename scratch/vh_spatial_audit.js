@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict');
-global.VHActivityEngine=require('../vh-activity-engine');
-const core=require('../vh-simulation-core');
+global.VHActivityEngine=require('../virtual_humans/engine/vh-activity-engine');
+const core=require('../virtual_humans/engine/vh-simulation-core');
 const base=Date.UTC(2026,8,8);
 const c={id:'traveller',locationMode:'custom',timezoneOffsetMinutes:0,lifeProfile:core.normalizeCompanionLifeProfile({initializedAt:1,
  places:[{id:'home',label:'Home',googlePlaceId:'abc_123'},{id:'gym',label:'Gym'}],

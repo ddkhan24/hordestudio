@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),{fixture,local,start,MIN}=require('./vh2_people_audit'),people=require('../vh2-people-engine'),net=require('../vh2-network-engine');
+const assert=require('node:assert/strict'),{fixture,local,start,MIN}=require('./vh2_people_audit'),people=require('../virtual_humans/engine/vh2-people-engine'),net=require('../virtual_humans/engine/vh2-network-engine');
 function sample(){const c=fixture(),a=c.vh2People.actors.sam;c.lifeProfile.socialCircle=[{id:'sam',name:'Sam'},{id:'jo',name:'Jo'},{id:'lee',name:'Lee'}];c.lifeRuntime.world.placeId='home';c.humanDynamics={sleep:{stage:'awake'}};a.policy.leisurePlaceIds=['home','park'];a.policy.temperature=1;for(const id of ['jo','lee'])c.vh2People.actors[id]={...structuredClone(a),id};c.vh2People.network={enabled:true,lastAt:start,pairs:{},events:[],policy:{groupPlansEnabled:true},dispositions:{}};return c;}
 function matured(c){const n=net.ensure(c);for(const [a,b] of [['jo','lee'],['jo','sam'],['lee','sam']])n.pairs[JSON.stringify([a,b])]={people:[a,b],meetings:10,minutes:100,warmth:10,lastAt:start,lastPlaceId:'park',sides:[a,b].map(()=>({warmth:10,trust:5,strain:0,meetings:10,firstAt:start-8*86400000,lastAt:start,stage:'friend'}))};return c;}
 // Each side has its own appraisal: guarded stress does not become the other's affection.

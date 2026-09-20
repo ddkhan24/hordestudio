@@ -1,7 +1,7 @@
 'use strict';
 const assert=require('node:assert/strict');
 const {fixture,advance}=require('./vh_goal_outing_audit');
-const core=require('../vh-simulation-core');
+const core=require('../virtual_humans/engine/vh-simulation-core');
 const engine=global.VHWorldEngine,minute=60000;
 const c=advance(fixture(),3),j=c.lifeRuntime.world.journey,t=j.departedAt;
 const geometry=[[0,51],[0,51.01],[.01,51.01]];

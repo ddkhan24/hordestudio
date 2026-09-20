@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict'),vm=require('node:vm');
-const engine=require('../vh-activity-engine'),worker=require('../vh-host-worker'),{buildContext}=require('./app_source');
+const engine=require('../virtual_humans/engine/vh-activity-engine'),worker=require('../virtual_humans/engine/vh-host-worker'),{buildContext}=require('./app_source');
 const ctx={console,state:{globalSettings:{},personas:[],companions:[],companionThreads:{},companionTimelines:{}}};
 buildContext(vm,['normalizeCompanion','companionConversationTransition'],ctx);
 const t=Date.UTC(2026,8,9,12),m=60000;

@@ -2,10 +2,10 @@
 import copy,datetime,json,sys,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import vh2_calendar as calendar
+from virtual_humans.backend import vh2_calendar as calendar
 import vh2_lifestyle_audit as fixtures
-import vh2_story as story
-from vh2_runtime import Conflict
+from virtual_humans.backend import vh2_story as story
+from virtual_humans.backend.vh2_runtime import Conflict
 
 class PersonalCalendar(unittest.TestCase):
  setUp=fixtures.Lifestyle.setUp

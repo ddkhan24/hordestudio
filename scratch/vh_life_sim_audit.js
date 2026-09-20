@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { buildContext, functionSource } = require('./app_source');
-const engine = require('../vh-activity-engine');
+const engine = require('../virtual_humans/engine/vh-activity-engine');
 const start = Date.UTC(2026, 8, 7, 12);
 const experience = { realTimeLife: true, replyDelays: true, allowNoReply: true };
 const ctx = { console, companionLifeState: c => c.life,

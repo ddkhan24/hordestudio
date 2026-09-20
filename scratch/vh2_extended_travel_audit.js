@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),routing=require('../vh2-transport-engine'),travel=require('../vh2-travel-engine'),episodes=require('../vh2-episodes-engine');
+const assert=require('node:assert/strict'),routing=require('../virtual_humans/engine/vh2-transport-engine'),travel=require('../virtual_humans/engine/vh2-travel-engine'),episodes=require('../virtual_humans/engine/vh2-episodes-engine');
 const now=Date.parse('2026-09-10T09:00:00Z'),MIN=60000;
 function fixture(seed=1){return {id:'traveller:'+seed,humanDynamics:{energy:80,hunger:10,stress:10},lifeProfile:{places:[{id:'home',kind:'home',label:'Home'},{id:'away',kind:'home',label:'Away'}],world:{transport:{enabled:true,transit:true,budget:1000}},travelLegs:[{from:'home',to:'away',mode:'TRANSIT',minutes:120,cost:30},{from:'away',to:'home',mode:'TRANSIT',minutes:120,cost:30}],weeklySchedule:[]},lifeRuntime:{world:{placeId:'home',balance:1000},activities:{}}};}
 const c=fixture();c.lifeProfile.travelLegs=[];routing.ensure(c).services=[{id:'train',label:'Train',from:'home',to:'away',kind:'train',departsAt:now+10*MIN,arrivesAt:now+30*MIN,boardingMinutes:5,cost:20,status:'scheduled',source:'fixture'}];

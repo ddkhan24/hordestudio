@@ -3,8 +3,8 @@ from test_runtime import node_executable
 import sys,tempfile,unittest,uuid,json
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from vh2_runtime import WorldService
-import vh2_workers
+from virtual_humans.backend.vh2_runtime import WorldService
+from virtual_humans.backend import vh2_workers
 ROOT=Path(__file__).resolve().parents[1]
 PNG='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
 class Studies(unittest.TestCase):

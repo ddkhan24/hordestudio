@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),health=require('../vh2-health-engine'),{random}=require('../vh2-decision-engine');
+const assert=require('node:assert/strict'),health=require('../virtual_humans/engine/vh2-health-engine'),{random}=require('../virtual_humans/engine/vh2-decision-engine');
 const at=Date.parse('2026-09-12T12:00:00Z'),day=Math.floor(at/86400000);
 let id;for(let n=0;n<10000;n++)if(random('health-test:'+n+'|health-onset|'+day)<12/365){id='health-test:'+n;break;}
 assert(id);
