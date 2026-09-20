@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 
 def functions():
     source = Path(__file__).resolve().parents[1] / 'horde_mcp_bridge.py'
-    tree = ast.parse(source.read_text())
+    tree = ast.parse(source.read_text(encoding='utf-8'))
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
              and node.name in {'bridge_tls_context', 'bridge_urlopen'}]
     namespace = {'ssl': ssl, 'os': os, 'urllib': urllib}
@@ -80,7 +80,7 @@ class TLS(unittest.TestCase):
         self.assertIn('verification remains enabled', str(caught.exception))
 
     def test_windows_help_names_the_windows_launcher(self):
-        html = (Path(__file__).resolve().parents[1] / 'index.html').read_text()
+        html = (Path(__file__).resolve().parents[1] / 'index.html').read_text(encoding='utf-8')
         self.assertIn('<code>Start Horde Studio.bat</code> on Windows', html)
 
 

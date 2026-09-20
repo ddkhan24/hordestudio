@@ -5,7 +5,7 @@ from pathlib import Path
 
 REPORT_VERSION = 1
 MAX_ARCHIVE_BYTES = 12 * 1024 * 1024
-FIELDS = json.loads((Path(__file__).resolve().parents[1]/'engine'/'vh2-vh1-fields.json').read_text())
+FIELDS = json.loads((Path(__file__).resolve().parents[1]/'engine'/'vh2-vh1-fields.json').read_text(encoding='utf-8'))
 SECRET_FIELDS = {'apikey','accesstoken','refreshtoken','authorization','password','clientsecret','privatekey','credentials','authtoken','bearertoken','secret'}
 
 

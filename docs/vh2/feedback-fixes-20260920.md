@@ -44,8 +44,8 @@ Browser tests require Playwright, Chrome and a local listening port. Python fixt
 - Final archive extraction passed launcher routing, dependency closure, timeline boot/advance/replay, bundled character resources, HTML references and bridge HTTP/health checks.
 - Native Windows worker/launcher checks are part of the release workflow; the local run was performed on macOS.
 
-Artifact: `dist/Horde-Studio-v18.1.0-portable.zip` (269,349,814 bytes).
+Artifact: `dist/Horde-Studio-v18.1.0-portable.zip` (269,349,845 bytes).
 
-SHA-256: `56f52858291a881e5900ddaebeb30ab0a8379c4e87be475e53f40543307e7e51`.
+SHA-256: `a1ff58be5f9fd5c4a26b5459e18975a0fe3e30d70e716b245f2807f0b2b7b913`.
 
 The old `ashlyn_archive_audit` relies on a retired fixture absent from this workspace. Current synthetic archive/media tests and the included Aslyn package verification passed instead; the missing retired fixture is not counted as a passing test.

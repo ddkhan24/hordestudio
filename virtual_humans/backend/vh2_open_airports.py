@@ -25,12 +25,12 @@ def catalogue(service):
  with _LOCK:
   cached=None
   try:
-   if path.stat().st_size<4000000:cached=json.loads(path.read_text())
+   if path.stat().st_size<4000000:cached=json.loads(path.read_text(encoding='utf-8'))
   except (OSError,ValueError):pass
   if cached and time.time()-cached['fetchedAt']<7*86400:return cached,False
   try:
    rows=parse(fetch(URL,limit=20000000));data=dict(fetchedAt=time.time(),airports=rows)
-   tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(data));tmp.replace(path)
+   tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(data),encoding='utf-8');tmp.replace(path)
    return data,False
   except Exception:
    if cached:return cached,True

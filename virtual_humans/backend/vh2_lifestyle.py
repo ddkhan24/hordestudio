@@ -564,7 +564,7 @@ def apply_complete_policies(service,db,world,revision,state,proposal):
    if c.get('vh2Exploration'):c['vh2Exploration']['policy']['enabled']=raw['enabled']
   elif section=='storyPolicy':
    from pathlib import Path
-   schema=json.loads((Path(__file__).resolve().parents[1]/'engine'/'vh2-story-policy.json').read_text())
+   schema=json.loads((Path(__file__).resolve().parents[1]/'engine'/'vh2-story-policy.json').read_text(encoding='utf-8'))
    previous=c.get('vh2Story',{}).get('policy',{})
    values=validate_policy(raw,{k:previous.get(k,s['default']) for k,s in schema.items()},{k:(s['min'],s['max']) for k,s in schema.items() if s.get('type')!='boolean'},'story pacing')
    c.setdefault('vh2Story',{'threads':[],'events':[],'sequence':0,'lastReview':None,'nextAt':0})['policy']=values

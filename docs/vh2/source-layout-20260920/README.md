@@ -39,4 +39,4 @@ The reorganization does not address unrelated simulation policy or provider fail
 - All active Python test/developer utility sources parse.
 - Integrated VH2 page-builder browser acceptance passed with the relocated application.
 
-Release artifact: `dist/Horde-Studio-v18.1.0-portable.zip` (269,349,814 bytes). Extracted-package verification passed, including nested HTML/asset references, absence of loose VH root files, launcher routing, isolated timeline boot/advance/replay, and HTTP startup serving the nested page-builder asset.
+Release artifact: `dist/Horde-Studio-v18.1.0-portable.zip` (269,349,845 bytes). Extracted-package verification passed, including nested HTML/asset references, absence of loose VH root files, launcher routing, isolated timeline boot/advance/replay, and HTTP startup serving the nested page-builder asset.
