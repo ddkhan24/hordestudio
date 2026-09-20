@@ -75,6 +75,31 @@ class DialogueContext(unittest.TestCase):
         self.assertEqual(self.s.dialogue.list(self.w), [])
         self.assertEqual(self.s.dialogue_provider.status()['usedToday'], 0)
 
+    def test_automatic_oversized_reply_records_visible_nonbillable_failure_once(self):
+        self.cmd('configure_expression_profile', fields={'personality': 'x' * 59000})
+        self.cmd('configure_expression_profile', fields={'backstory': 'y' * 59000})
+        with self.s.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            revision, before = self.s.read(db, self.w)
+            after = copy.deepcopy(before)
+            after['integration'] = {'providerScope': None, 'autoReplies': True}
+            self.s.commit_event(db, self.w, revision, before, after, 'TEST_HORDE_INTEGRATION')
+        self.cmd('set_running', running=True)
+        projection = self.s.projection(self.w)
+        job = projection['state']['communication']['replyJob']
+        self.assertEqual(job['status'], 'failed')
+        self.assertTrue(job['preflight'])
+        self.assertIn('No provider request was made', job['reason'])
+        self.assertEqual(self.s.dialogue.list(self.w), [])
+        self.assertEqual(self.s.dialogue_provider.status()['usedToday'], 0)
+        revision = projection['revision']
+        with self.s.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current_revision, state = self.s.read(db, self.w)
+            self.s.dialogue.maybe_queue(db, self.w, current_revision, state)
+        self.assertEqual(self.s.projection(self.w)['revision'], revision,
+                         'the same preflight failure must not churn the life every worker tick')
+
     def test_compaction_preserves_authority_calendar_and_unicode_without_mutation(self):
         self.cmd('configure_expression_profile', fields={'personality': 'Réfléchie; دوست; 日本語; 🌻'})
         before = copy.deepcopy(self.s.projection(self.w))

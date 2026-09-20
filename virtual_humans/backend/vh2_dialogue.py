@@ -172,6 +172,36 @@ class DialogueQueue:
             revision,state=self.service.read(db,world_id)
         return revision,state
 
+    @staticmethod
+    def preflight_reason(error):
+        """Translate local preparation failures into safe, actionable UI text.
+
+        These failures happen before a provider submission, so they must not be
+        mistaken for character hesitation or left behind an attention reason.
+        """
+        message=str(error)
+        if message=='Expression context exceeds the current provider input limit.':
+            return ('Reply generation did not start because this character and conversation exceed the current '
+                    'text-request limit. Review exceptionally long authored fields or the pending message batch, '
+                    'then retry. No provider request was made.')
+        if message=='Configure and enable the selected dialogue provider in Horde settings first.':
+            return ('Reply generation did not start because the selected conversation provider is not enabled. '
+                    'Configure the text model, then retry. No provider request was made.')
+        return ('Reply generation could not be prepared locally. Review the conversation provider and retry. '
+                'No provider request was made.')
+
+    def record_preflight_failure(self,db,world_id,revision,state,ready,error):
+        reason=self.preflight_reason(error)
+        job_id='preflight:'+hashlib.sha256((state['communication']['personaId']+'|'+'|'.join(ready)).encode()).hexdigest()[:24]
+        current=state['communication'].get('replyJob') or {}
+        if current.get('id')==job_id and current.get('status')=='failed' and current.get('reason')==reason:
+            return revision,state
+        after=json.loads(encode(state))
+        after['communication']['replyJob']={'id':job_id,'status':'failed','reason':reason,'preflight':True}
+        revision=self.service.commit_event(db,world_id,revision,state,after,'DIALOGUE_PREFLIGHT_FAILED',
+            {'jobId':job_id,'reason':reason,'sourceMessageIds':ready,'providerSubmitted':False})
+        return revision,after
+
     def maybe_queue_contact(self,db,world_id,revision,state):
         call=state.get('communication',{}).get('call',{})
         active_call=call.get('status')=='active' and call.get('expiresAt',0)>state['simAt']
@@ -189,12 +219,23 @@ class DialogueQueue:
                 if row['status']=='superseded' and row['attempt']==0 and row['created_at']<self.service.clock()-60_000:continue
                 same.append((row['status'],row['reason']))
         if not reply_retry_allowed(same):return revision,state
+        try:self.service.dialogue_provider.freeze(db,state['integration']['providerScope'])
+        except ValueError as error:
+            return self.record_preflight_failure(db,world_id,revision,state,ready,error)
         try:
-            self.service.dialogue_provider.freeze(db,state['integration']['providerScope'])
             revision,state,_=self.queue(db,world_id,revision,state,{'adapter':'chat_completions','key':str(uuid.uuid4())})
-        except (ValueError,self.conflict):
-            # Configuration/attention may change; no provider call was submitted.
+        except self.conflict:
+            # Attention can legitimately change during live-clock synchronization.
             return self.service.read(db,world_id)
+        except ValueError as error:
+            # Prompt construction and provider validation are local. Preserve an
+            # explicit, non-billable failure instead of displaying "attention is
+            # available" forever with no reply job.
+            revision,current=self.service.read(db,world_id)
+            scoped=vh2_conversations.view(current,state['communication']['personaId'])
+            current_ready=self.service.expression_context(world_id,revision,scoped)['readyMessageIds']
+            if current_ready:return self.record_preflight_failure(db,world_id,revision,scoped,current_ready,error)
+            return revision,current
         return revision,state
 
     def transition(self,db,job,status,reason='',result=None):
