@@ -55,11 +55,13 @@ try{
  assert(await dialog.getByRole('button',{name:'Confirm 4 paid requests',exact:true}).isVisible(),'Confirmation names the exact paid request count');
  await dialog.getByRole('button',{name:'Close',exact:true}).click();
  assert.equal(await page.evaluate(()=>VH_AI_HELPERS.some(h=>h.id==='world')),false,'Whole world option retired');
- await page.getByRole('button',{name:'Back to Virtual Humans 2.0'}).click();await page.locator('#companions-view').waitFor({state:'visible'});
- assert(await page.locator('[data-vh-edit]').isVisible(),'Library exposes one clear Edit human action');
- assert(await page.locator('[data-vh-delete]').isVisible(),'Library exposes a visible Delete action');
- assert.equal(await page.locator('[data-vh-life]').count(),0,'Life is not a competing library destination');
- await page.locator('[data-vh-chat]').click();await page.waitForFunction(()=>state.view==='companionChat');
+	 await page.getByRole('button',{name:'Back to Virtual Humans 2.0'}).click();await page.locator('#companions-view').waitFor({state:'visible'});
+	 const authoredCard=page.locator('.vh-card').filter({hasText:'Iri the Archivist'});
+	 assert.equal(await authoredCard.count(),1,'Authored human has one library card');
+	 assert(await authoredCard.locator('[data-vh-edit]').isVisible(),'Library exposes one clear Edit human action per human');
+	 assert(await authoredCard.locator('[data-vh-delete]').isVisible(),'Library exposes a visible Delete action per human');
+	 assert.equal(await page.locator('[data-vh-life]').count(),0,'Life is not a competing library destination');
+	 await authoredCard.locator('[data-vh-chat]').click();await page.waitForFunction(()=>state.view==='companionChat');
  assert.equal(await page.locator('#vh-primary-chat [data-mode=life]').innerText(),'Live human','Chat exposes the evolving timeline with an explicit name');
  assert.equal(await page.locator('#vh-primary-chat [data-mode=studio]').innerText(),'Edit human');
  await page.locator('#vh-primary-chat [data-mode=life]').click();await page.waitForFunction(()=>state.view==='vhWorkspace');

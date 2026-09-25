@@ -38,6 +38,7 @@ def advance(service,db,world_id,state):
   photo_id=str(uuid.uuid5(uuid.NAMESPACE_URL,'vh2-photo:'+intent['id']))
   snapshot={'companion':frozen['companion'],'photoContext':context,'scene':scene,'captureType':intent['captureType'],'destination':'gallery','kernelVersion':state['kernelVersion']}
   _vh_import_module('.vh2_assets',__package__).freeze(snapshot)
+  snapshot=_vh_import_module('.vh2_media',__package__).compact_capture_snapshot(snapshot)
   db.execute('INSERT INTO photo_jobs VALUES (?,?,?)',(photo_id,world_id,encode(snapshot)))
   source=next((e for e in state['truth']['events'] if e['id']==intent['sourceEventId']),{})
   photos.append({'id':photo_id,'status':'captured','deferred':True,'at':intent['at'],'scene':scene,'captureReason':reason,'captureType':intent['captureType'],

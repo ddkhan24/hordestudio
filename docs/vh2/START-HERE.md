@@ -23,7 +23,7 @@ Open **Chat** when identity and a text model are ready. Starting a persistent li
 
 World & autonomous life lets you draft or edit places, people, clothes and routines separately. The full person-and-world generator has been retired; generation is scoped to fields, pages or chosen life sections. Open **Live human** to inspect activity, relationships, places, references and autonomous permissions. Controls there save to the selected timeline.
 
-The local server must remain running for background life. Catch-up resumes after downtime; no simulation process runs while the computer is off.
+By default the local server must remain running for background life. Catch-up resumes after downtime; no local simulation process runs while the computer is off. To keep a life active continuously, open **Live human → Always-on private server**. The guided flow can move that life to a private VH2 service in a hosting account you control and keep a paused local recovery mirror. The host must use persistent storage and a cloud-capable text provider; a local LM Studio connection cannot answer after this computer turns off. See `deploy/vh2-self-host/README.md` for the full hosting and recovery guide.
 
 ## Social media and clips
 

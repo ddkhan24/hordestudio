@@ -34,9 +34,12 @@ async function decodeClip(card){
   const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.route('**/*',r=>r.request().url().startsWith(base)||r.request().url().startsWith('blob:')?r.continue():r.abort());
   await page.goto(base+'/index.html');await page.waitForFunction(()=>typeof companionAgencyTimer!=='undefined'&&!!companionAgencyTimer);
-  const installed=await page.evaluate(async base=>{
-   clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);mcpBridgeBase=()=>base;hideGlobalSettings();
-   const c=state.companions.find(c=>c.bundledId==='aslyn-jonas-v18');if(!c)throw Error('Default Aslyn missing');
+	  const installed=await page.evaluate(async base=>{
+	   clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);mcpBridgeBase=()=>base;hideGlobalSettings();
+	   // Bundled people are installed as deferred startup work so they do not
+	   // block first paint. Await that task explicitly before auditing the bundle.
+	   await installBundledHumans();
+	   const c=state.companions.find(c=>c.bundledId==='aslyn-jonas-v18');if(!c)throw Error('Default Aslyn missing');
    const initialSessions=state.companionTimelines?.[c.id]?.sessions||[];
    if(initialSessions.some(t=>t.messages?.length||t.vh2?.worldId)||(state.companionThreads?.[c.id]||[]).length)throw Error('Included character carried an existing chat or saved life');
    if(c.priorContact!=='never_spoken'||c.knownBeforeDays!==0||c.startingRelationship!==0||c.relationshipContext)throw Error('Included character carried a player relationship');

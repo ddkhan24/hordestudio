@@ -3,7 +3,7 @@ from test_runtime import node_executable
 import sys,tempfile,unittest,uuid,json,sqlite3
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from virtual_humans.backend.vh2_runtime import WorldService, Conflict
+from virtual_humans.backend.vh2_runtime import WorldService, Conflict, DATABASE_VERSION
 ROOT=Path(__file__).resolve().parents[1]
 PNG='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
 class Media(unittest.TestCase):
@@ -17,6 +17,7 @@ class Media(unittest.TestCase):
  def capture(self):return self.cmd('capture_photo',scene='A relaxed close-up',captureType='front_camera_selfie')[1]['photoId']
  def test_snapshot_and_import_survive_time_restart_replay(self):
   pid=self.capture();snapshot=self.state()['photos'][0]['photoContext'];self.cmd('submit_photo',photoId=pid)
+  with self.s.connect() as db:self.assertEqual(json.loads(db.execute('SELECT snapshot FROM photo_jobs WHERE id=?',(pid,)).fetchone()[0])['captureSnapshotVersion'],1)
   self.cmd('advance',steps=3)
   body,result=self.cmd('import_photo',photoId=pid,image=PNG);self.assertEqual(result,self.s.command(body))
   state=self.state();self.assertEqual(state['photos'][0]['photoContext'],snapshot)
@@ -55,7 +56,7 @@ class Media(unittest.TestCase):
   with self.s.connect() as db:
    db.execute('DROP TABLE photo_jobs');db.execute('DROP TABLE photo_assets');db.execute('PRAGMA user_version=6')
   self.s=self.open();self.assertEqual(before,self.state())
-  with self.s.connect() as db:self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],9)
+  with self.s.connect() as db:self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],DATABASE_VERSION)
   self.capture()
  def test_cannot_capture_while_asleep(self):
   with self.s.connect() as db:

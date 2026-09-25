@@ -2,7 +2,67 @@
 from importlib import import_module as _vh_import_module
 import concurrent.futures,hashlib,json,re
 from .vh2_provider import transport, parse_response, UnknownOutcome, RejectedOutput
-SCHEMA='''CREATE TABLE IF NOT EXISTS vh2_social_jobs(id TEXT PRIMARY KEY,world_id TEXT NOT NULL,status TEXT NOT NULL,snapshot TEXT NOT NULL,error TEXT NOT NULL DEFAULT '');'''
+SCHEMA='''CREATE TABLE IF NOT EXISTS vh2_social_jobs(id TEXT PRIMARY KEY,world_id TEXT NOT NULL,status TEXT NOT NULL,snapshot TEXT NOT NULL,error TEXT NOT NULL DEFAULT '');
+DROP TRIGGER IF EXISTS vh2_social_input_immutable;
+DROP TRIGGER IF EXISTS vh2_social_terminal_compact;
+DROP TRIGGER IF EXISTS vh2_social_terminal_insert_compact;
+UPDATE vh2_social_jobs SET snapshot=json_object(
+ 'retentionVersion',1,
+ 'providerId',json_extract(snapshot,'$.providerId'),
+ 'candidateId',json_extract(snapshot,'$.candidateId'),
+ 'messageCount',COALESCE(json_array_length(snapshot,'$.messages'),0),
+ 'snapshotBytes',length(CAST(snapshot AS BLOB)))
+ WHERE status IN ('completed','failed','discarded')
+ AND COALESCE(json_extract(snapshot,'$.retentionVersion'),0)<>1;
+CREATE TRIGGER vh2_social_input_immutable BEFORE UPDATE OF snapshot,world_id ON vh2_social_jobs
+ WHEN NEW.world_id IS NOT OLD.world_id
+  OR NOT (OLD.status IN ('completed','failed','discarded') AND NEW.status=OLD.status
+          AND COALESCE(json_extract(NEW.snapshot,'$.retentionVersion'),0)=1)
+ BEGIN SELECT RAISE(ABORT,'Social expression input is immutable'); END;
+CREATE TRIGGER vh2_social_terminal_compact AFTER UPDATE OF status ON vh2_social_jobs
+ WHEN NEW.status IN ('completed','failed','discarded')
+  AND COALESCE(json_extract(NEW.snapshot,'$.retentionVersion'),0)<>1
+ BEGIN UPDATE vh2_social_jobs SET snapshot=json_object(
+  'retentionVersion',1,
+  'providerId',json_extract(NEW.snapshot,'$.providerId'),
+  'candidateId',json_extract(NEW.snapshot,'$.candidateId'),
+  'messageCount',COALESCE(json_array_length(NEW.snapshot,'$.messages'),0),
+  'snapshotBytes',length(CAST(NEW.snapshot AS BLOB))) WHERE id=NEW.id; END;
+CREATE TRIGGER vh2_social_terminal_insert_compact AFTER INSERT ON vh2_social_jobs
+ WHEN NEW.status IN ('completed','failed','discarded')
+  AND COALESCE(json_extract(NEW.snapshot,'$.retentionVersion'),0)<>1
+ BEGIN UPDATE vh2_social_jobs SET snapshot=json_object(
+  'retentionVersion',1,
+  'providerId',json_extract(NEW.snapshot,'$.providerId'),
+  'candidateId',json_extract(NEW.snapshot,'$.candidateId'),
+  'messageCount',COALESCE(json_array_length(NEW.snapshot,'$.messages'),0),
+  'snapshotBytes',length(CAST(NEW.snapshot AS BLOB))) WHERE id=NEW.id; END;'''
+MAX_TERMINAL_JOBS=200
+TERMINAL_STATUSES=('completed','failed','discarded')
+
+def compact_job_row(row):
+ item=dict(row)
+ if item.get('status') not in TERMINAL_STATUSES:return item
+ raw=item['snapshot'];snapshot=json.loads(raw)
+ if snapshot.get('retentionVersion')!=1:
+  snapshot={'retentionVersion':1,'providerId':snapshot.get('providerId'),
+   'candidateId':snapshot.get('candidateId'),
+   'messageCount':len(snapshot.get('messages',[])) if isinstance(snapshot.get('messages'),list) else 0,
+   'snapshotBytes':len(raw.encode())}
+  item['snapshot']=json.dumps(snapshot,sort_keys=True,separators=(',',':'),allow_nan=False)
+ return item
+
+def prune_terminal_jobs(db,world,now):
+ day=int(now)//86400000*86400000
+ protected={row[0] for row in db.execute("SELECT s.id FROM dialogue_usage u JOIN vh2_social_jobs s ON u.job_id='social:'||s.id "
+  'WHERE s.world_id=? AND u.at>=? AND u.at<?',(world,day,day+86400000))}
+ rows=db.execute("SELECT id FROM vh2_social_jobs WHERE world_id=? AND status IN ('completed','failed','discarded') ORDER BY rowid DESC",(world,)).fetchall()
+ victims=[row[0] for row in rows[MAX_TERMINAL_JOBS:] if row[0] not in protected]
+ for start in range(0,len(victims),500):
+  chunk=victims[start:start+500];marks=','.join('?' for _ in chunk)
+  db.execute("DELETE FROM dialogue_usage WHERE job_id IN (SELECT 'social:'||id FROM vh2_social_jobs WHERE id IN ("+marks+'))',chunk)
+  db.execute('DELETE FROM vh2_social_jobs WHERE id IN ('+marks+')',chunk)
+ return len(victims)
 
 def draft(state):
  c=state['truth']['companion'];now=state['simAt'];r=state.setdefault('social',{});posts=r.setdefault('posts',[])
@@ -62,7 +122,7 @@ def poll(service):
   with service.connect() as db:
    db.execute('BEGIN IMMEDIATE');rev,before=service.read(db,world);after=json.loads(encode(before));post=next((p for p in after.get('social',{}).get('posts',[]) if p['id']==ident),None)
    if not post or post['status']!='draft':
-    db.execute("UPDATE vh2_social_jobs SET status='discarded',error='Draft was dismissed; result not published.' WHERE id=?",(ident,));continue
+    db.execute("UPDATE vh2_social_jobs SET status='discarded',error='Draft was dismissed; result not published.' WHERE id=?",(ident,));prune_terminal_jobs(db,world,service.clock());continue
    try:
     data=validate_expression(future.result());post.update(caption=data.get('caption','').strip(),captionReady=data['decision']=='post',status='draft' if data['decision']=='post' else 'skipped');status='completed';error=''
     candidate=image_candidate(after,post);selection=data.get('image') or {}
@@ -78,7 +138,7 @@ def poll(service):
     elif isinstance(exc,ValueError):reason='The provider returned an invalid social-post format.'
     else:reason='An internal social-expression error occurred ('+type(exc).__name__+').'
     error=reason+' No automatic retry.';post['generationError']=error
-   db.execute('UPDATE vh2_social_jobs SET status=?,error=? WHERE id=?',(status,error,ident));service.commit_event(db,world,rev,before,after,'SOCIAL_EXPRESSION_'+status.upper())
+   db.execute('UPDATE vh2_social_jobs SET status=?,error=? WHERE id=?',(status,error,ident));service.commit_event(db,world,rev,before,after,'SOCIAL_EXPRESSION_'+status.upper());prune_terminal_jobs(db,world,service.clock())
  if service._social_pending:return
  with service.connect() as db:
   db.execute('BEGIN IMMEDIATE')

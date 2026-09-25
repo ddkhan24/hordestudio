@@ -70,6 +70,12 @@ _load_env(ENV_FILE)
 LISTEN_HOST = os.environ.get("HORDE_SERVER_LISTEN_HOST", "127.0.0.1")
 HOST = os.environ.get("HORDE_SERVER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HORDE_SERVER_PORT", "43127"))
+REMOTE_VH2_MODE = os.environ.get("HORDE_VH2_REMOTE_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+REMOTE_VH2_ACCESS_TOKEN = os.environ.get("HORDE_VH2_ACCESS_TOKEN", "").strip()
+REMOTE_VH2_ALLOWED_ORIGINS = {
+    item.strip().rstrip("/") for item in os.environ.get("HORDE_VH2_ALLOWED_ORIGINS", "").split(",")
+    if item.strip()
+}
 CALLBACK_URL = f"http://{HOST}:{PORT}/oauth/callback"
 CLIENT_NAME = "Horde Studio Local MCP Bridge"
 BRIDGE_BUILD = "20260908-mcp-" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
@@ -80,6 +86,8 @@ FAL_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 FAL_VIDEO_JOBS_LOCK = threading.Lock()
 HOTAPI_VIDEO_JOBS: dict[str, dict[str, Any]] = {}
 HOTAPI_VIDEO_JOBS_LOCK = threading.Lock()
+REMOTE_MEDIA_TICKETS: dict[str, tuple[str, str, int]] = {}
+REMOTE_MEDIA_TICKETS_LOCK = threading.Lock()
 
 def allowed_origins(port: int) -> set[str]:
     origins = {
@@ -264,7 +272,9 @@ STATIC_MEDIA_ROOTS = (
     ("/assets/worlds/", APP_DIR / "assets" / "worlds"),
 )
 
-if os.name == "nt":
+if os.environ.get("HORDE_CONFIG_DIR"):
+    CONFIG_DIR = Path(os.environ["HORDE_CONFIG_DIR"]).resolve()
+elif os.name == "nt":
     CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "Horde Studio"
 elif os.uname().sysname == "Darwin":
     CONFIG_DIR = Path.home() / "Library" / "Application Support" / "Horde Studio"
@@ -273,6 +283,53 @@ else:
 AUTH_FILE = CONFIG_DIR / "mcp-auth.json"
 ALWAYS_ON_QUEUE_FILE = CONFIG_DIR / "always-on-queue.json"
 VIDEO_WORLD_MEDIA_DIR = CONFIG_DIR / "video-world-media"
+VH2_MIRROR_DIR = CONFIG_DIR / "vh2-mirrors"
+
+def vh2_mirror_paths(world_id: str) -> tuple[Path, Path]:
+    key = hashlib.sha256(world_id.encode("utf-8")).hexdigest()
+    return VH2_MIRROR_DIR / (key + ".vh2.gz"), VH2_MIRROR_DIR / (key + ".json")
+
+def vh2_mirror_status(world_id: str) -> dict[str, Any]:
+    archive_path, metadata_path = vh2_mirror_paths(world_id)
+    if not archive_path.exists() or not metadata_path.exists():
+        return {"available": False, "worldId": world_id}
+    try:
+        metadata = json.loads(metadata_path.read_text("utf-8"))
+        if metadata.get("worldId") != world_id or metadata.get("bytes") != archive_path.stat().st_size:
+            raise ValueError()
+        return {"available": True, **metadata}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {"available": False, "worldId": world_id, "error": "The saved local mirror is incomplete or damaged."}
+
+def store_vh2_mirror(world_id: str, data: bytes) -> dict[str, Any]:
+    from virtual_humans.backend import vh2_backup
+    info = vh2_backup.inspect_world_archive(data)
+    if info["worldId"] != world_id:
+        raise ValueError("The archive does not belong to the selected life.")
+    service = get_vh2_service()
+    with service.connect() as db:
+        local_revision, local_state = service.read(db, world_id)
+    if local_state.get("running") is True:
+        raise VH2Conflict("Pause the local life before updating its cloud mirror.")
+    if info["revision"] < local_revision:
+        raise VH2Conflict("The cloud archive is older than the local life and cannot replace its mirror.")
+    VH2_MIRROR_DIR.mkdir(parents=True, exist_ok=True)
+    archive_path, metadata_path = vh2_mirror_paths(world_id)
+    nonce = secrets.token_hex(8)
+    archive_temp = archive_path.with_name(archive_path.name + "." + nonce + ".tmp")
+    metadata_temp = metadata_path.with_name(metadata_path.name + "." + nonce + ".tmp")
+    metadata = {**info, "savedAt": int(time.time() * 1000), "bytes": len(data)}
+    try:
+        archive_temp.write_bytes(data)
+        os.chmod(archive_temp, 0o600)
+        metadata_temp.write_text(json.dumps(metadata, separators=(",", ":")), "utf-8")
+        os.chmod(metadata_temp, 0o600)
+        os.replace(archive_temp, archive_path)
+        os.replace(metadata_temp, metadata_path)
+    finally:
+        archive_temp.unlink(missing_ok=True)
+        metadata_temp.unlink(missing_ok=True)
+    return {"available": True, **metadata}
 
 store_lock = threading.RLock()
 pending_auth: dict[str, dict[str, Any]] = {}
@@ -797,11 +854,29 @@ def get_vh2_service():
     global vh2_service
     with vh2_service_lock:
         if vh2_service is None:
-            vh2_service = WorldService(CONFIG_DIR / "vh2-worlds.sqlite", always_on_runtime._node_path(), APP_DIR)
-            vh2_service.image_executor=vh2_background_image
-            vh2_service.route_executor=lambda body:maps_request("route",body)
-            vh2_service.start()
+            service = WorldService(CONFIG_DIR / "vh2-worlds.sqlite", always_on_runtime._node_path(), APP_DIR)
+            service.image_executor=vh2_background_image
+            service.route_executor=lambda body:maps_request("route",body)
+            try:
+                service.start()
+            except Exception:
+                service.close()
+                raise
+            # Publish only a fully started service. If database migration or
+            # worker startup fails, the next VH2 request can retry cleanly
+            # instead of receiving a half-initialized singleton.
+            vh2_service = service
         return vh2_service
+
+
+def warm_vh2_service() -> None:
+    """Warm an existing VH2 database without delaying the app web server."""
+    try:
+        get_vh2_service()
+    except Exception as error:
+        # Static Studio screens and ordinary Chat/World features still work.
+        # A later VH2 request retries and returns its own actionable error.
+        print(f"Virtual Human service warm-up deferred after an error: {error}", file=sys.stderr)
 
 
 
@@ -3474,6 +3549,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin", "")
         if not origin:
             return True
+        if REMOTE_VH2_MODE:
+            return origin.rstrip("/") in REMOTE_VH2_ALLOWED_ORIGINS
         try:
             parsed = urllib.parse.urlparse(origin)
             hostname = parsed.hostname or ""
@@ -3491,13 +3568,50 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except ValueError:
             return False
 
+    def remote_media_ticket_valid(self) -> bool:
+        if urllib.parse.urlparse(self.path).path != "/vh2/photo-asset":
+            return False
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        ticket = query.get("ticket", [""])[0]
+        if not ticket:
+            return False
+        now = int(time.time())
+        with REMOTE_MEDIA_TICKETS_LOCK:
+            for key, (_, _, expires_at) in list(REMOTE_MEDIA_TICKETS.items()):
+                if expires_at <= now:
+                    REMOTE_MEDIA_TICKETS.pop(key, None)
+            binding = REMOTE_MEDIA_TICKETS.get(ticket)
+        return bool(binding and binding[0] == query.get("worldId", [""])[0]
+                    and binding[1] == query.get("id", [""])[0] and binding[2] > now)
+
+    def remote_vh2_authorized(self) -> bool:
+        if self.remote_media_ticket_valid():
+            return True
+        scheme, _, credential = self.headers.get("Authorization", "").partition(" ")
+        return bool(scheme.lower() == "bearer" and credential and REMOTE_VH2_ACCESS_TOKEN
+                    and secrets.compare_digest(credential, REMOTE_VH2_ACCESS_TOKEN))
+
+    def vh2_access_allowed(self) -> bool:
+        return self.remote_vh2_authorized() if REMOTE_VH2_MODE else self.client_is_loopback()
+
+    def remote_surface_allowed(self, path: str) -> bool:
+        if not REMOTE_VH2_MODE:
+            return True
+        if path != "/health" and not path.startswith("/vh2/"):
+            self.respond(404, {"error": "This self-host exposes only the private VH2 API."})
+            return False
+        if not self.remote_vh2_authorized():
+            self.respond(401, {"error": "A valid self-host access token is required.", "needsAuth": True})
+            return False
+        return True
+
     def cors(self) -> None:
         origin = self.headers.get("Origin", "")
         if origin and self.origin_allowed():
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
 
     def respond(self, status: int, payload: Any, content_type: str = "application/json") -> None:
         raw = payload.encode() if isinstance(payload, str) else json.dumps(payload).encode()
@@ -3511,6 +3625,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(raw)
+
+    def respond_stream(self, status: int, source, size: int, content_type: str) -> None:
+        """Send a seekable binary artifact without materializing it in RAM."""
+        self.send_response(status)
+        self.cors()
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        source.seek(0)
+        try:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def serve_video_file(self, target: Path, content_type: str = "video/mp4") -> None:
         try:
@@ -3559,6 +3691,41 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def serve_cached_app_file(self, target: Path, content_type: str) -> None:
+        """Serve local app assets with cheap validation instead of no-store.
+
+        Release files still update immediately because the ETag includes the
+        nanosecond mtime and byte length. An unchanged reload returns 304 and
+        avoids rereading/retransmitting the multi-megabyte application bundle.
+        """
+        try:
+            metadata = target.stat()
+        except OSError:
+            self.respond(404, {"error": "Application asset not found."})
+            return
+        etag = f'"{metadata.st_mtime_ns:x}-{metadata.st_size:x}"'
+        not_modified = self.headers.get("If-None-Match", "").strip() == etag
+        self.send_response(304 if not_modified else 200)
+        self.cors()
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "private, max-age=0, must-revalidate")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if not_modified:
+            self.end_headers()
+            return
+        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+        self.send_header("Content-Length", str(metadata.st_size))
+        self.end_headers()
+        try:
+            with target.open("rb") as source:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def serve_app_file(self, path: str) -> bool:
         entry = STATIC_FILES.get(path) or STATIC_FILES.get(urllib.parse.quote(urllib.parse.unquote(path), safe="/"))
         if entry:
@@ -3592,15 +3759,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 break
             if target is None:
                 return False
-        try:
-            if content_type in ("video/mp4", "video/webm"):
-                self.serve_video_file(target, content_type)
-                return True
-            raw = target.read_bytes()
-        except OSError:
-            self.respond(404, {"error": "Application asset not found."})
+        if content_type in ("video/mp4", "video/webm"):
+            self.serve_video_file(target, content_type)
             return True
-        self.respond_bytes(200, raw, content_type)
+        self.serve_cached_app_file(target, content_type)
         return True
 
     def read_json(self) -> dict[str, Any]:
@@ -3623,6 +3785,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         if not self.origin_allowed():
             return self.respond(403, {"error": "Origin not allowed."})
+        path = urllib.parse.urlparse(self.path).path
+        if REMOTE_VH2_MODE and path != "/health" and not path.startswith("/vh2/"):
+            return self.respond(404, {"error": "This self-host exposes only the private VH2 API."})
         self.respond(204, {})
 
     def do_GET(self) -> None:
@@ -3630,14 +3795,38 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return self.respond(403, {"error": "Origin not allowed."})
         parsed = urllib.parse.urlparse(self.path)
         try:
+            if not self.remote_surface_allowed(parsed.path):
+                return
             if self.serve_app_file(parsed.path):
                 return
             if parsed.path.startswith("/vh2/"):
-                if not self.client_is_loopback():
-                    return self.respond(403, {"error": "VH2 world access is loopback-only."})
+                if not self.vh2_access_allowed():
+                    return self.respond(403, {"error": "VH2 world access is not authorized."})
                 service = get_vh2_service()
                 query = urllib.parse.parse_qs(parsed.query)
                 world_id = query.get("worldId", [""])[0]
+                if parsed.path == "/vh2/mirror":
+                    if REMOTE_VH2_MODE or not self.client_is_loopback():
+                        return self.respond(403, {"error": "Local mirror metadata is available only on this device."})
+                    return self.respond(200, vh2_mirror_status(world_id))
+                if parsed.path == "/vh2/media-ticket":
+                    asset_id = query.get("id", [""])[0]
+                    with service.connect() as db:
+                        service.read(db, world_id)
+                        if not db.execute("SELECT 1 FROM photo_assets WHERE id=? AND world_id=?", (asset_id, world_id)).fetchone():
+                            return self.respond(404, {"error": "Unknown photo asset."})
+                    ticket = secrets.token_urlsafe(32)
+                    expires_at = int(time.time()) + 600
+                    with REMOTE_MEDIA_TICKETS_LOCK:
+                        now = int(time.time())
+                        for key, (_, _, expiry) in list(REMOTE_MEDIA_TICKETS.items()):
+                            if expiry <= now:
+                                REMOTE_MEDIA_TICKETS.pop(key, None)
+                        if len(REMOTE_MEDIA_TICKETS) >= 10000:
+                            REMOTE_MEDIA_TICKETS.pop(min(REMOTE_MEDIA_TICKETS, key=lambda key: REMOTE_MEDIA_TICKETS[key][2]), None)
+                        REMOTE_MEDIA_TICKETS[ticket] = (world_id, asset_id, expires_at)
+                    path = "/vh2/photo-asset?" + urllib.parse.urlencode({"worldId": world_id, "id": asset_id, "ticket": ticket})
+                    return self.respond(200, {"path": path, "expiresAt": expires_at * 1000})
                 if parsed.path == '/vh2/photo-preview':
                     return self.respond(200, vh2_photo_preview(service, world_id, query.get('id', [''])[0]))
                 if parsed.path in ('/vh2/photo-job','/vh2/photo-asset'):
@@ -3654,6 +3843,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if parsed.path == "/vh2/backup":
                     from virtual_humans.backend import vh2_backup
                     return self.respond_bytes(200,vh2_backup.export(service,world_id),"application/gzip")
+                if parsed.path == "/vh2/transfer-checkpoint":
+                    from virtual_humans.backend import vh2_backup
+                    import tempfile
+                    # The compact handoff omits the raw replay ledger but keeps
+                    # current canonical state, transcript, memory and media.
+                    # Spooling avoids a second in-memory copy of large media.
+                    with tempfile.TemporaryFile() as archive:
+                        vh2_backup.export_checkpoint(service,world_id,archive)
+                        size=archive.tell()
+                        if size>vh2_backup.MAX_TRANSFER_ARCHIVE:
+                            raise ValueError("This life exceeds the 2 GB transfer checkpoint limit.")
+                        return self.respond_stream(200,archive,size,"application/vnd.horde.vh2-transfer+zip")
                 if parsed.path == "/vh2/library":
                     from virtual_humans.backend import vh2_library
                     from virtual_humans.backend import vh2_social
@@ -3678,6 +3879,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     return self.respond(200,vh2_controls.settings(service))
                 if parsed.path == "/vh2/status":
                     return self.respond(200, service.status())
+                if parsed.path == "/vh2/storage":
+                    return self.respond(200, service.storage_status(world_id))
+                if parsed.path == "/vh2/landmarks":
+                    before=max(0,int(query.get("before",["0"])[0]))
+                    priority=int(query.get("minimumPriority",["1"])[0])
+                    return self.respond(200,{"landmarks":service.landmarks(world_id,before,priority)})
                 if parsed.path == "/vh2/world-packs":
                     from virtual_humans.backend import vh2_world_packs
                     ident=query.get("id",[""])[0]
@@ -3696,6 +3903,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if parsed.path == "/vh2/provider-jobs":
                     from virtual_humans.backend import vh2_workers
                     return self.respond(200,{"jobs":vh2_workers.status(service,world_id)})
+                if parsed.path == "/vh2/transfer-readiness":
+                    # Read after the browser has paused the world. These are
+                    # every provider-owned state that could still settle and
+                    # make a just-exported source diverge from its copy.
+                    checks = {
+                        "dialogue": ("dialogue_jobs", ("queued", "leased", "submitted")),
+                        "media": ("vh2_provider_jobs", ("queued", "submitted", "rendered")),
+                        "social": ("vh2_social_jobs", ("submitted",)),
+                        "lifeReview": ("vh2_story_jobs", ("submitted",)),
+                    }
+                    active = []
+                    with service.connect() as db:
+                        service.read(db, world_id)
+                        for kind, (table, statuses) in checks.items():
+                            marks = ",".join("?" for _ in statuses)
+                            rows = db.execute(
+                                f"SELECT id,status FROM {table} WHERE world_id=? AND status IN ({marks}) ORDER BY id",
+                                (world_id, *statuses),
+                            ).fetchall()
+                            active.extend({"kind": kind, "id": row["id"], "status": row["status"]} for row in rows)
+                    return self.respond(200, {"ready": not active, "active": active})
                 if parsed.path == "/vh2/ticketmaster-provider":
                     from virtual_humans.backend import vh2_ticketmaster
                     return self.respond(200,vh2_ticketmaster.settings(service,scope=query.get("scope",[None])[0]))
@@ -3721,7 +3949,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if parsed.path == "/health":
                 return self.respond(200, {"ok": True, "service": "Horde Studio MCP Bridge", "version": 2,
                                           "build": BRIDGE_BUILD, "appInstance": APP_INSTANCE_ID,
-                                          "capabilities": {"magnificReferenceImport": 1, "hotapiVideoModels": sorted(HOTAPI_VIDEO_RENDERERS), "hotapiVideoReferences": HOTAPI_REFERENCE_LIMITS, "hotapiReferenceUpload": 1},
+                                          "capabilities": {"magnificReferenceImport": 1, "hotapiVideoModels": sorted(HOTAPI_VIDEO_RENDERERS), "hotapiVideoReferences": HOTAPI_REFERENCE_LIMITS, "hotapiReferenceUpload": 1,
+                                                           "privateVh2Host": REMOTE_VH2_MODE, "vh2SelfHostProtocol": 1},
                                           "alwaysOn": always_on_runtime.status(),
                                           "multiplayer": {"running": bool(multiplayer_runtime.server),
                                                           "port": multiplayer_runtime.port,
@@ -3765,6 +3994,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return self.respond(404, {"error": "Unknown bridge endpoint."})
         except PermissionError as error:
             self.respond(401, {"error": str(error), "needsAuth": True})
+        except VH2Conflict as error:
+            self.respond(409, {"error": str(error)})
+        except (KeyError, ValueError) as error:
+            self.respond(400, {"error": str(error)})
         except Exception as error:
             self.respond(500, {"error": str(error)})
 
@@ -3773,9 +4006,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return self.respond(403, {"error": "Origin not allowed."})
         try:
             parsed_path = urllib.parse.urlparse(self.path).path
+            if not self.remote_surface_allowed(parsed_path):
+                return
+            if parsed_path == "/vh2/mirror":
+                if REMOTE_VH2_MODE or not self.client_is_loopback():
+                    return self.respond(403,{"error":"Local mirrors can be updated only on this device."})
+                length=int(self.headers.get("Content-Length","0"))
+                if not 0<length<=256*1024*1024:raise ValueError("Choose a world archive smaller than 256 MB.")
+                query=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                world_id=query.get("worldId",[""])[0]
+                try:return self.respond(200,store_vh2_mirror(world_id,self.rfile.read(length)))
+                except VH2Conflict as error:return self.respond(409,{"error":str(error)})
+            if parsed_path == "/vh2/mirror/promote":
+                if REMOTE_VH2_MODE or not self.client_is_loopback():
+                    return self.respond(403,{"error":"Local mirrors can be promoted only on this device."})
+                query=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                world_id=query.get("worldId",[""])[0];companion_id=query.get("companionId",[""])[0];import_id=query.get("importId",[""])[0]
+                status=vh2_mirror_status(world_id)
+                if not status.get("available"):return self.respond(404,{"error":status.get("error") or "No local mirror is available for this life."})
+                archive_path,_=vh2_mirror_paths(world_id)
+                from virtual_humans.backend import vh2_backup
+                try:return self.respond(200,vh2_backup.restore_character(get_vh2_service(),{"archives":[{"worldId":world_id,"data":archive_path.read_bytes()}],"companionId":companion_id,"importId":import_id}))
+                except VH2Conflict as error:return self.respond(409,{"error":str(error)})
             if parsed_path in {"/vh2/migration/preview", "/vh2/migration/checkpoint"}:
-                if not self.client_is_loopback():
-                    return self.respond(403, {"error": "VH2 migration is loopback-only."})
+                if not self.vh2_access_allowed():
+                    return self.respond(403, {"error": "VH2 migration is not authorized."})
                 body = self.read_json()
                 if parsed_path.endswith("preview"):
                     return self.respond(200, inspect_archive(body.get("sourceText")))
@@ -3784,18 +4039,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 except VH2Conflict as error:
                     return self.respond(409, {"error": str(error)})
             if parsed_path == "/vh2/agency-pause":
-                if not self.client_is_loopback():return self.respond(403,{"error":"Agency control is loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"Agency control is not authorized."})
                 from virtual_humans.backend import vh2_controls
                 return self.respond(200,vh2_controls.settings(get_vh2_service(),self.read_json().get('paused')))
             if parsed_path == "/vh2/workspace/restore":
-                if not self.client_is_loopback():return self.respond(403,{"error":"Workspace restore is loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"Workspace restore is not authorized."})
                 length=int(self.headers.get("Content-Length","0"))
                 if not 0<length<=256*1024*1024:raise ValueError("Workspace timeline data exceeds 256 MB.")
                 from virtual_humans.backend import vh2_backup
                 try:return self.respond(200,vh2_backup.restore_workspace(get_vh2_service(),json.loads(self.rfile.read(length))))
                 except VH2Conflict as error:return self.respond(409,{"error":str(error)})
             if parsed_path == "/vh2/character/restore":
-                if not self.client_is_loopback():return self.respond(403,{'error':'Character restore is loopback-only.'})
+                if not self.vh2_access_allowed():return self.respond(403,{'error':'Character restore is not authorized.'})
                 from virtual_humans.backend import vh2_backup
                 length=int(self.headers.get('Content-Length','0'));binary=self.headers.get('Content-Type','').split(';',1)[0].strip().lower()=='application/zip'
                 limit=vh2_backup.MAX_CHARACTER_UPLOAD if binary else 256*1024*1024
@@ -3817,53 +4072,89 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     return self.respond(200,vh2_backup.restore_character(get_vh2_service(),body))
                 except VH2Conflict as error:return self.respond(409,{'error':str(error)})
             if parsed_path == "/vh2/restore":
-                if not self.client_is_loopback():return self.respond(403,{"error":"VH2 restore is loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"VH2 restore is not authorized."})
+                length=int(self.headers.get("Content-Length","0"))
+                from virtual_humans.backend import vh2_backup
+                media_type=self.headers.get('Content-Type','').split(';',1)[0].strip().lower()
+                checkpoint=media_type=='application/vnd.horde.vh2-transfer+zip'
+                limit=vh2_backup.MAX_TRANSFER_ARCHIVE if checkpoint else vh2_backup.MAX_COMPRESSED
+                if not 0<length<=limit:raise ValueError("The life archive exceeds the supported transfer limit.")
+                try:
+                    if checkpoint:
+                        import tempfile
+                        # Receive to a seekable temporary file. Neither the
+                        # request body nor the restored media collection is
+                        # held as one giant Python bytes object.
+                        with tempfile.TemporaryFile() as upload:
+                            remaining=length
+                            while remaining:
+                                chunk=self.rfile.read(min(1024*1024,remaining))
+                                if not chunk:raise ValueError('Incomplete VH2 transfer checkpoint.')
+                                upload.write(chunk);remaining-=len(chunk)
+                            upload.seek(0)
+                            return self.respond(200,vh2_backup.restore(get_vh2_service(),upload))
+                    return self.respond(200,vh2_backup.restore(get_vh2_service(),self.rfile.read(length)))
+                except VH2Conflict as error:return self.respond(409,{"error":str(error)})
+            if parsed_path == "/vh2/restore-copy":
+                # This endpoint deliberately creates a new local identity. It
+                # must never become reachable through a reverse proxy, whose
+                # upstream socket would otherwise appear to be loopback.
+                if REMOTE_VH2_MODE or not self.client_is_loopback():return self.respond(403,{"error":"Copy restore is available only on the receiving device."})
                 length=int(self.headers.get("Content-Length","0"))
                 if not 0<length<=256*1024*1024:raise ValueError("Choose a world archive smaller than 256 MB.")
+                query=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                world_id=query.get("worldId",[""])[0];companion_id=query.get("companionId",[""])[0];import_id=query.get("importId",[""])[0]
                 from virtual_humans.backend import vh2_backup
-                try:return self.respond(200,vh2_backup.restore(get_vh2_service(),self.rfile.read(length)))
+                try:return self.respond(200,vh2_backup.restore_character(get_vh2_service(),{"archives":[{"worldId":world_id,"data":self.rfile.read(length)}],"companionId":companion_id,"importId":import_id}))
                 except VH2Conflict as error:return self.respond(409,{"error":str(error)})
             if parsed_path == "/vh2/open-flight-route":
-                if not self.client_is_loopback():return self.respond(403,{"error":"Travel setup is loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"Travel setup is not authorized."})
                 from virtual_humans.backend import vh2_open_airports
                 return self.respond(200,vh2_open_airports.route(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/feed-preview":
-                if not self.client_is_loopback():return self.respond(403,{"error":"Feed preview is loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"Feed preview is not authorized."})
                 from virtual_humans.backend import vh2_feed_discovery
                 return self.respond(200,vh2_feed_discovery.preview(self.read_json()))
             if parsed_path == "/vh2/feed-discovery":
-                if not self.client_is_loopback():return self.respond(403,{"error":"Feed discovery is loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"Feed discovery is not authorized."})
                 from virtual_humans.backend import vh2_feed_discovery
                 return self.respond(200,vh2_feed_discovery.discover(self.read_json()))
             if parsed_path == "/vh2/ticketmaster-provider":
-                if not self.client_is_loopback():return self.respond(403,{"error":"VH2 settings are loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"VH2 settings are not authorized."})
                 from virtual_humans.backend import vh2_ticketmaster
                 return self.respond(200,vh2_ticketmaster.settings(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/flight-provider":
-                if not self.client_is_loopback():return self.respond(403,{"error":"VH2 settings are loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"VH2 settings are not authorized."})
                 from virtual_humans.backend import vh2_flights
                 return self.respond(200,vh2_flights.settings(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/image-provider":
-                if not self.client_is_loopback():return self.respond(403,{"error":"VH2 settings are loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"VH2 settings are not authorized."})
                 from virtual_humans.backend import vh2_workers
                 return self.respond(200,vh2_workers.settings(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/dialogue-provider":
-                if not self.client_is_loopback():
-                    return self.respond(403, {"error": "VH2 settings are loopback-only."})
+                if not self.vh2_access_allowed():
+                    return self.respond(403, {"error": "VH2 settings are not authorized."})
                 body=self.read_json()
                 provider=get_vh2_service().dialogue_provider
                 return self.respond(200, provider.disable(body['disableScope']) if 'disableScope' in body else provider.save(body))
             if parsed_path == "/vh2/world-packs":
-                if not self.client_is_loopback():return self.respond(403,{"error":"World library is loopback-only."})
+                if not self.vh2_access_allowed():return self.respond(403,{"error":"World library is not authorized."})
                 from virtual_humans.backend import vh2_world_packs
                 return self.respond(200,vh2_world_packs.library(get_vh2_service(),self.read_json()))
             if parsed_path == "/vh2/command":
-                if not self.client_is_loopback():
-                    return self.respond(403, {"error": "VH2 world access is loopback-only."})
+                if not self.vh2_access_allowed():
+                    return self.respond(403, {"error": "VH2 world access is not authorized."})
                 try:
                     return self.respond(200, get_vh2_service().command(self.read_json()))
                 except VH2Conflict as error:
                     return self.respond(409, {"error": str(error)})
+            if parsed_path == "/vh2/storage/optimize":
+                if not self.vh2_access_allowed():
+                    return self.respond(403,{"error":"VH2 storage maintenance is not authorized."})
+                query=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                world_id=query.get("worldId",[""])[0]
+                try:return self.respond(200,get_vh2_service().optimize_storage(world_id))
+                except VH2Conflict as error:return self.respond(409,{"error":str(error)})
             if parsed_path == "/maps/settings":
                 if not self.client_is_loopback():
                     return self.respond(403, {"error": "Maps settings are loopback-only."})
@@ -4063,12 +4354,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    if REMOTE_VH2_MODE:
+        if len(REMOTE_VH2_ACCESS_TOKEN) < 32:
+            raise RuntimeError("HORDE_VH2_ACCESS_TOKEN must contain at least 32 characters in remote mode.")
+        if not REMOTE_VH2_ALLOWED_ORIGINS:
+            raise RuntimeError("HORDE_VH2_ALLOWED_ORIGINS must list the exact Horde Studio browser origin in remote mode.")
     configured_port = PORT
     select_runtime_port(configured_port)
     app_url = f"http://{HOST}:{PORT}/"
     try:
         server = ThreadingHTTPServer((LISTEN_HOST, PORT), BridgeHandler)
     except OSError as error:
+        if REMOTE_VH2_MODE:
+            raise
         if error.errno not in {errno.EADDRINUSE, 48, 98, 10048}:
             raise
         try:
@@ -4111,12 +4409,27 @@ def main() -> None:
                 time.sleep(0.1)
     app_url = f"http://{HOST}:{PORT}/"
     listen_info = f"{LISTEN_HOST}:{PORT}" if LISTEN_HOST != HOST else str(PORT)
-    print(f"Horde Studio bridge listening on {listen_info}")
+    print(f"Horde Studio {'private VH2 self-host' if REMOTE_VH2_MODE else 'bridge'} listening on {listen_info}")
+    vh2_warmup_timer = None
     if (CONFIG_DIR / "vh2-worlds.sqlite").exists():
-        get_vh2_service()
-    print(f"Open in browser: {app_url}")
-    print(f"OAuth callback: {CALLBACK_URL}")
-    print(f"Credentials: {AUTH_FILE} (owner-only)")
+        # The HTTP socket is already bound. Enter serve_forever first so the
+        # browser can receive index.html immediately; migrations and worker
+        # startup happen just behind it. get_vh2_service() is locked, so an
+        # unusually fast first VH2 request safely joins this same warm-up.
+        # Local databases can hold years of append-only events and many GB of
+        # photo assets. Give the browser time to receive, parse and paint the
+        # shell before SQLite initialization competes for CPU/disk. Remote mode
+        # has no browser launch, so it can warm almost immediately.
+        warmup_delay = 0.1 if REMOTE_VH2_MODE else 1.5
+        vh2_warmup_timer = threading.Timer(warmup_delay, warm_vh2_service)
+        vh2_warmup_timer.daemon = True
+        vh2_warmup_timer.start()
+    if REMOTE_VH2_MODE:
+        print("Remote mode exposes authenticated VH2 routes only; put this service behind HTTPS.")
+    else:
+        print(f"Open in browser: {app_url}")
+        print(f"OAuth callback: {CALLBACK_URL}")
+        print(f"Credentials: {AUTH_FILE} (owner-only)")
     if "--open" in sys.argv:
         import webbrowser
         threading.Timer(0.45, lambda: webbrowser.open(app_url)).start()
@@ -4125,6 +4438,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopping Horde Studio…")
     finally:
+        if vh2_warmup_timer is not None:
+            vh2_warmup_timer.cancel()
         always_on_runtime.stop()
         if vh2_service is not None:
             vh2_service.close()

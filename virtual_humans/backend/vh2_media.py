@@ -1,12 +1,100 @@
 """Durable frozen photo captures; browser adapters render, service imports once."""
 from importlib import import_module as _vh_import_module
-import base64, hashlib, json, uuid
+import base64, copy, hashlib, io, json, uuid
 SCHEMA='''CREATE TABLE IF NOT EXISTS photo_jobs (
  id TEXT PRIMARY KEY, world_id TEXT NOT NULL REFERENCES worlds(id), snapshot TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS photo_assets (
  id TEXT PRIMARY KEY, world_id TEXT NOT NULL REFERENCES worlds(id), mime TEXT NOT NULL, bytes BLOB NOT NULL);
  CREATE TRIGGER IF NOT EXISTS photo_snapshot_immutable BEFORE UPDATE ON photo_jobs
  BEGIN SELECT RAISE(ABORT,'Photo captures are immutable'); END;'''
+
+IMAGE_MIME_TYPES=('image/png','image/jpeg','image/webp')
+IMAGE_MAX_DIMENSION=2048
+IMAGE_OPTIMIZE_ABOVE=256*1024
+CAPTURE_SNAPSHOT_VERSION=1
+
+def compact_capture_snapshot(snapshot):
+    """Return the complete immutable input needed to compile this photograph.
+
+    A kernel capture historically embedded the entire companion simulation,
+    including decision histories, routines and ledgers that image compilation
+    never reads.  Keep all frozen capture/reference fields, but reduce the
+    companion to the authored visual inputs consumed by compile_image().
+    """
+    if not isinstance(snapshot,dict) or not isinstance(snapshot.get('companion'),dict):
+        raise ValueError('Invalid frozen photo capture.')
+    companion=snapshot['companion'];life=companion.get('lifeProfile',{})
+    if not isinstance(life,dict):life={}
+    compact={key:copy.deepcopy(value) for key,value in snapshot.items() if key!='companion'}
+    compact_companion={key:copy.deepcopy(companion[key]) for key in
+        ('id','age','vh2Calendar','personality','photoStyle','photoDirection') if key in companion}
+    people=life.get('socialCircle',[])
+    if not isinstance(people,list):people=[]
+    compact_companion['lifeProfile']={'socialCircle':[
+        {key:copy.deepcopy(person[key]) for key in ('id','name','appearance') if key in person}
+        for person in people if isinstance(person,dict)
+    ]}
+    compact['companion']=compact_companion
+    compact['captureSnapshotVersion']=CAPTURE_SNAPSHOT_VERSION
+    return compact
+
+def optimize_image_bytes(mime,raw):
+    """Bound and recompress new photographic assets when Pillow is available.
+
+    The desktop browser normalizes uploads before they reach the service.  The
+    self-host image worker has no browser, so its container includes Pillow and
+    uses this path.  Existing assets are deliberately left byte-for-byte alone.
+    """
+    if mime not in IMAGE_MIME_TYPES:return mime,raw
+    try:
+        from PIL import Image,ImageOps
+    except ImportError:
+        return mime,raw
+    try:
+        with Image.open(io.BytesIO(raw)) as source:
+            width,height=source.size
+            if width<1 or height<1 or width*height>40_000_000:raise ValueError('Image dimensions exceed the 40 megapixel import limit.')
+            image=ImageOps.exif_transpose(source)
+            over=max(image.size)>IMAGE_MAX_DIMENSION
+            if len(raw)<IMAGE_OPTIMIZE_ABOVE and not over:return mime,raw
+            if over:
+                resampling=getattr(Image,'Resampling',Image).LANCZOS
+                image.thumbnail((IMAGE_MAX_DIMENSION,IMAGE_MAX_DIMENSION),resampling)
+            output=io.BytesIO();has_alpha='A' in image.getbands() or 'transparency' in source.info
+            if has_alpha:
+                try:
+                    image.convert('RGBA').save(output,'WEBP',quality=84,method=6)
+                    optimized_mime='image/webp'
+                except (OSError,ValueError):
+                    output=io.BytesIO();image.convert('RGBA').save(output,'PNG',optimize=True)
+                    optimized_mime='image/png'
+            else:
+                image.convert('RGB').save(output,'JPEG',quality=84,optimize=True,progressive=True)
+                optimized_mime='image/jpeg'
+            optimized=output.getvalue()
+            if optimized and (over or len(optimized)<len(raw)):return optimized_mime,optimized
+            return mime,raw
+    except ValueError:
+        raise
+    except Exception:
+        # The format signature was already validated by the caller.  A decoder
+        # limitation must not make a previously supported image unimportable.
+        return mime,raw
+
+def store_asset(db,world_id,mime,raw):
+    """Store one binary once per life and return its stable content ID."""
+    ident=hashlib.sha256(world_id.encode()+raw).hexdigest()
+    existing=db.execute('SELECT world_id,mime,bytes FROM photo_assets WHERE id=?',(ident,)).fetchone()
+    if existing:
+        # Equivalent MIME aliases (for example audio/mp3 vs audio/mpeg) may
+        # describe the same bytes.  The first validated media type remains the
+        # canonical response header for that asset.
+        if existing['world_id']!=world_id or existing['bytes']!=raw:
+            raise ValueError('Media content identifier collision.')
+        return ident
+    db.execute('INSERT INTO photo_assets VALUES (?,?,?,?)',(ident,world_id,mime,raw))
+    return ident
+
 def decode_image(image):
     if not isinstance(image,str) or len(image)>12_000_000:
         raise ValueError('Image exceeds the import limit.')
@@ -14,12 +102,12 @@ def decode_image(image):
         raise ValueError('The provider returned text or a link instead of image data. No photo was delivered. Check Image activity and the selected image model.')
     try:
         header,data=image.split(',',1);mime=header.removeprefix('data:').removesuffix(';base64')
-        if header!=f'data:{mime};base64' or mime not in ('image/png','image/jpeg','image/webp'):raise ValueError()
+        if header!=f'data:{mime};base64' or mime not in IMAGE_MIME_TYPES:raise ValueError()
         raw=base64.b64decode(data,validate=True)
         valid=(mime=='image/png' and raw.startswith(b'\x89PNG\r\n\x1a\n')) or (mime=='image/jpeg' and raw.startswith(b'\xff\xd8\xff')) or (mime=='image/webp' and raw.startswith(b'RIFF') and raw[8:12]==b'WEBP')
         if not valid or len(raw)<24:raise ValueError()
     except (ValueError,TypeError):raise ValueError('Import a PNG, JPEG or WebP data image.') from None
-    return mime,raw
+    return optimize_image_bytes(mime,raw)
 
 
 def command(service,db,world_id,revision,state,body):
@@ -34,6 +122,8 @@ def command(service,db,world_id,revision,state,body):
         if archived:photos.append(archived)
     if kind in ('capture_photo','capture_reference'):
         scene=body.get('scene');mode=body.get('captureType','front_camera_selfie');destination=body.get('destination','private_chat')
+        origin=body.get('origin','explicit_player_request')
+        if origin not in ('explicit_player_request','dialogue_action'):raise ValueError('Unsupported photo origin.')
         view=body.get('view') if kind=='capture_reference' else None
         if kind=='capture_reference':
             role=body.get('role','identity');entity=body.get('entityId') or after['truth']['companion']['id'];description=body.get('description','')
@@ -63,9 +153,10 @@ def command(service,db,world_id,revision,state,body):
         snapshot={'companion':frozen['companion'],'photoContext':context,'scene':scene.strip(),'captureType':mode,'destination':destination,'kernelVersion':state['kernelVersion']}
         if kind=='capture_reference':context.update(placeId='',garmentIds=[],withNames=[],personIds=[],referenceStudy=view,assetStudy=study)
         _vh_import_module('.vh2_assets',__package__).freeze(snapshot)
+        snapshot=compact_capture_snapshot(snapshot)
         db.execute('INSERT INTO photo_jobs VALUES (?,?,?)',(photo_id,world_id,encode(snapshot)))
-        photos.append({'id':photo_id,'status':'captured','at':after['simAt'],'scene':scene.strip(),'captureType':mode,'destination':destination,'photoContext':context,**({'recipientPersonaId':after['communication']['personaId'],'recipientConversationGeneration':after['communication'].get('generation',0)} if destination=='private_chat' else {})})
-        event='PHOTO_CAPTURED';details={'photoId':photo_id,'snapshot':snapshot,'origin':'explicit_player_request'}
+        photos.append({'id':photo_id,'status':'captured','origin':origin,'at':after['simAt'],'scene':scene.strip(),'captureType':mode,'destination':destination,'photoContext':context,**({'recipientPersonaId':after['communication']['personaId'],'recipientConversationGeneration':after['communication'].get('generation',0)} if destination=='private_chat' else {})})
+        event='PHOTO_CAPTURED';details={'photoId':photo_id,'snapshot':snapshot,'origin':origin}
     else:
         photo_id=body.get('photoId');item=next((p for p in photos if p['id']==photo_id),None)
         if not item:raise ValueError('Unknown photo capture.')
@@ -92,8 +183,7 @@ def command(service,db,world_id,revision,state,body):
             if item['status']!='submitted':raise Conflict('Photo is not awaiting an image.')
             image=body.get('image','')
             mime,raw=decode_image(image)
-            asset=hashlib.sha256((world_id+photo_id).encode()+raw).hexdigest()
-            db.execute('INSERT INTO photo_assets VALUES (?,?,?,?)',(asset,world_id,mime,raw))
+            asset=store_asset(db,world_id,mime,raw)
             gallery=item.get('destination') in ('gallery','reference') or bool(after['communication'].get('deletedAt')) or item.get('recipientConversationGeneration',0)!=after['communication'].get('generation',0)
             item.update(status='stored' if gallery else 'delivered',assetId=asset,deliveredAt=after['simAt'])
             for post in after.get('social',{}).get('posts',[]):

@@ -164,6 +164,12 @@ def manage(service,db,world,revision,state,body):
             for path in PATHS:
                 if path[0] not in ('lifeRuntime',):path_set(c,path,path_get(normalized,path),not path_has(normalized,path))
     revision=service.commit_event(db,world,revision,state,after,'CONVERSATION_'+action.upper(),{'personaId':persona})
+    if action!='rename':
+        # Status transitions above invoke the no-content terminal snapshot
+        # trigger. Bound the remaining audit summaries only after the selected
+        # conversation mutation is durable in this same transaction.
+        from . import vh2_dialogue
+        vh2_dialogue.prune_terminal_jobs(db,world,service.clock())
     return revision,after
 
 def awareness(state):

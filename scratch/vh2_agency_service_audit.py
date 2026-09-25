@@ -25,6 +25,7 @@ class Agency(unittest.TestCase):
  def test_episode_capture_publish_and_restart(self):
   self.enable();self.cmd('advance',steps=1);s=self.state()
   self.assertEqual(len(s['photos']),1);photo=s['photos'][0];self.assertEqual(photo['origin'],'autonomous')
+  with self.s.connect() as db:self.assertEqual(json.loads(db.execute('SELECT snapshot FROM photo_jobs WHERE id=?',(photo['id'],)).fetchone()[0])['captureSnapshotVersion'],1)
   self.assertEqual(photo['photoContext']['placeId'],'home');self.assertEqual(photo['photoContext']['withNames'],[],'noticing does not include a bystander in the selfie')
   self.assertEqual(len(s['truth']['companion']['vh2Plans']['plans']),1);self.assertEqual(s.get('social',{}).get('posts',[]),[])
   pid=photo['id'];self.cmd('submit_photo',photoId=pid);self.cmd('advance',steps=2);self.cmd('import_photo',photoId=pid,image=PNG)

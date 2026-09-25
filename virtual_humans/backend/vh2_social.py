@@ -4,7 +4,7 @@ Publication is an explicit operator action for now. Capturing a photo never
 implies permission to post it, and social metadata cannot rewrite its reality.
 """
 from importlib import import_module as _vh_import_module
-import json,base64,hashlib
+import json,base64
 import uuid
 from . import vh2_library
 
@@ -72,10 +72,10 @@ def command(service,db,world_id,revision,state,body):
                 valid=(mime=='image/png' and raw.startswith(b'\x89PNG\r\n\x1a\n')) or (mime=='image/jpeg' and raw.startswith(b'\xff\xd8\xff')) or (mime=='image/webp' and raw.startswith(b'RIFF') and raw[8:12]==b'WEBP')
                 if not valid or len(raw)<24:raise ValueError()
             except (ValueError,TypeError):raise ValueError('Import a PNG, JPEG or WebP starter image.')
-            asset=hashlib.sha256((world_id+ident).encode()+raw).hexdigest()
+            from .vh2_media import optimize_image_bytes,store_asset
+            mime,raw=optimize_image_bytes(mime,raw)
             previous=db.execute('SELECT mime,bytes FROM photo_assets WHERE world_id=? AND id=?',(world_id,existing.get('assetId'))).fetchone() if existing and existing.get('assetId') else None
-            if previous and previous['mime']==mime and previous['bytes']==raw:asset=existing['assetId']
-            db.execute('INSERT OR IGNORE INTO photo_assets VALUES (?,?,?,?)',(asset,world_id,mime,raw))
+            asset=existing['assetId'] if previous and previous['mime']==mime and previous['bytes']==raw else store_asset(db,world_id,mime,raw)
         if not caption.strip() and not asset:raise ValueError('Starter posts need text or a completed photo.')
         at=max(0,now-int(age*86400000))
         if kind=='import_starter_gallery':

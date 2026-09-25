@@ -35,12 +35,13 @@ async function observerProbe(change, committedAffect = false) {
     return { writes, status: message.turnAudit.observerStatus };
 }
 (async () => {
-    for (const change of ['timeline', 'revision', 'transcript', 'invalidated']) {
+    for (const change of ['timeline', 'revision', 'invalidated']) {
         assert.deepEqual(await observerProbe(change), { writes: 0, status: 'rejected_stale' });
     }
+    assert.deepEqual(await observerProbe('transcript'), { writes: 1, status: 'committed' });
     assert.deepEqual(await observerProbe(null), { writes: 1, status: 'committed' });
     assert.deepEqual(await observerProbe(null, true), { writes: 0, status: 'committed' });
-    console.log('PASS: observer ownership, revision, invalidation, newer input, exactly-once affect');
+    console.log('PASS: observer ownership, revision, invalidation, queued newer input, exactly-once affect');
     const ctx = { console, state: { globalSettings: {}, personas: [], companions: [] },
         companionPendingPersonaVision: () => null, companionInputSupports: () => false };
     buildContext(vm, ['normalizeCompanion', 'buildCompanionMessages', 'companionConversationTransition',

@@ -1,7 +1,45 @@
 /* Opt-in VH2 text timelines in the existing Horde UI. The service owns reality;
  * browser state is a recoverable projection plus a durable command outbox. */
 'use strict';
-const vh2PollLocks=new Map(),vh2ProviderSignatures=new Map(),vh2BibleGenerationLocks=new Set();
+const vh2PollLocks=new Map(),vh2ProviderSignatures=new Map(),vh2BibleGenerationLocks=new Set(),vh2MirrorLocks=new Map(),vh2MirrorTimers=new Map();
+async function vh2PersistHostOwnership(){
+ // Host handoff changes only Virtual Human timelines and device settings.
+ // A full Studio save clones unrelated worlds/media and can stall the very
+ // operation whose ownership receipt we need to persist.
+ await saveVirtualHumansState();
+ await persistGlobalSettingsOnly();
+}
+function vh2HostRecord(timeline,requireToken=true){
+ const id=timeline?.vh2?.hostId;if(!id)return null;
+ const host=state.globalSettings?.vh2SelfHosts?.[id];
+ if(!host?.baseUrl||(requireToken&&!host.accessToken))throw Error('This life belongs to a private server whose access token is missing. Reconnect it from Private server & recovery.');
+ return host;
+}
+function vh2HostOptions(timeline){const host=vh2HostRecord(timeline);return host?{baseUrl:host.baseUrl,accessToken:host.accessToken}:{};}
+function vh2Request(timeline,path,options={}){return mcpBridgeRequest(path,{...options,...vh2HostOptions(timeline)});}
+async function vh2Fetch(timeline,path,options={}){
+ const host=vh2HostRecord(timeline),controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),options.timeoutMs||120000);
+ const headers={...(options.headers||{})};if(host)headers.Authorization='Bearer '+host.accessToken;
+ try{
+  const response=await fetch((host?.baseUrl||mcpBridgeBase())+path,{...options,headers,signal:controller.signal});
+  if(!response.ok){let detail='';try{detail=(await response.clone().json()).error||'';}catch(_){}const error=Error(detail||'VH2 request failed ('+response.status+').');error.status=response.status;throw error;}
+  return response;
+ }catch(error){if(controller.signal.aborted)throw Error('The VH2 host timed out.');throw error;}finally{clearTimeout(timeout);}
+}
+function vh2SetWorldHost(companionId,worldId,hostId){
+ const sessions=state.companionTimelines?.[companionId]?.sessions||[];
+ for(const session of sessions)if(session.vh2?.worldId===worldId){if(hostId)session.vh2.hostId=hostId;else delete session.vh2.hostId;session.vh2.assetUrls={};}
+}
+function vh2TimelineForWorld(worldId){
+ for(const store of Object.values(state.companionTimelines||{}))for(const timeline of store.sessions||[])if(timeline.vh2?.worldId===worldId||timeline.vh2?.archiveWorldId===worldId)return timeline;
+ return null;
+}
+function vh2RefreshControlsAfterHostChange(companion){
+ document.activeElement?.blur();const timeline=getActiveCompanionTimeline(companion.id),controls=document.getElementById('vh2-chat-controls');
+ if(timeline&&typeof vhDraftPanels!=='undefined')for(const title of ['Timeline backup & hosting','Cloud hosting & local backup','Private server & recovery'])vhDraftPanels.delete(timeline.id+'|'+title);
+ if(controls){const old=[...controls.querySelectorAll(':scope > details')].find(panel=>['Timeline backup & hosting','Cloud hosting & local backup','Private server & recovery'].includes(panel.querySelector(':scope > summary')?.textContent));if(old)old.removeAttribute('data-dirty');controls.dataset.forceHostRefresh='true';}
+ vh2RenderControls(companion);
+}
 // Safe authored fields copied into a new persistent life. Keep this contract in
 // exact parity with engine/vh2-profile-fields.json; the contract audit enforces it.
 const VH2_PROFILE_TRANSFER_FIELDS=Object.freeze(['age','allowPhotos','allowVideoClips','allowVoiceNotes','initiativeMode','knownBeforeDays','libidoBaseline','libidoEnabled','desirePattern','sexualInitiative','intimacyBoundaries','alcoholPattern','mindProfile','embodimentProfile','cognitionProfile','lifeWeatherEnabled','location','locationLabel','locationLatitude','locationLongitude','locationMode','occupation','pronouns','sexualConfidence','sexualRiskAppetite','sleepArchetype','socialAccessRules','socialAdultLevel','socialAudience','socialContentTypes','socialCurrency','socialFeedEnabled','socialFeedImages','socialMonetization','socialPhotoRatio','socialPlatform','socialPlayerRole','socialPostFrequency','socialPostingRules','socialSubscriptionPrice','socialThirstTrapLevel','socialWritingStyle','timezone','timezoneOffsetMinutes','videoAudio','videoDuration','videoModel','videoProvider','videoReferencePolicy','videoResolution','videoStyleRules','connectionType','connectionRole','relationshipContext','priorContact','socialWorld','privateLife','routine','playerKnowledge','initialMotive','connectionAuthenticity','startingScenario','openingMode','openingMessage']);
@@ -22,10 +60,10 @@ async function vh2OpenPersonaConversation(companion,personaId){
   if(chat?.vh2.conversationDeleted){chat.vh2.conversationDeleted=false;chat.name=persona.name||'Conversation';chat.messages=[];}
   if(!chat){
    chat=normalizeCompanionTimeline({id:'vh_chat_'+crypto.randomUUID(),name:persona.name||'Conversation',personaId,personaPinned:true,messages:[],runtime:captureCompanionRuntime(companion),vh2:{worldId:life.vh2.worldId,conversationPersonaId:id,outbox:[],error:'',running:life.vh2.running}},companion);
-   store.sessions.push(chat);await saveState();
+   store.sessions.push(chat);await saveVirtualHumansState();
   }
   await vh2Poll(companion,chat,{force:true,throwOnError:true});
-  store.sessions=store.sessions.filter(t=>t===chat||!t.vh2?.conversationDeleted);activateCompanionTimeline(companion.id,chat.id);await saveState();renderCompanionThread();return chat;
+  store.sessions=store.sessions.filter(t=>t===chat||!t.vh2?.conversationDeleted);activateCompanionTimeline(companion.id,chat.id);await saveVirtualHumansState();renderCompanionThread();return chat;
  }finally{vh2ConversationOpenLocks.delete(companion.id);}
 }
 function vh2NewConversationDialog(companion){
@@ -58,7 +96,7 @@ function vh2ConversationActionDialog(companion,action){
     if(next){store.sessions=store.sessions.filter(t=>t!==timeline);activateCompanionTimeline(companion.id,next.id);await vh2Poll(companion,next,{force:true,throwOnError:true});}
     else timeline.name='Choose a persona';
    }
-   await saveState();renderCompanionThread();dialog.close();dialog.remove();showToast(action==='rename'?'Chat renamed.':action==='clear'?'Messages cleared.':action==='reset'?'Chat and relationship reset.':'Chat deleted.','success');
+   await saveVirtualHumansState();renderCompanionThread();dialog.close();dialog.remove();showToast(action==='rename'?'Chat renamed.':action==='clear'?'Messages cleared.':action==='reset'?'Chat and relationship reset.':'Chat deleted.','success');
   }catch(error){status.textContent=error.message;submit.disabled=false;}
  };
  dialog.addEventListener('cancel',()=>dialog.remove());document.body.append(dialog);dialog.showModal();if(action==='rename'){input.focus();input.select();}
@@ -92,7 +130,7 @@ async function vh2OpenReplyDetails(companion,timeline=getActiveCompanionTimeline
  if(!timeline?.vh2)return;
  const d=vhProductDialog('Reply details','Recent dialogue attempts for this life. Token counts are reported by the provider, not estimates. Missing usage is shown as unavailable.');
  const f=d.querySelector('form'),status=d.querySelector(':scope > [role=status]');status.textContent='Loading reply attempts…';
- try{const result=await mcpBridgeRequest('/vh2/dialogue-jobs?worldId='+encodeURIComponent(timeline.vh2.worldId));if(!d.open)return;
+ try{const result=await vh2Request(timeline,'/vh2/dialogue-jobs?worldId='+encodeURIComponent(timeline.vh2.worldId));if(!d.open)return;
   for(const job of result.jobs||[]){const row=document.createElement('details'),title=document.createElement('summary');title.textContent=(job.model||'Offline fixture')+' · '+job.status+' · '+new Date(job.created_at).toLocaleString();row.append(title);
    const usage=document.createElement('p'),u=job.usage;usage.textContent=u&&Object.keys(u).length?'Provider-reported tokens: '+Object.entries({prompt_tokens:'input',completion_tokens:'output',total_tokens:'total',cached_tokens:'cached input',reasoning_tokens:'reasoning'}).filter(([key])=>Number.isInteger(u[key])).map(([key,label])=>label+' '+u[key]).join(' · '):'Token usage unavailable: this attempt has no provider-reported counts.';row.append(usage);
    if(job.reason){const error=document.createElement('p');error.textContent=job.reason;row.append(error);}
@@ -104,7 +142,7 @@ async function vh2OpenReplyDetails(companion,timeline=getActiveCompanionTimeline
 async function vh2OpenTextBudgets(companion,timeline=getActiveCompanionTimeline(companion.id)){
  const d=vhProductDialog('Text request budgets','Applies only to this character, across its lives. Chat replies and calls use dialogue requests; social captions and daily life reviews use background requests. Images and videos have separate controls.');
  const f=d.querySelector('form'),status=d.querySelector(':scope > [role=status]');status.textContent='Loading current usage…';
- try{const saved=await mcpBridgeRequest('/vh2/dialogue-provider?scope='+encodeURIComponent('horde:'+companion.id));if(!d.open)return;
+ try{const saved=await vh2Request(timeline,'/vh2/dialogue-provider?scope='+encodeURIComponent('horde:'+companion.id));if(!d.open)return;
   if(!saved.configured)throw Error('Configure this character’s text provider first.');
   const budget=saved.budgets?.dialogue;if(!budget)throw Error('Restart the updated local service to use separate text budgets.');
   const limits=saved.budgetPolicy||{dialogueDailyLimit:saved.dailyLimit,backgroundDailyLimit:saved.dailyLimit};
@@ -114,17 +152,18 @@ async function vh2OpenTextBudgets(companion,timeline=getActiveCompanionTimeline(
   status.textContent=budget.legacy?'The old shared cap is still enforced. Save to explicitly replace it with the separate limits shown above.':'Usage counts reserved submissions, including failed or uncertain provider outcomes. Limits reset at midnight UTC.';
   f.onsubmit=async event=>{event.preventDefault();const button=f.querySelector('[type=submit]');button.disabled=true;
    try{if(getCompanion(companion.id)!==companion||getActiveCompanionTimeline(companion.id)!==timeline)throw Error('The character or selected life changed. Reopen its budgets.');
-    await vh2SyncProvider(companion,{budgetPolicy:{version:1,dialogueDailyLimit:f.elements.capped.checked?Number(f.elements.dialogue.value):null,backgroundDailyLimit:Number(f.elements.background.value)}});
-    const confirmed=await mcpBridgeRequest('/vh2/dialogue-provider?scope='+encodeURIComponent('horde:'+companion.id));if(timeline?.vh2)timeline.vh2.textProvider=confirmed;f.querySelector('[data-usage]').textContent=vh2TextBudgetSummary(confirmed);status.textContent='Text budgets saved. No provider request was submitted or retried.';vh2RenderTextBudgetNotice(companion);
+    await vh2SyncProvider(companion,{timeline,budgetPolicy:{version:1,dialogueDailyLimit:f.elements.capped.checked?Number(f.elements.dialogue.value):null,backgroundDailyLimit:Number(f.elements.background.value)}});
+    const confirmed=await vh2Request(timeline,'/vh2/dialogue-provider?scope='+encodeURIComponent('horde:'+companion.id));if(timeline?.vh2)timeline.vh2.textProvider=confirmed;f.querySelector('[data-usage]').textContent=vh2TextBudgetSummary(confirmed);status.textContent='Text budgets saved. No provider request was submitted or retried.';vh2RenderTextBudgetNotice(companion);
    }catch(error){status.textContent=error.message;}finally{button.disabled=false;}
   };
  }catch(error){if(d.open)status.textContent=error.message;}
 }
 async function vh2SyncProvider(companion,options={}){
+    const timeline=options.timeline||getActiveCompanionTimeline(companion.id);
     const provider=companionTextProviderId(companion);
     if(!['openrouter','gptproto','nanogpt','nvidia','local'].includes(provider)){
-        await mcpBridgeRequest('/vh2/dialogue-provider',{method:'POST',body:{disableScope:'horde:'+companion.id}});
-        vh2ProviderSignatures.delete(companion.id);
+        await vh2Request(timeline,'/vh2/dialogue-provider',{method:'POST',body:{disableScope:'horde:'+companion.id}});
+        vh2ProviderSignatures.delete(companion.id+'|'+(timeline?.vh2?.hostId||'local'));
         throw Error('This VH2 text preview needs a supported chat-completions provider. Its previous provider binding has been disabled.');
     }
     const headers=providerAuthHeaders(provider),key=(headers.Authorization||'').replace(/^Bearer\s+/i,'');
@@ -135,9 +174,10 @@ async function vh2SyncProvider(companion,options={}){
         ...(options.budgetPolicy?{budgetPolicy:options.budgetPolicy}:{}),
         ...(options.updateDailyLimit&&state.globalSettings.companionAlwaysOnEnabled&&companion.alwaysOnEnabled?{updateBackgroundDailyLimit:state.globalSettings.companionAlwaysOnDailyLimit||6}:{})};
     const signature=JSON.stringify(config);
-    if(options.budgetPolicy||vh2ProviderSignatures.get(companion.id)!==signature){
-        await mcpBridgeRequest('/vh2/dialogue-provider',{method:'POST',body:config});
-        vh2ProviderSignatures.set(companion.id,signature);
+    const signatureKey=companion.id+'|'+(timeline?.vh2?.hostId||'local');
+    if(options.budgetPolicy||vh2ProviderSignatures.get(signatureKey)!==signature){
+        await vh2Request(timeline,'/vh2/dialogue-provider',{method:'POST',body:config});
+        vh2ProviderSignatures.set(signatureKey,signature);
     }
     if(!config.enabled)throw Error('Configure this character’s provider in Settings before enabling automatic replies.');
 }
@@ -154,8 +194,13 @@ async function vh2EnqueueOwned(timeline,type,extra={}){
     if(typeof vhTrackUiCommand==='function')vhTrackUiCommand(key);
     const conversationPersonaId=timeline.vh2.conversationPersonaId||timeline.vh2.canonicalPersonaId;
     timeline.vh2.outbox.push({schemaVersion:1,key,type,...(conversationPersonaId?{conversationPersonaId}:{}),...extra});
-    if(type==='receive_message')timeline.messages.push(normalizeCompanionMessage({id:'vh2-pending:'+key,role:'user',type:'text',text:extra.text,timestamp:Date.now(),deliveryState:'sent',awaitingReply:true}));
-    try{await saveState();}catch(error){
+    if(type==='receive_message'){
+        timeline.messages.push(normalizeCompanionMessage({id:'vh2-pending:'+key,role:'user',type:'text',text:extra.text,timestamp:Date.now(),deliveryState:'sent',awaitingReply:true}));
+        // Paint the local receipt before IndexedDB clones a large life and
+        // transcript. Durability still finishes before the outbox can flush.
+        if(getActiveCompanionTimeline()===timeline&&state.view==='companionChat')renderCompanionThread();
+    }
+    try{await saveVirtualHumansState();}catch(error){
         // A command whose durable enqueue failed must not be sent by a later poll.
         timeline.vh2.outbox=timeline.vh2.outbox.filter(command=>command.key!==key);
         if(type==='receive_message')timeline.messages=timeline.messages.filter(message=>message.id!=='vh2-pending:'+key);
@@ -176,17 +221,21 @@ async function vh2FlushOwned(timeline){
         await vh2EnqueueLocks.get(timeline.id)?.catch(()=>{});
         const body=link.outbox[0];if(!body)break;
         if(body.type!=='create_profile'&&body.expectedRevision===undefined){
-            const p=await mcpBridgeRequest('/vh2/projection?worldId='+encodeURIComponent(link.worldId));
-            body.worldId=link.worldId;body.expectedRevision=p.revision;await saveState();
+            const p=await vh2Request(timeline,'/vh2/projection?worldId='+encodeURIComponent(link.worldId));
+            // The command key and payload are already durable. Persisting this
+            // transient compare-and-swap revision would clone the entire app a
+            // second time on every send; after a crash it is safe to fetch a
+            // fresh revision and reuse the same idempotency key.
+            body.worldId=link.worldId;body.expectedRevision=p.revision;
         }
         try{
-            const receipt=await mcpBridgeRequest('/vh2/command',{method:'POST',body,timeoutMs:30000});
+            const receipt=await vh2Request(timeline,'/vh2/command',{method:'POST',body,timeoutMs:30000});
             if(typeof vhUiAcknowledged==='function')vhUiAcknowledged(body.key,receipt);
-            link.worldId=receipt.worldId;if(receipt.photoId)link.lastPhotoId=receipt.photoId;if(receipt.checkpointId)link.checkpointId=receipt.checkpointId;link.outbox.shift();await saveState();
+            link.worldId=receipt.worldId;if(receipt.photoId)link.lastPhotoId=receipt.photoId;if(receipt.checkpointId)link.checkpointId=receipt.checkpointId;link.outbox.shift();await saveVirtualHumansState();
         }catch(error){
             // A received 409 proves this request did not commit. Network failures
             // retain the exact body/key, so the service can return its receipt.
-            if(error.status===409&&error.message.startsWith('World changed;')){delete body.expectedRevision;const priorKey=body.key;body.key=crypto.randomUUID();const pendingMessage=timeline.messages.find(m=>m.id==='vh2-pending:'+priorKey);if(pendingMessage)pendingMessage.id='vh2-pending:'+body.key;if(typeof vhUiRetried==='function')vhUiRetried(priorKey,body.key);await saveState();continue;}
+            if(error.status===409&&error.message.startsWith('World changed;')){delete body.expectedRevision;const priorKey=body.key;body.key=crypto.randomUUID();const pendingMessage=timeline.messages.find(m=>m.id==='vh2-pending:'+priorKey);if(pendingMessage)pendingMessage.id='vh2-pending:'+body.key;if(typeof vhUiRetried==='function')vhUiRetried(priorKey,body.key);await saveVirtualHumansState();continue;}
             if(error.status===409&&error.message==='World requires a kernel migration'&&body.type!=='upgrade_kernel'){
                 // The rejected command did not commit. Upgrade through the canonical
                 // checkpointed path, then retry it at the new revision.
@@ -195,7 +244,7 @@ async function vh2FlushOwned(timeline){
                 if(typeof vhUiRetried==='function')vhUiRetried(priorKey,body.key);
                 link.outbox.unshift({schemaVersion:1,key:crypto.randomUUID(),type:'upgrade_kernel'});
                 link.error='Updating the timeline engine and creating a backup before saving…';
-                await saveState();continue;
+                await saveVirtualHumansState();continue;
             }
             if(typeof vhUiFailed==='function')vhUiFailed(body.key,error);
             // Terminal validation/conflict responses cannot succeed by replaying the
@@ -203,7 +252,7 @@ async function vh2FlushOwned(timeline){
             if([400,409].includes(error.status)&&!error.message.includes('kernel migration')){
                 link.failedCommands=[...(link.failedCommands||[]),{type:body.type,key:body.key,message:error.message,at:Date.now()}].slice(-20);
                 if(body.type==='receive_message'){const pending=timeline.messages.find(m=>m.id==='vh2-pending:'+body.key);if(pending){pending.deliveryState='failed';pending.awaitingReply=false;}}
-                link.outbox.shift();await saveState();
+                link.outbox.shift();await saveVirtualHumansState();
             }
             throw error;
         }
@@ -253,13 +302,13 @@ async function vh2SyncImageConfiguration(companion,timeline,options={}){
  return vh2SaveImageProvider(companion,timeline,config);
 }
 async function vh2SaveImageProvider(companion,timeline,body){
- const receipt=await mcpBridgeRequest('/vh2/image-provider',{method:'POST',body});
+ const receipt=await vh2Request(timeline,'/vh2/image-provider',{method:'POST',body});
  timeline.vh2.imageProviderSaveEpoch=(timeline.vh2.imageProviderSaveEpoch||0)+1;
  timeline.vh2.imageProvider={...receipt,stale:false};
  // Keep Studio and the autonomous worker on the acknowledged configuration.
  if(receipt.provider!=='gemini'){companion.imageSource=receipt.provider;companion.imageModel=receipt.model==='provider default'?'':receipt.model;companion.mcpImageTool=receipt.tool||'';companion.mcpImageArguments=safeJsonClone(receipt.arguments||{});}
  timeline.vh2.imageStudioFingerprint=vh2ImageStudioFingerprint(companion);
- await saveState();
+ await saveVirtualHumansState();
  // Wait for any earlier poll, then force a fresh read after the save.
  await vh2Poll(companion,timeline,{force:true});
  return receipt;
@@ -267,27 +316,38 @@ async function vh2SaveImageProvider(companion,timeline,body){
 async function vh2PollOwned(companion,timeline,options={}){
     let changed=false;
     try{
-        let providerError='';
-        try{await vh2SyncProvider(companion);}catch(error){providerError=error.message;}
-        await vh2Flush(timeline);
+        // Read-only callers (exports, diagnostics) must never submit a queued
+        // life command or rewrite provider configuration as a side effect.
+        // They still refresh the authoritative projection and media tickets.
+        let providerError=timeline.vh2?.error||'';
+        if(!options.readOnly){
+            providerError='';
+            try{await vh2SyncProvider(companion,{timeline});}catch(error){providerError=error.message;}
+            await vh2Flush(timeline);
+        }
         const link=timeline.vh2;
         if(!link.worldId)return;
-        const projection=await mcpBridgeRequest('/vh2/projection?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline));
+        const projection=await vh2Request(timeline,'/vh2/projection?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline));
+        if(link.hostId)vh2ScheduleLocalMirror(timeline,projection.revision);
         link.conversations=projection.conversations||[];
         link.conversationPersonaId=projection.state.communication.personaId;
         if(projection.worldId&&projection.worldId!==link.worldId){link.worldId=projection.worldId;link.revision=projection.revision;changed=true;}
         const imageReadEpoch=link.imageProviderSaveEpoch||0;
-        const optional=await Promise.allSettled([mcpBridgeRequest('/vh2/provider-jobs?worldId='+encodeURIComponent(link.worldId)),mcpBridgeRequest('/vh2/image-provider?scope='+encodeURIComponent('horde:'+companion.id)),mcpBridgeRequest('/vh2/flight-provider?scope='+encodeURIComponent('horde:'+companion.id)),mcpBridgeRequest('/vh2/dialogue-provider?scope='+encodeURIComponent('horde:'+companion.id)),mcpBridgeRequest('/vh2/status')]);
-        const workerStatus=optional[0].status==='fulfilled'?optional[0].value:{jobs:link.providerJobs||[]};
-        const imageProvider=imageReadEpoch!==(link.imageProviderSaveEpoch||0)?link.imageProvider:vh2ProviderRead(optional[1],link.imageProvider);
-        const flightProvider=vh2ProviderRead(optional[2],link.flightProvider);
-        const textProvider=vh2ProviderRead(optional[3],link.textProvider);
-        const rawServiceStatus=optional[4].status==='fulfilled'?optional[4].value:null;
+        const light=options.lightweight;
+        const optional=light
+            ? (light==='jobs'?await Promise.allSettled([vh2Request(timeline,'/vh2/provider-jobs?worldId='+encodeURIComponent(link.worldId))]):[])
+            : await Promise.allSettled([vh2Request(timeline,'/vh2/provider-jobs?worldId='+encodeURIComponent(link.worldId)),vh2Request(timeline,'/vh2/image-provider?scope='+encodeURIComponent('horde:'+companion.id)),vh2Request(timeline,'/vh2/flight-provider?scope='+encodeURIComponent('horde:'+companion.id)),vh2Request(timeline,'/vh2/dialogue-provider?scope='+encodeURIComponent('horde:'+companion.id)),vh2Request(timeline,'/vh2/status')]);
+        const workerStatus=optional[0]?.status==='fulfilled'?optional[0].value:{jobs:link.providerJobs||[]};
+        const imageProvider=light?link.imageProvider:imageReadEpoch!==(link.imageProviderSaveEpoch||0)?link.imageProvider:vh2ProviderRead(optional[1],link.imageProvider);
+        const flightProvider=light?link.flightProvider:vh2ProviderRead(optional[2],link.flightProvider);
+        const textProvider=light?link.textProvider:vh2ProviderRead(optional[3],link.textProvider);
+        const rawServiceStatus=!light&&optional[4].status==='fulfilled'?optional[4].value:null;
         const serviceStatus=rawServiceStatus?{dialogueError:rawServiceStatus.dialogueError||'',lastError:rawServiceStatus.lastError||'',worldError:(rawServiceStatus.worlds||[]).find(world=>world.worldId===link.worldId)?.error||''}:(link.serviceStatus||{});
-        link.optionalProviderErrors=optional.map((result,index)=>result.status==='rejected'?{capability:['Background jobs','Background images','Flights','Text request budgets','Local reply worker'][index],message:String(result.reason?.message||'Unavailable')}:null).filter(Boolean);
+        if(!light)link.optionalProviderErrors=optional.map((result,index)=>result.status==='rejected'?{capability:['Background jobs','Background images','Flights','Text request budgets','Local reply worker'][index],message:String(result.reason?.message||'Unavailable')}:null).filter(Boolean);
         const workerSignature=JSON.stringify([workerStatus,imageProvider,flightProvider,textProvider,serviceStatus]);
-        link.lastSyncedAt=Date.now();link.imageStudioFingerprint??=vh2ImageStudioFingerprint(companion);
+        link.lastSyncedAt=Date.now();if(!light)link.lastFullSyncedAt=link.lastSyncedAt;link.imageStudioFingerprint??=vh2ImageStudioFingerprint(companion);
         const s=projection.state,c=s.truth.companion;link.runtimeReboot=s.runtimeReboot||null;link.currentAge=companionCurrentAge(c);link.calendarAges=c.vh2Calendar?.ages||{};
+        await vh2EnsureAssetUrls(timeline,[...(s.communication.messages||[]).map(m=>m.assetId),...(s.photos||[]).map(p=>p.assetId),...(c.vh2Assets?.entries||[]).map(entry=>entry.assetId)]);
         link.clips=s.clips||[];link.conversationDeleted=!!s.communication.deletedAt;
         if(s.communication.name)timeline.name=s.communication.name;
         if(link.conversationGeneration!==(s.communication.generation||0)){
@@ -309,15 +369,15 @@ async function vh2PollOwned(companion,timeline,options={}){
         const pendingIds=new Set((link.outbox||[]).filter(command=>command.type==='receive_message').map(command=>'vh2-pending:'+command.key));
         const hiddenClipIds=new Set(s.hiddenClipMessageIds||[]);
         const retained=new Map(timeline.messages.filter(m=>!hiddenClipIds.has(m.id)&&(!m.id.startsWith('vh2-pending:')||pendingIds.has(m.id)||m.deliveryState==='failed')).map(m=>[m.id,m]));
-        const latest=s.communication.messages.map(m=>({...normalizeCompanionMessage({...m,photo:m.assetId&&m.type==='photo'?vh2PhotoAssetUrl(link.worldId,m.assetId):m.photo,audio:m.assetId&&m.type==='voice'?vh2PhotoAssetUrl(link.worldId,m.assetId):m.audio,role:m.role==='assistant'?'companion':m.role,
+        const latest=s.communication.messages.map(m=>({...normalizeCompanionMessage({...m,photo:m.assetId&&m.type==='photo'?vh2PhotoAssetUrl(link.worldId,m.assetId,timeline):m.photo,audio:m.assetId&&m.type==='voice'?vh2PhotoAssetUrl(link.worldId,m.assetId,timeline):m.audio,role:m.role==='assistant'?'companion':m.role,
             deliveryState:m.role==='assistant'?'delivered':m.readAt?'read':'delivered'}),text:m.text}));
         for(const m of latest)retained.set(m.id,m);
         timeline.messages=[...retained.values()].sort((a,b)=>a.timestamp-b.timestamp);
         if(getActiveCompanionTimeline(companion.id)===timeline){
             applyCompanionRuntime(companion,timeline.runtime);state.companionThreads[companion.id]=timeline.messages;
         }
-        await saveState();
-    }catch(error){if(timeline.vh2.error!==error.message){changed=true;timeline.vh2.error=error.message;await saveState();}if(options.throwOnError)throw error;}
+        await saveVirtualHumansState();
+    }catch(error){if(timeline.vh2.error!==error.message){changed=true;timeline.vh2.error=error.message;await saveVirtualHumansState();}if(options.throwOnError)throw error;}
     finally{if(changed&&state.activeCompanionId===companion.id&&getActiveCompanionTimeline(companion.id)===timeline&&state.view==='companionChat')renderCompanionThread();if(changed&&state.activeCompanionId===companion.id&&getActiveCompanionTimeline(companion.id)===timeline&&state.view==='vhWorkspace'&&typeof vhRenderWorkspace==='function')vhRenderWorkspace();}
 }
 async function vh2CreateTimeline(companion){
@@ -348,9 +408,16 @@ async function vh2CreateTimeline(companion){
 function vh2RenderControls(companion){
     vh2RenderTextBudgetNotice(companion);
     if(typeof vhRenderSystemStatus==='function')vhRenderSystemStatus(companion);
+    // These controls live exclusively inside Live Human. Building the entire
+    // workspace during every chat render made long conversations and ordinary
+    // navigation pay for dozens of hidden panels.
+    if(state.view!=='vhWorkspace')return;
     const host=document.getElementById('vh2-chat-controls');if(!host)return;
     const timeline=getActiveCompanionTimeline(companion.id),link=timeline?.vh2;
-    if(host.dataset.controlTimeline===timeline?.id&&host.contains?.(document.activeElement)&&document.activeElement?.matches?.('input, textarea, select'))return;
+    const forceHostRefresh=host.dataset.forceHostRefresh==='true';delete host.dataset.forceHostRefresh;
+    if(!forceHostRefresh&&host.dataset.controlTimeline===timeline?.id&&host.contains?.(document.activeElement)&&document.activeElement?.matches?.('input, textarea, select'))return;
+    const controlSignature=JSON.stringify([timeline?.id||'',link?.revision??'',link?.running??'',link?.autoReplies??'',link?.error||'',link?.dialogueError||'',link?.requiresMigration||false,link?.workerSignature||'',link?.replyJob?.id||'',link?.replyJob?.status||'',link?.replyJob?.reason||'',link?.transcriptBefore??'',link?.hostId||'',link?.localMirrorRevision||0,link?.localMirrorSavedAt||0,link?.localMirrorError||'',vh2PhotoLocks.has(timeline?.id)]);
+    if(!forceHostRefresh&&host.dataset.controlSignature===controlSignature&&host.children.length)return;
     const expanded=host.dataset.controlTimeline===timeline?.id?new Set([...host.querySelectorAll('details[open]')].map(d=>d.querySelector(':scope > summary')?.textContent)):new Set();
     if(typeof vhRememberPanels==='function')vhRememberPanels(host);
     host.dataset.controlTimeline=timeline?.id||'';
@@ -366,7 +433,7 @@ function vh2RenderControls(companion){
         history.onclick=async()=>{history.disabled=true;try{await vh2LoadHistory(companion,timeline);}catch(error){showToast(error.message,'error');}finally{vh2RenderControls(companion);}};host.append(history);
         if(link.requiresMigration){
             const upgrade=document.createElement('button');upgrade.type='button';upgrade.className='tool-btn';upgrade.textContent='Upgrade timeline engine (creates backup)';
-            upgrade.onclick=async()=>{link.outbox.unshift({schemaVersion:1,key:crypto.randomUUID(),type:'upgrade_kernel'});await saveState();await vh2Poll(companion,timeline);};host.prepend(upgrade);
+            upgrade.onclick=async()=>{link.outbox.unshift({schemaVersion:1,key:crypto.randomUUID(),type:'upgrade_kernel'});await saveVirtualHumansState();await vh2Poll(companion,timeline);};host.prepend(upgrade);
         }
         {
             const panel=document.createElement('details');panel.innerHTML='<summary>Photo capture preview</summary><p class="form-hint">First review a frozen moment and its references. Capturing the moment makes no provider call. Generation uses your configured provider and credits; you choose when to submit.</p>';
@@ -493,11 +560,21 @@ function vh2RenderControls(companion){
     host.querySelector('[data-vh2-refresh]')?.addEventListener('click',()=>vh2Poll(companion,timeline));
     for(const details of host.querySelectorAll('details'))if(expanded.has(details.querySelector(':scope > summary')?.textContent))details.open=true;
     if(typeof vhRestorePanels==='function'&&timeline)vhRestorePanels(host,timeline);
-    if(typeof vhArrangeWorkspace==='function')vhArrangeWorkspace(companion,timeline);if(typeof vhMeaningfulControls==='function')vhMeaningfulControls(host);
+    if(typeof vhArrangeWorkspace==='function')vhArrangeWorkspace(companion,timeline);if(typeof vhMeaningfulControls==='function')vhMeaningfulControls(host);host.dataset.controlSignature=controlSignature;
 }
 
 const vh2PhotoLocks=new Set();
-function vh2PhotoAssetUrl(worldId,id){return mcpBridgeBase()+'/vh2/photo-asset?worldId='+encodeURIComponent(worldId)+'&id='+encodeURIComponent(id);}
+function vh2PhotoAssetUrl(worldId,id,timeline=getActiveCompanionTimeline()){
+ const host=timeline?.vh2?.hostId?vh2HostRecord(timeline):null;
+ if(!host)return mcpBridgeBase()+'/vh2/photo-asset?worldId='+encodeURIComponent(worldId)+'&id='+encodeURIComponent(id);
+ return timeline.vh2.assetUrls?.[id]?.url||'';
+}
+async function vh2EnsureAssetUrls(timeline,assetIds){
+ if(!timeline?.vh2?.hostId)return;
+ const link=timeline.vh2,host=vh2HostRecord(timeline),now=Date.now();link.assetUrls||={};
+ const pending=[...new Set(assetIds.filter(Boolean))].filter(id=>!link.assetUrls[id]||link.assetUrls[id].expiresAt<now+60000).slice(0,80);
+ await Promise.all(pending.map(async id=>{const ticket=await vh2Request(timeline,'/vh2/media-ticket?worldId='+encodeURIComponent(link.worldId)+'&id='+encodeURIComponent(id));link.assetUrls[id]={url:host.baseUrl+ticket.path,expiresAt:ticket.expiresAt};}));
+}
 async function vh2PhotoData(source){
     if(typeof source!=='string'||!source.trim())throw Error('The image reference has no usable image URL.');
     if(source.startsWith('data:'))return source;
@@ -505,15 +582,26 @@ async function vh2PhotoData(source){
     const blob=await response.blob();if(blob.size>8_000_000)throw Error('Photo exceeds the current 8 MB import limit.');
     return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(Error('Could not read photo.'));reader.readAsDataURL(blob);});
 }
+async function vh2NormalizeStoredImage(source,maxDimension=2048,quality=.84){
+    const data=await vh2PhotoData(source);
+    return new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>{if(!image.naturalWidth||!image.naturalHeight)return reject(Error('The image has no readable dimensions.'));if(image.naturalWidth*image.naturalHeight>40_000_000)return reject(Error('Choose an image smaller than 40 megapixels.'));const scale=Math.min(1,maxDimension/image.naturalWidth,maxDimension/image.naturalHeight),width=Math.max(1,Math.round(image.naturalWidth*scale)),height=Math.max(1,Math.round(image.naturalHeight*scale));let sourceImage=image,currentWidth=image.naturalWidth,currentHeight=image.naturalHeight;while(currentWidth/2>=width){const step=document.createElement('canvas');step.width=Math.round(currentWidth/2);step.height=Math.round(currentHeight/2);const context=step.getContext('2d');context.imageSmoothingEnabled=true;context.imageSmoothingQuality='high';context.drawImage(sourceImage,0,0,step.width,step.height);sourceImage=step;currentWidth=step.width;currentHeight=step.height;}const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;const context=canvas.getContext('2d');if(!context)return reject(Error('This browser could not optimize the image.'));context.imageSmoothingEnabled=true;context.imageSmoothingQuality='high';context.drawImage(sourceImage,0,0,width,height);const optimized=canvas.toDataURL('image/webp',quality),oversized=scale<1;resolve(optimized.startsWith('data:image/webp')&&(oversized||optimized.length<data.length)?optimized:data);};image.onerror=()=>reject(Error('This browser could not decode the image. Try JPEG, PNG or WebP.'));image.src=data;});
+}
+async function vh2NormalizeUploadedImage(file){
+    if(!file)throw Error('Choose an image to upload.');
+    if(file.size>25*1024*1024)throw Error('Choose an image smaller than 25 MB.');
+    if(!['image/png','image/jpeg','image/webp'].includes(file.type))throw Error('Choose a PNG, JPEG or WebP image.');
+    const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result||''));reader.onerror=()=>reject(Error('Could not read this image.'));reader.readAsDataURL(file);});
+    return vh2NormalizeStoredImage(data);
+}
 async function vh2PreparePhoto(companion,timeline,photoId,authored=safeJsonClone(companion),history=safeJsonClone(timeline.messages)){
         const worldId=timeline.vh2.worldId;
-        const snapshot=await mcpBridgeRequest('/vh2/photo-job?worldId='+encodeURIComponent(worldId)+'&id='+encodeURIComponent(photoId));
+        const snapshot=await vh2Request(timeline,'/vh2/photo-job?worldId='+encodeURIComponent(worldId)+'&id='+encodeURIComponent(photoId));
         const frozen={...authored,...snapshot.companion,id:authored.id};
         const renderer=timeline.vh2.imageProvider,referenceCapture=snapshot.destination==='reference'||!!snapshot.photoContext?.referenceStudy;
         if(renderer?.configured&&vh2SupportsDurableImages(companion,timeline)&&!(referenceCapture&&authored.referenceImageSource))Object.assign(frozen,{imageSource:renderer.provider,imageModel:renderer.model==='provider default'?'':renderer.model,mcpImageTool:renderer.tool||'',mcpImageArguments:safeJsonClone(renderer.arguments||{}),imageParameters:safeJsonClone(renderer.imageParameters||{}),imageProviderOptions:safeJsonClone(renderer.imageProviderOptions||{}),imageProviderTag:renderer.imageProviderTag||''});
         if(renderer?.configured&&vh2SupportsDurableImages(companion,timeline)&&!(referenceCapture&&authored.referenceImageSource)){
-            const preview=await mcpBridgeRequest('/vh2/photo-preview?worldId='+encodeURIComponent(worldId)+'&id='+encodeURIComponent(photoId));
-            const references=await Promise.all(preview.referenceAssetIds.map(id=>vh2PhotoData(vh2PhotoAssetUrl(worldId,id))));
+            const preview=await vh2Request(timeline,'/vh2/photo-preview?worldId='+encodeURIComponent(worldId)+'&id='+encodeURIComponent(photoId));
+            await vh2EnsureAssetUrls(timeline,preview.referenceAssetIds);const references=await Promise.all(preview.referenceAssetIds.map(id=>vh2PhotoData(vh2PhotoAssetUrl(worldId,id,timeline))));
             const manifest={provider:preview.provider,model:preview.model,promptPreview:preview.prompt,referenceHashes:[]};
             return {snapshot,frozen,context:{...snapshot.photoContext,style:snapshot.companion.photoStyle,direction:snapshot.companion.photoDirection||''},previous:preview.referenceAssetIds.some(id=>!(snapshot.referenceAssets||[]).some(r=>r.assetId===id))?{}:null,bibleReferences:references,manifest,references,providerVersion:preview.providerVersion};
         }
@@ -524,7 +612,7 @@ async function vh2PreparePhoto(companion,timeline,photoId,authored=safeJsonClone
         const context={...snapshot.photoContext,roomId:'',style:snapshot.companion.photoStyle||authored.photoStyle,direction:snapshot.companion.photoDirection??authored.photoDirection??'',personality:snapshot.companion.personality||''};
         const previous=context.referenceStudy?null:companionPhotoPrevious(history.filter(m=>(m.photoContext?.atMs||m.timestamp)<=snapshot.photoContext.atMs),context,authored.photoContinuityMinutes??90,true);
         if(previous?.photo){previous.photo=await vh2PhotoData(previous.photo);context.style=previous.photoContext.style||context.style;context.direction=previous.photoContext.direction??context.direction;}
-        const bibleReferences=await Promise.all((snapshot.referenceAssets||[]).map(e=>vh2PhotoData(vh2PhotoAssetUrl(worldId,e.assetId))));
+        await vh2EnsureAssetUrls(timeline,(snapshot.referenceAssets||[]).map(e=>e.assetId));const bibleReferences=await Promise.all((snapshot.referenceAssets||[]).map(e=>vh2PhotoData(vh2PhotoAssetUrl(worldId,e.assetId,timeline))));
         if(context.assetStudy?.role==='identity'&&!bibleReferences.length&&authored.basePhoto)bibleReferences.push(await vh2PhotoData(authored.basePhoto));
         context.bibleRoles=(snapshot.referenceAssets||[]).map(e=>({role:e.role,label:e.label}));
         const references=await Promise.all(companionPhotoReferences(frozen,snapshot.scene,{photoContext:context,previousPhoto:previous,bibleReferences}).map(source=>vh2PhotoData(source)));
@@ -539,7 +627,7 @@ async function vh2GeneratePhoto(companion,timeline,scene,captureType,destination
     vh2PhotoLocks.add(timeline.id);
     // Freeze browser-owned visual configuration before any asynchronous work.
     const authored=safeJsonClone(companion),history=safeJsonClone(timeline.messages);
-    for(const p of timeline.vh2.photos||[])if(p.status==='stored')history.push({type:'photo',photo:vh2PhotoAssetUrl(timeline.vh2.worldId,p.assetId),timestamp:p.at,photoContext:p.photoContext});
+    for(const p of timeline.vh2.photos||[])if(p.status==='stored')history.push({type:'photo',photo:vh2PhotoAssetUrl(timeline.vh2.worldId,p.assetId,timeline),timestamp:p.at,photoContext:p.photoContext});
     history.sort((a,b)=>a.timestamp-b.timestamp);
     try{
         if(!existingPhotoId)await vh2Enqueue(timeline,'capture_photo',{scene,captureType,destination});
@@ -551,7 +639,7 @@ async function vh2GeneratePhoto(companion,timeline,scene,captureType,destination
             if(!receipt?.jobId)throw Error('The generation job was not confirmed. Check Image activity.');
             const until=Date.now()+10*60*1000;
             while(Date.now()<until){
-                await vh2Poll(companion,timeline,{force:true,throwOnError:true});
+                await vh2Poll(companion,timeline,{force:true,throwOnError:true,lightweight:'jobs'});
                 const photo=timeline.vh2.photos?.find(p=>p.id===photoId),job=timeline.vh2.providerJobs?.find(j=>j.id===receipt.jobId);
                 const view=vh2ImageJobPresentation(photo,job);onProgress(view.title+' — '+view.detail);
                 if(photo?.assetId)return;
@@ -567,7 +655,7 @@ async function vh2GeneratePhoto(companion,timeline,scene,captureType,destination
         onProgress('waiting for the image provider…');
         const generated=await generateCompanionPhoto(frozen,snapshot.scene,{vh2Capture:true,bibleReferences,photoContext:context,previousPhoto:previous,atMs:context.atMs,captureType:snapshot.captureType,fallbackWithoutReference:false});
         onProgress('importing generated image…');
-        const stable=await stabilizeGeneratedImageSource(generated),image=await vh2PhotoData(stable);
+        const stable=await stabilizeGeneratedImageSource(generated),image=await vh2NormalizeStoredImage(stable);
         await loadGeneratedImage(new Image(),image);
         await vh2Enqueue(timeline,'import_photo',{photoId,image});await vh2Flush(timeline);
         await vh2Poll(companion,timeline);
@@ -577,13 +665,13 @@ async function vh2GeneratePhoto(companion,timeline,scene,captureType,destination
 async function vh2LoadHistory(companion,timeline){
     const link=timeline.vh2;
     const endpoint='/vh2/transcript?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline)+'&before=';
-    let result=await mcpBridgeRequest(endpoint+(link.transcriptBefore||0));
-    if(link.transcriptBefore===undefined&&result.before!==null&&result.messages.every(m=>timeline.messages.some(existing=>existing.id===m.id)))result=await mcpBridgeRequest(endpoint+result.before);
-    const merged=new Map(result.messages.map(m=>[m.id,{...normalizeCompanionMessage({...m,photo:m.assetId&&m.type==='photo'?vh2PhotoAssetUrl(link.worldId,m.assetId):m.photo,audio:m.assetId&&m.type==='voice'?vh2PhotoAssetUrl(link.worldId,m.assetId):m.audio,role:m.role==='assistant'?'companion':m.role,deliveryState:m.role==='assistant'?'delivered':m.readAt?'read':'delivered'}),text:m.text}]));
+    let result=await vh2Request(timeline,endpoint+(link.transcriptBefore||0));
+    if(link.transcriptBefore===undefined&&result.before!==null&&result.messages.every(m=>timeline.messages.some(existing=>existing.id===m.id)))result=await vh2Request(timeline,endpoint+result.before);
+    await vh2EnsureAssetUrls(timeline,result.messages.map(m=>m.assetId));const merged=new Map(result.messages.map(m=>[m.id,{...normalizeCompanionMessage({...m,photo:m.assetId&&m.type==='photo'?vh2PhotoAssetUrl(link.worldId,m.assetId,timeline):m.photo,audio:m.assetId&&m.type==='voice'?vh2PhotoAssetUrl(link.worldId,m.assetId,timeline):m.audio,role:m.role==='assistant'?'companion':m.role,deliveryState:m.role==='assistant'?'delivered':m.readAt?'read':'delivered'}),text:m.text}]));
     for(const message of timeline.messages)merged.set(message.id,message);
     timeline.messages=[...merged.values()].sort((a,b)=>a.timestamp-b.timestamp);link.transcriptBefore=result.before;
     if(getActiveCompanionTimeline(companion.id)===timeline)state.companionThreads[companion.id]=timeline.messages;
-    await saveState();
+    await saveVirtualHumansState();
     if(state.activeCompanionId===companion.id&&getActiveCompanionTimeline(companion.id)===timeline){
         renderCompanionThread();
         const container=document.getElementById('companion-messages');if(container)container.scrollTop=0;
@@ -596,7 +684,7 @@ async function vh2ImportStarterPosts(companion,status){
   if(post.visibility&&post.visibility!=='public'||post.kind==='photo'&&!post.photo){skipped++;continue;}
   if(!post.text&&!post.photo){skipped++;continue;}
   if(status)status.textContent=`Importing starter post ${index+1} of ${companion.startingSocialPosts.length}…`;
-  try{const image=post.photo?await makeWorldVisualPortable(post.photo):'';await vhUiCommand(timeline,'import_starter_post',{sourceId:String(post.id||'starter-'+index),caption:post.text||'',ageDays:Number(post.seedAgeDays)||1,image});imported++;}
+  try{const image=post.photo?await vh2NormalizeStoredImage(post.photo):'';await vhUiCommand(timeline,'import_starter_post',{sourceId:String(post.id||'starter-'+index),caption:post.text||'',ageDays:Number(post.seedAgeDays)||1,image});imported++;}
   catch(error){if(status)status.textContent=`Stopped after ${imported} posts: ${error.message}. Imported posts are kept; retry safely.`;throw error;}
  }
  if(status)status.textContent=`${imported} starter posts available in this life. ${skipped} skipped (private, empty or awaiting a photo). Existing posts and interactions are preserved.`;
@@ -608,13 +696,13 @@ async function vh2ImportStarterProfile(companion,status){
  for(const [index,ref] of (companion.startingReferences||[]).entries()){
   const tag='sref_'+String(ref.id||index).replace(/[^a-zA-Z0-9]/g,'').slice(0,32),entityId=ref.role==='identity'?timeline.vh2.entityId:ref.entityId;
   let existing=(timeline.vh2.bible?.entries||[]).find(e=>e.tags?.includes(tag));
-  if(!existing){await vhUiCommand(timeline,'add_bible_asset',{role:ref.role,entityId,label:ref.label.slice(0,120),tags:[...ref.tags.slice(0,19),tag],image:await makeWorldVisualPortable(ref.image)});existing=(timeline.vh2.bible?.entries||[]).find(e=>e.tags?.includes(tag));}
+  if(!existing){await vhUiCommand(timeline,'add_bible_asset',{role:ref.role,entityId,label:ref.label.slice(0,120),tags:[...ref.tags.slice(0,19),tag],image:await vh2NormalizeStoredImage(ref.image)});existing=(timeline.vh2.bible?.entries||[]).find(e=>e.tags?.includes(tag));}
   if(existing&&ref.status==='approved'&&existing.status!=='approved')await vhUiCommand(timeline,'review_bible_asset',{entryId:existing.id,status:'approved'});
  }
  await vh2ImportStarterPosts(companion,status);
- for(const photo of companion.startingGallery||[]){if(status)status.textContent='Importing gallery photos…';await vhUiCommand(timeline,'import_starter_gallery',{sourceId:photo.id,caption:photo.text||photo.scene||'',ageDays:Number(photo.seedAgeDays)||1,image:await makeWorldVisualPortable(photo.photo)});}
+ for(const photo of companion.startingGallery||[]){if(status)status.textContent='Importing gallery photos…';await vhUiCommand(timeline,'import_starter_gallery',{sourceId:photo.id,caption:photo.text||photo.scene||'',ageDays:Number(photo.seedAgeDays)||1,image:await vh2NormalizeStoredImage(photo.photo)});}
  await vh2SyncStarterClips(companion,timeline);
- timeline.vh2.starterProfilePending=false;await saveState();
+ timeline.vh2.starterProfilePending=false;await saveVirtualHumansState();
  if(status)status.textContent='Starting posts and clips are saved to this life. Existing history is preserved.';
 }
 const vh2StarterClipSyncLocks=new Map();
@@ -630,7 +718,7 @@ async function vh2SyncStarterClips(companion,timeline=getActiveCompanionTimeline
    for(const t of state.companionTimelines?.[companion.id]?.sessions||[]){if(t.vh2?.worldId!==world)continue;const jobs=t.runtime.videoJobs||=[];const old=jobs.find(j=>j.id===clip.id);if(old)Object.assign(old,stored);else jobs.push(safeJsonClone(stored));}
    companion.videoJobs=timeline.runtime.videoJobs;
   }
-  await saveState();
+  await saveVirtualHumansState();
  })();vh2StarterClipSyncLocks.set(world,task);
  try{return await task;}finally{vh2StarterClipSyncLocks.delete(world);}
 }
@@ -655,10 +743,10 @@ function vh2RenderSavedGallery(companion,timeline,content){
   moments.append(card);
  }
  const images=content.querySelector('[data-gallery-ready]');
- for(const photo of [...ready,...published]){const figure=document.createElement('figure');figure.innerHTML=`<img loading="lazy" src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,photo.assetId))}" alt="${escapeHTML(photo.caption||photo.scene||'Saved photo')}"><figcaption>${escapeHTML(posts.some(p=>p.assetId===photo.assetId&&p.status==='published')?'Shared on the social feed':'Private gallery · not posted or sent')}</figcaption>`;images.append(figure);}
+ for(const photo of [...ready,...published]){const figure=document.createElement('figure');figure.innerHTML=`<img loading="lazy" src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,photo.assetId,timeline))}" alt="${escapeHTML(photo.caption||photo.scene||'Saved photo')}"><figcaption>${escapeHTML(posts.some(p=>p.assetId===photo.assetId&&p.status==='published')?'Shared on the social feed':'Private gallery · not posted or sent')}</figcaption>`;images.append(figure);}
  if(!saved.length&&!ready.length&&!published.length)moments.innerHTML='<p class="vh-social-empty">No saved moments yet. Ideas will appear here as life unfolds.</p>';
  const earlier=document.createElement('button');earlier.type='button';earlier.className='tool-btn';earlier.textContent='Load earlier moments';earlier.disabled=link.photoBefore===null;
- earlier.onclick=async()=>{earlier.disabled=true;try{const result=await mcpBridgeRequest('/vh2/library?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline)+'&kind=photo&before='+(link.photoBefore||0));link.libraryPhotos=[...new Map([...(link.libraryPhotos||[]),...result.items].map(p=>[p.id,p])).values()];link.photoBefore=result.before;await saveState();renderCompanionSocialPanel(companion);}catch(error){showToast(error.message,'error');earlier.disabled=false;}};content.querySelector('section').append(earlier);
+ earlier.onclick=async()=>{earlier.disabled=true;try{const result=await vh2Request(timeline,'/vh2/library?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline)+'&kind=photo&before='+(link.photoBefore||0));link.libraryPhotos=[...new Map([...(link.libraryPhotos||[]),...result.items].map(p=>[p.id,p])).values()];link.photoBefore=result.before;await saveVirtualHumansState();renderCompanionSocialPanel(companion);}catch(error){showToast(error.message,'error');earlier.disabled=false;}};content.querySelector('section').append(earlier);
 }
 
 function vh2SleepExplanation(companion,link){
@@ -669,7 +757,7 @@ function vh2SleepExplanation(companion,link){
 }
 
 function vh2OpenFeedPhoto(link,post){
- const d=document.createElement('dialog');d.className='vh-feed-lightbox';d.setAttribute('aria-label','Full photo');d.innerHTML=`<button type="button">Close photo</button><img src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,post.assetId))}" alt="${escapeHTML(post.caption||'Social photograph')}">${post.caption?`<p>${escapeHTML(post.caption)}</p>`:''}`;d.querySelector('button').onclick=()=>d.close();d.addEventListener('close',()=>d.remove(),{once:true});document.body.append(d);d.showModal();
+ const d=document.createElement('dialog');d.className='vh-feed-lightbox';d.setAttribute('aria-label','Full photo');d.innerHTML=`<button type="button">Close photo</button><img src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,post.assetId,timeline))}" alt="${escapeHTML(post.caption||'Social photograph')}">${post.caption?`<p>${escapeHTML(post.caption)}</p>`:''}`;d.querySelector('button').onclick=()=>d.close();d.addEventListener('close',()=>d.remove(),{once:true});document.body.append(d);d.showModal();
 }
 
 function vh2FeedIcon(name){
@@ -713,7 +801,7 @@ function vh2RenderSocial(companion,content,button,author=false){
         if(draft.generationError){const retry=document.createElement('button');retry.type='button';retry.className='tool-btn';retry.textContent='Regenerate post';retry.title='New generation attempt using your provider credits';retry.onclick=async()=>{retry.disabled=true;retry.textContent='Queuing regeneration…';try{await vhUiCommand(timeline,'regenerate_social_draft',{postId:draft.id});renderCompanionSocialPanel(companion);}catch(error){retry.disabled=false;retry.textContent='Regenerate post';showToast(error.message,'error');}};draftHost.append(retry);const dismiss=document.createElement('button');dismiss.type='button';dismiss.className='tool-btn';dismiss.textContent='Dismiss draft without retrying generation';dismiss.onclick=async()=>{dismiss.disabled=true;try{await vhUiCommand(timeline,'dismiss_social_draft',{postId:draft.id});renderCompanionSocialPanel(companion);}catch(error){showToast(error.message,'error');}finally{dismiss.disabled=false;}};draftHost.append(dismiss);}
     }
     for(const [kind,label] of (author?[['photo','Load earlier gallery photos'],['post','Load earlier posts']]:[['post','Load earlier posts']])){
-        const load=document.createElement('button');load.type='button';load.className='tool-btn vh-feed-load';load.textContent=label;load.disabled=link[kind+'Before']===null;load.onclick=async()=>{load.disabled=true;try{const result=await mcpBridgeRequest('/vh2/library?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline)+'&kind='+kind+'&before='+(link[kind+'Before']||0));const key=kind==='photo'?'libraryPhotos':'libraryPosts';link[key]=merge(link[key],result.items);link[kind+'Before']=result.before;await saveState();}catch(error){showToast(error.message,'error');}finally{if(state.activeCompanionId===companion.id&&getActiveCompanionTimeline(companion.id)===timeline)renderCompanionSocialPanel(companion);}};load.hidden=load.disabled;content.append(load);
+        const load=document.createElement('button');load.type='button';load.className='tool-btn vh-feed-load';load.textContent=label;load.disabled=link[kind+'Before']===null;load.onclick=async()=>{load.disabled=true;try{const result=await vh2Request(timeline,'/vh2/library?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline)+'&kind='+kind+'&before='+(link[kind+'Before']||0));const key=kind==='photo'?'libraryPhotos':'libraryPosts';link[key]=merge(link[key],result.items);link[kind+'Before']=result.before;await saveVirtualHumansState();}catch(error){showToast(error.message,'error');}finally{if(state.activeCompanionId===companion.id&&getActiveCompanionTimeline(companion.id)===timeline)renderCompanionSocialPanel(companion);}};load.hidden=load.disabled;content.append(load);
     }
     if(author){
     const available=photos.filter(p=>p.destination!=='reference'&&!posts.some(post=>post.photoId===p.id));
@@ -722,20 +810,20 @@ function vh2RenderSocial(companion,content,button,author=false){
         const select=document.createElement('select');select.className='form-input';select.setAttribute('aria-label','Photo to publish');
         for(const photo of available){const option=document.createElement('option');option.value=photo.id;option.textContent=`${photo.destination==='gallery'?'Gallery':'Previously sent privately'} · ${photo.scene}`;select.append(option);}
         const preview=document.createElement('img');preview.style.cssText='max-width:100%;max-height:240px;object-fit:contain';preview.alt='Selected photograph';
-        const refresh=()=>{const p=available.find(p=>p.id===select.value);preview.src=vh2PhotoAssetUrl(link.worldId,p.assetId);};select.onchange=refresh;refresh();
+        const refresh=()=>{const p=available.find(p=>p.id===select.value);preview.src=vh2PhotoAssetUrl(link.worldId,p.assetId,timeline);};select.onchange=refresh;refresh();
         const caption=document.createElement('textarea');caption.className='form-input';caption.maxLength=1200;caption.placeholder='Optional caption';caption.setAttribute('aria-label','Post caption');caption.value=link.publishCaptionDraft||'';caption.oninput=()=>{link.publishCaptionDraft=caption.value;};
         const submit=document.createElement('button');submit.type='submit';submit.className='tool-btn';submit.textContent='Publish to simulated profile';
         form.append(select,preview,caption,submit);form.onsubmit=async event=>{event.preventDefault();submit.disabled=true;try{await vhUiCommand(timeline,'publish_photo',{photoId:select.value,caption:caption.value});link.publishCaptionDraft='';caption.value='';}catch(error){showToast(error.message,'error');}finally{submit.disabled=false;if(state.activeCompanionId===companion.id&&getActiveCompanionTimeline(companion.id)===timeline)renderCompanionSocialPanel(companion);if(author&&state.view==='vhWorkspace')vhWorkspaceSpecial(true);}};content.append(form);
     }else{const hint=document.createElement('p');hint.className='form-hint';hint.textContent='Use Photo capture preview to save a photo to the gallery. Capturing does not publish it.';content.append(hint);}
     }
-    const act=async(type,values)=>{try{await vhUiCommand(timeline,type,values);if(type==='comment_post'&&link.socialDrafts?.[values.postId]===values.text){delete link.socialDrafts[values.postId];content._vhFeedSignature=null;}await vh2Poll(companion,timeline);if(values.postId&&!link.socialPosts.some(p=>p.id===values.postId)){const result=await mcpBridgeRequest('/vh2/library?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline)+'&kind=post&id='+encodeURIComponent(values.postId));if(result.item){link.libraryPosts=merge(link.libraryPosts,[result.item]);await saveState();}}}catch(error){showToast(error.message,'error');}if(state.activeCompanionId===companion.id&&getActiveCompanionTimeline(companion.id)===timeline)renderCompanionSocialPanel(companion);if(author&&state.view==='vhWorkspace')vhWorkspaceSpecial(true);};
+    const act=async(type,values)=>{try{await vhUiCommand(timeline,type,values);if(type==='comment_post'&&link.socialDrafts?.[values.postId]===values.text){delete link.socialDrafts[values.postId];content._vhFeedSignature=null;}await vh2Poll(companion,timeline);if(values.postId&&!link.socialPosts.some(p=>p.id===values.postId)){const result=await vh2Request(timeline,'/vh2/library?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline)+'&kind=post&id='+encodeURIComponent(values.postId));if(result.item){link.libraryPosts=merge(link.libraryPosts,[result.item]);await saveVirtualHumansState();}}}catch(error){showToast(error.message,'error');}if(state.activeCompanionId===companion.id&&getActiveCompanionTimeline(companion.id)===timeline)renderCompanionSocialPanel(companion);if(author&&state.view==='vhWorkspace')vhWorkspaceSpecial(true);};
     for(const post of posts.filter(p=>p.status==='published').slice().reverse()){
         const card=document.createElement('article');card.className='companion-social-post';
         const handle=String(companion.name||'profile').replace(/[^a-z0-9]/gi,'').toLowerCase();
         const avatar=companion.profilePhoto?`<img src="${escapeHTML(companion.profilePhoto)}" alt="">`:escapeHTML(companionInitials(companion.name));
         const date=new Date(post.publishedAt),stamp=date.toLocaleDateString(undefined,{month:'short',day:'numeric',...(date.getFullYear()!==new Date().getFullYear()?{year:'numeric'}:{})});
         card.dataset.socialPost=post.id;
-        card.innerHTML=`<header class="vh-feed-post-head"><span class="vh-feed-avatar">${avatar}</span><div><strong>${escapeHTML(companion.name)}</strong><span>@${escapeHTML(handle)} · <time datetime="${date.toISOString()}" title="${escapeHTML(date.toLocaleString())}">${escapeHTML(stamp)}</time></span></div><details class="vh-feed-post-info"><summary aria-label="Post details">•••</summary><p>${post.origin==='authored_starter'?'From their starting profile':escapeHTML(post.captureContext?.placeLabel||'A moment from their life')}</p></details></header>${post.caption?`<p class="vh-feed-caption">${escapeHTML(post.caption)}</p>`:''}${post.assetId?`<button type="button" class="vh-feed-photo" aria-label="Open full photo"><img loading="lazy" src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,post.assetId))}" alt="${escapeHTML(post.caption||'Photo from '+companion.name)}"></button>`:''}<div class="vh-feed-actions"></div>`;
+        card.innerHTML=`<header class="vh-feed-post-head"><span class="vh-feed-avatar">${avatar}</span><div><strong>${escapeHTML(companion.name)}</strong><span>@${escapeHTML(handle)} · <time datetime="${date.toISOString()}" title="${escapeHTML(date.toLocaleString())}">${escapeHTML(stamp)}</time></span></div><details class="vh-feed-post-info"><summary aria-label="Post details">•••</summary><p>${post.origin==='authored_starter'?'From their starting profile':escapeHTML(post.captureContext?.placeLabel||'A moment from their life')}</p></details></header>${post.caption?`<p class="vh-feed-caption">${escapeHTML(post.caption)}</p>`:''}${post.assetId?`<button type="button" class="vh-feed-photo" aria-label="Open full photo"><img loading="lazy" src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,post.assetId,timeline))}" alt="${escapeHTML(post.caption||'Photo from '+companion.name)}"></button>`:''}<div class="vh-feed-actions"></div>`;
         card.querySelector('.vh-feed-photo')?.addEventListener('click',()=>vh2OpenFeedPhoto(link,post));
         const actions=card.querySelector('.vh-feed-actions'),like=document.createElement('button');like.type='button';like.className='vh-feed-like'+(post.likedByPlayer?' is-liked':'');like.setAttribute('aria-pressed',String(!!post.likedByPlayer));like.setAttribute('aria-label',post.likedByPlayer?'Unlike post':'Like post');like.innerHTML=vh2FeedIcon('heart')+'<span>'+(post.likedByPlayer?'Liked':'Like')+'</span>';like.onclick=async()=>{like.disabled=true;try{await act('like_post',{postId:post.id,liked:!post.likedByPlayer});}finally{like.disabled=false;}};actions.append(like);
         const comments=document.createElement('details');comments.className='vh-feed-comments';comments.open=!!link.socialOpenComments?.[post.id];comments.innerHTML=`<summary>${post.comments.length?'View '+post.comments.length+' comment'+(post.comments.length===1?'':'s'):'Add a comment'}</summary>`;comments.ontoggle=()=>{if(comments.isConnected)(link.socialOpenComments||={})[post.id]=comments.open;};
@@ -769,19 +857,311 @@ function vh2RenderAgency(host,companion,timeline){
     editor.append(trace);host.append(editor);
 }
 
+async function vh2LocalMirrorStatus(timeline){
+ if(!timeline?.vh2?.worldId)return {available:false};
+ return mcpBridgeRequest('/vh2/mirror?worldId='+encodeURIComponent(timeline.vh2.worldId),{timeoutMs:15000});
+}
+async function vh2SyncLocalMirror(timeline,options={}){
+ const link=timeline?.vh2;if(!link?.hostId||!link.worldId)throw Error('Only a cloud-hosted life can update a local mirror.');
+ const existing=vh2MirrorLocks.get(link.worldId);if(existing)return existing;
+ const operation=(async()=>{
+  if(!options.force&&link.localMirrorRevision>=link.revision)return {available:true,worldId:link.worldId,revision:link.localMirrorRevision,savedAt:link.localMirrorSavedAt};
+  const response=await vh2Fetch(timeline,'/vh2/backup?worldId='+encodeURIComponent(link.worldId),{timeoutMs:120000});
+  const archive=await response.blob();
+  const result=await mcpBridgeRequest('/vh2/mirror?worldId='+encodeURIComponent(link.worldId),{method:'POST',body:archive,timeoutMs:120000});
+  if(timeline.vh2===link&&link.hostId){for(const store of Object.values(state.companionTimelines||{}))for(const session of store.sessions||[])if(session.vh2?.worldId===link.worldId&&session.vh2?.hostId===link.hostId){session.vh2.localMirrorRevision=result.revision;session.vh2.localMirrorSavedAt=result.savedAt;session.vh2.localMirrorError='';}await saveVirtualHumansState();}
+  return result;
+ })().catch(async error=>{if(timeline?.vh2===link){for(const store of Object.values(state.companionTimelines||{}))for(const session of store.sessions||[])if(session.vh2?.worldId===link.worldId&&session.vh2?.hostId===link.hostId){session.vh2.localMirrorError=error.message;session.vh2.localMirrorAttemptedAt=Date.now();}await saveVirtualHumansState();}throw error;}).finally(()=>vh2MirrorLocks.delete(link.worldId));
+ vh2MirrorLocks.set(link.worldId,operation);return operation;
+}
+function vh2ScheduleLocalMirror(timeline,revision){
+ const link=timeline?.vh2;if(!link?.hostId||!link.worldId||!Number.isInteger(revision)||revision<=(link.localMirrorRevision||0)||vh2MirrorTimers.has(link.worldId))return;
+ const elapsed=Date.now()-(link.localMirrorSavedAt||0),delay=Math.max(3000,60000-elapsed);
+ const timer=setTimeout(()=>{vh2MirrorTimers.delete(link.worldId);if(timeline?.vh2===link&&link.hostId)vh2SyncLocalMirror(timeline).catch(()=>{});},delay);
+ vh2MirrorTimers.set(link.worldId,timer);
+}
+function vh2PrivateHostConfig(baseUrl,accessToken){
+ let parsed;try{parsed=new URL(String(baseUrl||'').trim());}catch(_){throw Error('Enter the complete private host URL.');}
+ const local=['localhost','127.0.0.1','::1'].includes(parsed.hostname);
+ if(parsed.username||parsed.password||(!local&&parsed.protocol!=='https:')||(local&&!['http:','https:'].includes(parsed.protocol)))throw Error('Private hosts must use HTTPS. Plain HTTP is allowed only for localhost testing.');
+ const token=String(accessToken||'').trim();if(token.length<32)throw Error('The access token must contain at least 32 characters.');
+ return {baseUrl:parsed.origin+parsed.pathname.replace(/\/+$/,''),accessToken:token};
+}
+async function vh2VerifyPrivateHost(config,timeoutMs=15000){
+ const health=await mcpBridgeRequest('/health',{...config,timeoutMs});
+ if(health?.capabilities?.privateVh2Host!==true||health.capabilities.vh2SelfHostProtocol!==1)throw Error('That address is not a compatible private VH2 host. No life was uploaded.');
+ return health;
+}
+async function vh2FreezeForTransfer(timeline){
+ await vh2Flush(timeline);const link=timeline.vh2;
+ const projection=await vh2Request(timeline,'/vh2/projection?worldId='+encodeURIComponent(link.worldId));
+ const flags={running:projection.state.running===true,autoReplies:projection.state.integration?.autoReplies===true,revision:projection.revision};
+ if(flags.autoReplies)await vhUiCommand(timeline,'configure_auto_replies',{enabled:false});
+ if(flags.running)await vhUiCommand(timeline,'set_running',{running:false});
+ const readiness=await vh2Request(timeline,'/vh2/transfer-readiness?worldId='+encodeURIComponent(link.worldId));
+ if(!readiness.ready){const item=readiness.active?.[0];throw Error(`The source is paused, but ${item?.kind||'provider'} work is still ${item?.status||'in progress'}. Wait for it to settle, review unknown outcomes if shown, then retry the transfer.`);}
+ flags.revision=(await vh2Request(timeline,'/vh2/projection?worldId='+encodeURIComponent(link.worldId))).revision;
+ return flags;
+}
+async function vh2MoveToPrivateHost(companion,timeline,rawConfig,status){
+ if(timeline.vh2.hostId)throw Error('This life is already hosted elsewhere.');
+ if(companionTextProviderId(companion)==='local')throw Error('This human’s current text provider runs only on this computer. Choose a cloud-capable text provider before moving this life.');
+ const priorImageProvider=safeJsonClone(timeline.vh2.imageProvider||{});
+ const config=vh2PrivateHostConfig(rawConfig.baseUrl,rawConfig.accessToken);status.textContent='Testing the private host…';
+ await vh2VerifyPrivateHost(config);
+ status.textContent='Checking for unfinished provider work…';const flags=await vh2FreezeForTransfer(timeline);
+ status.textContent='Packing current life, conversations, memories and media into a verified checkpoint…';const archive=await (await vh2Fetch(timeline,'/vh2/transfer-checkpoint?worldId='+encodeURIComponent(timeline.vh2.worldId),{timeoutMs:1800000})).blob();
+ status.textContent='Moving the checkpoint directly to your private host. Large media libraries can take several minutes…';let result;
+ try{result=await mcpBridgeRequest('/vh2/restore',{method:'POST',body:archive,timeoutMs:1800000,...config});}
+ catch(error){
+  if(error.status!==409)throw error;
+  const existing=await mcpBridgeRequest('/vh2/projection?worldId='+encodeURIComponent(timeline.vh2.worldId),{...config,timeoutMs:15000});
+  if(existing.revision<flags.revision+1||existing.state.integration?.sourceCompanionId!==companion.id)throw Error('That host already contains a different life with this identity. Use a fresh self-host data volume.');
+  result={worldId:existing.worldId,revision:existing.revision};
+ }
+ if(result.worldId!==timeline.vh2.worldId)throw Error('The private host returned the wrong life identity. The local life remains paused.');
+ const hostId='vh_host_'+crypto.randomUUID();state.globalSettings.vh2SelfHosts||={};state.globalSettings.vh2SelfHosts[hostId]={name:'Private VH2 host',...config,createdAt:Date.now()};
+ vh2SetWorldHost(companion.id,timeline.vh2.worldId,hostId);await vh2PersistHostOwnership();
+ status.textContent='Connecting the text provider on the private host…';
+ try{
+  await vh2SyncProvider(companion,{timeline});
+  let photoWarning='';
+  if(priorImageProvider.enabled){
+   if(priorImageProvider.provider==='openrouter'){
+    timeline.vh2.imageProvider=priorImageProvider;
+    try{await vh2SyncImageConfiguration(companion,timeline,{fromStudio:true});}catch(error){photoWarning=' Reconnect background photos on the private host: '+error.message;}
+   }else photoWarning=' Re-enter the background image provider credential on this private host before enabling automatic photos.';
+  }
+  if(flags.autoReplies)await vhUiCommand(timeline,'configure_auto_replies',{enabled:true});
+  if(flags.running)await vhUiCommand(timeline,'set_running',{running:true});
+  await vh2Poll(companion,timeline,{force:true,throwOnError:true});
+  status.textContent='Cloud is active. Saving the first local mirror…';
+  await vh2SyncLocalMirror(timeline,{force:true});
+  status.textContent='Cloud is primary. The original local life is paused and its mirror is current.'+photoWarning;
+  vh2RefreshControlsAfterHostChange(companion);
+ }catch(error){await vh2PersistHostOwnership();throw Error('The cloud copy was created safely but remains paused: '+error.message);}
+}
+async function vh2PromoteLocalMirror(companion,timeline,status,flags,options={}){
+ const oldWorldId=timeline.vh2.worldId,oldHostId=timeline.vh2.hostId;
+ timeline.vh2.handoffId||=crypto.randomUUID();await saveVirtualHumansState();
+ status.textContent='Promoting the saved local mirror…';const query='?worldId='+encodeURIComponent(oldWorldId)+'&companionId='+encodeURIComponent(companion.id)+'&importId='+encodeURIComponent(timeline.vh2.handoffId);
+ const result=await mcpBridgeRequest('/vh2/mirror/promote'+query,{method:'POST',timeoutMs:120000}),restored=result.worlds?.[0];if(!restored)throw Error('The local service did not return the promoted life mapping.');
+ for(const session of state.companionTimelines?.[companion.id]?.sessions||[])if(session.vh2?.worldId===oldWorldId){const persona=session.vh2.conversationPersonaId||session.vh2.canonicalPersonaId;session.vh2.worldId=restored.canonicalWorldId||restored.worldId;session.vh2.conversationPersonaId=restored.personaMap?.[persona]||persona;session.vh2.canonicalPersonaId=restored.personaMap?.[session.vh2.canonicalPersonaId]||session.vh2.canonicalPersonaId;for(const key of ['hostId','handoffId','localMirrorRevision','localMirrorSavedAt','localMirrorError','localMirrorAttemptedAt'])delete session.vh2[key];session.vh2.assetUrls={};session.messages=[];}
+ if(options.emergency){const record=state.globalSettings.vh2SelfHosts?.[oldHostId];if(record){record.detachedAt=Date.now();record.name='Detached after local failover';record.accessToken='';}}
+ else if(!Object.values(state.companionTimelines||{}).some(store=>(store.sessions||[]).some(session=>session.vh2?.hostId===oldHostId)))delete state.globalSettings.vh2SelfHosts[oldHostId];
+ await vh2PersistHostOwnership();
+ try{await vh2SyncProvider(companion,{timeline});if(flags.autoReplies)await vhUiCommand(timeline,'configure_auto_replies',{enabled:true});if(flags.running)await vhUiCommand(timeline,'set_running',{running:true});await vh2Poll(companion,timeline,{force:true,throwOnError:true});status.textContent=options.emergency?'The saved local mirror is now active. The unreachable cloud copy was detached and may contain newer changes.':'This device is now primary. The cloud life is paused.';vh2RefreshControlsAfterHostChange(companion);}
+ catch(error){throw Error('The local mirror was promoted but remains paused: '+error.message);}
+}
+async function vh2BringHome(companion,timeline,status){
+ if(!timeline.vh2.hostId)throw Error('This life is already on this device.');
+ status.textContent='Pausing cloud and checking unfinished provider work…';const flags=await vh2FreezeForTransfer(timeline);
+ status.textContent='Saving the final cloud revision to the local mirror…';await vh2SyncLocalMirror(timeline,{force:true});
+ return vh2PromoteLocalMirror(companion,timeline,status,flags);
+}
+async function vh2EmergencyLocalFailover(companion,timeline,status){
+ if(!timeline.vh2.hostId)throw Error('This life is already on this device.');
+ let cloudReachable=false;try{await vh2VerifyPrivateHost(vh2HostOptions(timeline),5000);cloudReachable=true;}catch(_){}
+ if(cloudReachable)throw Error('The private cloud is reachable. Use “Switch back to this computer” so its final revision is synced and the cloud life is paused first.');
+ const mirror=await vh2LocalMirrorStatus(timeline);if(!mirror.available)throw Error(mirror.error||'No local mirror has been saved for this life yet.');
+ status.textContent='Cloud is unreachable. Promoting local mirror revision '+mirror.revision+' saved '+new Date(mirror.savedAt).toLocaleString()+'…';
+ const flags={running:timeline.vh2.running!==false,autoReplies:timeline.vh2.autoReplies!==false};
+ return vh2PromoteLocalMirror(companion,timeline,status,flags,{emergency:true});
+}
+function vh2GeneratePrivateServerKey(){
+ const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);
+ return [...bytes].map(value=>value.toString(16).padStart(2,'0')).join('');
+}
+async function vh2CopyText(value){
+ if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(value);return;}
+ const temporary=document.createElement('textarea');temporary.value=value;temporary.setAttribute('readonly','');temporary.style.cssText='position:fixed;left:-10000px;top:0';document.body.append(temporary);temporary.select();
+ try{if(!document.execCommand('copy'))throw Error('Copy is not available in this browser.');}finally{temporary.remove();}
+}
+function vh2PrivateHostFields(container,prefill={}){
+ const fields=document.createElement('div');fields.className='vh-cloud-fields';
+ const urlId='vh-cloud-url-'+crypto.randomUUID(),urlHelpId=urlId+'-help';
+ const urlGroup=document.createElement('div');urlGroup.className='vh-cloud-field';
+ const urlLabel=document.createElement('label');urlLabel.className='form-label';urlLabel.htmlFor=urlId;urlLabel.textContent='Server address';
+ const url=document.createElement('input');url.id=urlId;url.type='url';url.className='form-input';url.placeholder='https://your-service.up.railway.app';url.value=prefill.baseUrl||'';url.autocomplete='url';url.required=true;url.setAttribute('aria-describedby',urlHelpId);
+ const urlHint=document.createElement('small');urlHint.className='vh-cloud-field-hint';urlHint.id=urlHelpId;urlHint.textContent='Paste the HTTPS address your host created after the service deployed. For Railway, copy the generated public domain from Networking.';
+ urlGroup.append(urlLabel,url,urlHint);
+ const tokenId='vh-cloud-token-'+crypto.randomUUID(),tokenHelpId=tokenId+'-help';
+ const tokenGroup=document.createElement('div');tokenGroup.className='vh-cloud-field';
+ const tokenLabel=document.createElement('label');tokenLabel.className='form-label';tokenLabel.htmlFor=tokenId;tokenLabel.textContent='Private server key';
+ const token=document.createElement('input');token.id=tokenId;token.type='password';token.className='form-input';token.autocomplete='off';token.placeholder='Paste the private key from host setup';token.required=true;token.minLength=32;token.setAttribute('aria-describedby',tokenHelpId);
+ const tokenHint=document.createElement('small');tokenHint.className='vh-cloud-field-hint';tokenHint.id=tokenHelpId;tokenHint.textContent='Use the private key created during host setup—not your hosting password or AI key. It stays on this device and is omitted from exports.';
+ tokenGroup.append(tokenLabel,token,tokenHint);fields.append(urlGroup,tokenGroup);container.append(fields);return {url,token};
+}
+function vh2StorageByteSize(bytes){
+ const value=Math.max(0,Number(bytes)||0),units=['B','KB','MB','GB','TB'];let amount=value,index=0;
+ while(amount>=1024&&index<units.length-1){amount/=1024;index++;}
+ const digits=index===0?0:amount>=100?0:amount>=10?1:2;
+ return amount.toLocaleString(undefined,{minimumFractionDigits:digits,maximumFractionDigits:digits})+' '+units[index];
+}
+function vh2RenderStorageControls(panel,timeline){
+ const storage=document.createElement('section');storage.className='vh-life-storage';storage.setAttribute('aria-label','Life service storage');
+ storage.innerHTML='<div class="vh-storage-heading"><span class="vh-storage-scope">Whole service</span><div><h3>Life service storage</h3><p>See what the active VH2 service is keeping, and resolve old engine detail without flattening the person.</p></div></div><div class="vh-storage-retention" aria-label="How life history is retained"><div><span>Recent detail</span><strong>Fine-grained engine steps</strong><p>A bounded recent window stays available for diagnosis.</p></div><div><span>Permanent</span><strong>Priority landmarks</strong><p>Important and tentpole changes remain in the life outline.</p></div><div><span>Current truth</span><strong>Verified checkpoint</strong><p>The complete present state remains replayable after resolution.</p></div></div><p class="vh-storage-durable"><strong>Kept exactly:</strong> the chat transcript, current person and relationships, authored facts, media, important memories, tentpoles and anything creator-pinned. Routine memories keep 30 days/up to 512 records; notable memories keep one year/up to 2,048. Old texture—like an ordinary dinner 100 nights ago—can resolve without erasing who this person is.</p>';
+ const readout=document.createElement('div');readout.className='vh-storage-readout';readout.hidden=true;
+ readout.innerHTML='<div class="vh-storage-metrics"><div><span>Service on disk</span><strong data-storage-total>—</strong><small data-storage-files></small></div><div><span>Space already reusable</span><strong data-storage-reclaimable>—</strong><small>Unused database pages; optimization can also resolve old detail.</small></div><div><span>This life’s media</span><strong data-storage-media>—</strong><small data-storage-service-media></small></div><div><span>This life’s current state</span><strong data-storage-state>—</strong><small data-storage-state-detail>The complete verified present, not a summary.</small></div></div><div class="vh-storage-history"><span class="vh-storage-history-icon" aria-hidden="true">↳</span><div><strong data-storage-detail>—</strong><p data-storage-resolution></p></div><div><strong data-storage-lifetime>—</strong><p>Lifetime revisions still count every accepted change.</p></div><div><strong data-storage-landmark-count>—</strong><p>Priority landmarks stay permanent.</p></div></div><div class="vh-storage-landmarks"><div class="vh-storage-subheading"><div><h4>Permanent landmarks</h4><p>Recent important and tentpole events, newest first.</p></div><span>Priority 2–3</span></div><ol data-storage-landmarks></ol><p class="vh-storage-empty" data-storage-landmark-empty hidden>No important landmarks yet. They will appear here as the life reaches meaningful turning points.</p></div>';
+ const maintenance=document.createElement('div');maintenance.className='vh-storage-maintenance';
+ maintenance.innerHTML='<div><h4>Resolve old detail and return space to disk</h4><p>This maintenance affects every life stored by this service. It replaces old low-level engine steps with verified checkpoints, removes stale routine/notable memory rows outside the visible retention policy, and compacts completed provider jobs; those records cannot be inspected afterward.</p><p data-storage-pause></p></div>';
+ const actions=document.createElement('div');actions.className='vh-storage-actions';
+ const refresh=document.createElement('button');refresh.type='button';refresh.className='tool-btn';refresh.textContent='Refresh storage';
+ const optimize=document.createElement('button');optimize.type='button';optimize.className='btn btn-primary';optimize.textContent='Optimize service storage';
+ actions.append(refresh,optimize);maintenance.append(actions);readout.append(maintenance);
+ const status=document.createElement('p');status.className='vh-storage-status';status.setAttribute('role','status');status.setAttribute('aria-live','polite');status.textContent=timeline?.vh2?.worldId?'Storage details load when this panel opens.':'Start this life to inspect its service storage.';
+ storage.append(readout,status);panel.append(storage);
+ if(!timeline?.vh2?.worldId)return;
+ let loaded=false,loading=false;
+ const number=value=>(Math.max(0,Number(value)||0)).toLocaleString();
+ const set=(selector,value)=>{const node=readout.querySelector(selector);if(node)node.textContent=value;};
+ const renderLandmarks=items=>{
+  const list=readout.querySelector('[data-storage-landmarks]'),empty=readout.querySelector('[data-storage-landmark-empty]');list.replaceChildren();
+  const visible=(Array.isArray(items)?items:[]).slice(0,6);empty.hidden=visible.length>0;
+  for(const item of visible){
+   const row=document.createElement('li'),priority=document.createElement('span'),copy=document.createElement('div'),summary=document.createElement('strong'),meta=document.createElement('small');
+   priority.className='vh-storage-priority is-'+(Number(item.priority)===3?'tentpole':'important');priority.textContent=Number(item.priority)===3?'Tentpole':'Important';
+   summary.textContent=item.summary||String(item.kind||'Life landmark').toLowerCase().replaceAll('_',' ');
+   const raw=Number(item.at)||0,date=new Date(raw>0&&raw<1e12?raw*1000:raw),dateText=Number.isFinite(date.getTime())?date.toLocaleString():'Time unavailable';
+   meta.textContent=dateText+' · revision '+number(item.sequence);copy.append(summary,meta);row.append(priority,copy);list.append(row);
+  }
+ };
+ const render=data=>{
+  readout.hidden=false;
+  set('[data-storage-total]',vh2StorageByteSize(data.serviceDiskBytes));
+  const fileParts=[vh2StorageByteSize(data.databaseFileBytes)+' database'];if(Number(data.walBytes))fileParts.push(vh2StorageByteSize(data.walBytes)+' active write log');if(Number(data.sharedMemoryBytes))fileParts.push(vh2StorageByteSize(data.sharedMemoryBytes)+' shared memory');
+  set('[data-storage-files]',fileParts.join(' · '));
+  set('[data-storage-reclaimable]',vh2StorageByteSize(data.reclaimableBytes));
+  set('[data-storage-media]',vh2StorageByteSize(data.photoBytes)+' · '+number(data.photoCount)+' file'+(Number(data.photoCount)===1?'':'s'));
+  const captureBytes=Number(data.servicePhotoSnapshotBytes)||0,legacyCaptures=Number(data.serviceLegacyPhotoSnapshotCount)||0;
+  let mediaDetail=vh2StorageByteSize(data.servicePhotoBytes)+' media across this service · '+vh2StorageByteSize(captureBytes)+' frozen photo context.';
+  if(legacyCaptures)mediaDetail+=' '+number(legacyCaptures)+' legacy capture'+(legacyCaptures===1?' is':'s are')+' resolved during optimization.';
+  else mediaDetail+=' New captures keep only the fields needed to reproduce the image.';
+  mediaDetail+=' New image imports are resized, compressed and deduplicated; existing media is not degraded.';
+  set('[data-storage-service-media]',mediaDetail);
+  set('[data-storage-state]',vh2StorageByteSize(data.stateBytes));
+  const memory=data.memoryPriorities||{};
+  set('[data-storage-state-detail]','Complete verified present · '+number(data.memoryCount)+' indexed memories ('+number(memory.important)+' important, '+number(memory.tentpole)+' tentpole).');
+  set('[data-storage-detail]',number(data.retainedEventRows)+' recent detailed step'+(Number(data.retainedEventRows)===1?'':'s'));
+  set('[data-storage-lifetime]',number(data.lifetimeRevision)+' lifetime revision'+(Number(data.lifetimeRevision)===1?'':'s'));
+  set('[data-storage-landmark-count]',number(data.landmarkCount)+' permanent landmark'+(Number(data.landmarkCount)===1?'':'s'));
+  const over=Number(data.retainedEventRows)>Number(data.eventWindowLimit),resolved=Number(data.retainedEventRows)<=2&&Number(data.lifetimeRevision)>Number(data.retainedEventRows);
+  set('[data-storage-resolution]',over?'Background resolution is pending; the recent-detail window is '+number(data.eventWindowLimit)+' steps.':resolved?'Older routine detail has been resolved into a verified checkpoint.':'Within the '+number(data.eventWindowLimit)+'-step recent-detail window.');
+  const running=timeline.vh2.running!==false,pause=readout.querySelector('[data-storage-pause]');optimize.disabled=running;
+  pause.className=running?'is-warning':'';pause.textContent=running?'Pause this life first. Every other life on this service must also be paused before optimization can begin.':'Ready on this life. Make sure every other life on this service is paused and provider work has finished.';
+ };
+ const load=async(force=false)=>{
+  if(loading||loaded&&!force)return;loading=true;refresh.disabled=true;status.classList.remove('is-error','is-success');status.textContent='Reading storage totals and permanent landmarks…';
+  try{
+   const world=encodeURIComponent(timeline.vh2.worldId),[data,outline]=await Promise.all([
+    vh2Request(timeline,'/vh2/storage?worldId='+world),
+    vh2Request(timeline,'/vh2/landmarks?worldId='+world+'&minimumPriority=2'),
+   ]);
+   render(data);renderLandmarks(outline.landmarks);loaded=true;status.textContent='Storage totals are current for this service.';
+  }catch(error){status.classList.add('is-error');status.textContent='Storage details could not be loaded. '+error.message;}
+  finally{loading=false;refresh.disabled=false;}
+ };
+ refresh.onclick=()=>load(true);
+ optimize.onclick=async()=>{
+  if(timeline.vh2.running!==false)return;
+  if(!confirm('Optimize storage for every life on this service?\n\nCurrent state, exact chats, relationships, authored facts, photos, important memories, tentpoles and creator-pinned memories are preserved. Old low-level engine steps, stale routine/notable memories and completed-job payloads are removed and cannot be inspected afterward. Every life must be paused.'))return;
+  optimize.disabled=true;refresh.disabled=true;status.classList.remove('is-error','is-success');status.textContent='Optimizing the whole life service… Keep Horde Studio and the server open. A large database can take several minutes.';
+  try{
+   const result=await vh2Request(timeline,'/vh2/storage/optimize?worldId='+encodeURIComponent(timeline.vh2.worldId),{method:'POST',timeoutMs:1800000});
+   loaded=false;await load(true);const reclaimed=vh2StorageByteSize(result.bytesReclaimed);status.classList.add('is-success');status.textContent='Optimization complete. '+reclaimed+' returned to disk; current state and durable human history were verified.';showToast('Life service storage optimized. '+reclaimed+' returned to disk.','success');
+  }catch(error){status.classList.add('is-error');status.textContent='Storage was not optimized. '+error.message;showToast(error.message,'error');}
+  finally{refresh.disabled=false;optimize.disabled=timeline.vh2.running!==false;}
+ };
+ panel.addEventListener('toggle',()=>{if(panel.open)load();});
+}
 function vh2RenderBackupControls(host,companion,timeline){
-    const panel=document.createElement('details');panel.innerHTML='<summary>Timeline backup & recovery</summary><p class="form-hint">Archive this service timeline with its event history, conversations and generated images. Provider credentials and the separate Horde Studio settings/reference library are excluded. Restores pause the life and automatic replies, and never overwrite an existing timeline.</p>';
-    if(timeline?.vh2?.worldId){const download=document.createElement('button');download.type='button';download.className='tool-btn';download.textContent='Download VH2 timeline backup';download.onclick=async()=>{download.disabled=true;try{const response=await fetch(mcpBridgeBase()+'/vh2/backup?worldId='+encodeURIComponent(timeline.vh2.worldId));if(!response.ok)throw Error((await response.json()).error||'Backup failed.');const url=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=url;a.download='horde-vh2-'+timeline.vh2.worldId+'.vh2.gz';a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);}catch(error){showToast(error.message,'error');}finally{download.disabled=false;}};panel.append(download);}
-    const label=document.createElement('label');label.className='form-label';label.textContent='Restore a VH2 timeline archive';const file=document.createElement('input');file.type='file';file.accept='.gz,application/gzip';label.append(file);panel.append(label);
-    file.onchange=async()=>{const archive=file.files?.[0];if(!archive)return;file.disabled=true;try{
-        const response=await fetch(mcpBridgeBase()+'/vh2/restore',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:archive});const result=await response.json();if(!response.ok)throw Error(result.error||'Restore failed.');
-        const projection=await mcpBridgeRequest('/vh2/projection?worldId='+encodeURIComponent(result.worldId)),snapshot=projection.state.truth.companion;
-        const originalId=projection.state.integration?.sourceCompanionId;let target=originalId?getCompanion(originalId):null;
-        if(!target){target=normalizeCompanion({...snapshot,id:originalId||crypto.randomUUID()});state.companions.push(target);ensureCompanionTimelineStore(target.id);}
-        const restored=createCompanionTimeline(target,{name:'Recovered VH2 · '+target.name});restored.vh2={worldId:result.worldId,outbox:[],error:'',running:false};
-        state.activeCompanionId=target.id;await saveState();switchView('companionChat');await vh2Poll(target,restored);renderCompanionThread();showToast('Timeline restored and paused. Review provider settings before resuming.','success');
-    }catch(error){showToast(error.message,'error');}finally{file.disabled=false;file.value='';}};
-    host.append(panel);
+ const panel=document.createElement('details');panel.innerHTML='<summary>Private server & recovery</summary><p class="form-hint">Choose where this life actively runs. A private server can keep it living and replying while this computer is off.</p>';
+ const archiveTools=document.createElement('section');archiveTools.className='vh-private-archive';archiveTools.innerHTML='<h3>Portable archive <span>Optional</span></h3><p class="form-hint">This is a downloadable recovery file, not cloud hosting. Use it to keep an offline snapshot or restore a timeline on this computer.</p>';
+ if(timeline?.vh2?.worldId){
+  const download=document.createElement('button');download.type='button';download.className='tool-btn';download.textContent='Download timeline backup';
+  download.onclick=async()=>{download.disabled=true;try{const response=await vh2Fetch(timeline,'/vh2/backup?worldId='+encodeURIComponent(timeline.vh2.worldId));const url=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=url;a.download='horde-vh2-'+timeline.vh2.worldId+'.vh2.gz';a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);}catch(error){showToast(error.message,'error');}finally{download.disabled=false;}};archiveTools.append(download);
+ }
+ const hosting=document.createElement('section');hosting.className='vh-private-hosting';hosting.setAttribute('aria-label','Private server hosting');
+ const status=document.createElement('p');status.className='vh-cloud-status';status.setAttribute('role','status');status.setAttribute('aria-live','polite');
+ if(timeline?.vh2?.hostId){
+  const saved=state.globalSettings?.vh2SelfHosts?.[timeline.vh2.hostId];
+  if(!saved?.baseUrl||!saved.accessToken){
+   hosting.innerHTML='<div class="vh-cloud-heading"><span class="vh-cloud-state is-warning">Connection needed</span><div><h3>Reconnect this life’s private server</h3><p>The life is still assigned to its private server, but this computer no longer has the server address or token. Reconnecting does not upload, overwrite or start a second copy.</p></div></div>';
+   const fields=vh2PrivateHostFields(hosting,saved||{}),reconnect=document.createElement('button');reconnect.type='button';reconnect.className='btn btn-primary';reconnect.textContent='Reconnect private server';
+   reconnect.onclick=async()=>{reconnect.disabled=true;try{const config=vh2PrivateHostConfig(fields.url.value,fields.token.value);await vh2VerifyPrivateHost(config);state.globalSettings.vh2SelfHosts||={};state.globalSettings.vh2SelfHosts[timeline.vh2.hostId]={name:saved?.name||'Private VH2 host',...config,createdAt:saved?.createdAt||Date.now()};await persistGlobalSettingsOnly();fields.token.value='';status.textContent='Private host reconnected.';await vh2Poll(companion,timeline,{force:true,throwOnError:true});}catch(error){status.textContent=error.message;}finally{reconnect.disabled=false;}};hosting.append(reconnect);
+  }else{
+   hosting.innerHTML='<div class="vh-cloud-heading"><span class="vh-cloud-state is-connected">Private server is primary</span><div><h3>This life is running on your private server</h3><p>It keeps living and replying when this computer is off. This computer is not running a second copy.</p></div></div>';
+   const runtime=document.createElement('div');runtime.className='vh-cloud-runtime';
+   const primary=document.createElement('div');primary.className='vh-cloud-runtime-node is-primary';primary.innerHTML='<span>ACTIVE</span><strong>Private server</strong><small></small>';primary.querySelector('small').textContent=saved.baseUrl;
+   const recovery=document.createElement('div');recovery.className='vh-cloud-runtime-node';recovery.innerHTML='<span>PAUSED</span><strong>This computer</strong><small>Recovery mirror only</small>';runtime.append(primary,recovery);hosting.append(runtime);
+   const mirror=document.createElement('p');mirror.className='vh-cloud-mirror';mirror.textContent=timeline.vh2.localMirrorSavedAt?'Local recovery mirror · revision '+timeline.vh2.localMirrorRevision+' · updated '+new Date(timeline.vh2.localMirrorSavedAt).toLocaleString():(timeline.vh2.localMirrorError?'Local recovery mirror needs attention: '+timeline.vh2.localMirrorError:'Creating the first local recovery mirror…');hosting.append(mirror);
+   const actions=document.createElement('div');actions.className='vh-private-host-actions';
+   const test=document.createElement('button');test.type='button';test.className='tool-btn';test.textContent='Test private server';test.onclick=async()=>{test.disabled=true;try{await vh2VerifyPrivateHost(vh2HostOptions(timeline));status.textContent='Private server connected.';}catch(error){status.textContent=error.message;}finally{test.disabled=false;}};
+   const sync=document.createElement('button');sync.type='button';sync.className='tool-btn';sync.textContent='Update local recovery mirror';sync.onclick=async()=>{sync.disabled=true;try{status.textContent='Saving the current cloud revision locally…';const result=await vh2SyncLocalMirror(timeline,{force:true});mirror.textContent='Local recovery mirror · revision '+result.revision+' · updated '+new Date(result.savedAt).toLocaleString();status.textContent='The local recovery mirror is current.';}catch(error){status.textContent=error.message;}finally{sync.disabled=false;}};
+   const home=document.createElement('button');home.type='button';home.className='btn btn-primary';home.textContent='Switch back to this computer';home.onclick=async()=>{if(!confirm('Pause the cloud life, sync its final revision, and make this computer primary?'))return;home.disabled=true;try{await vh2BringHome(companion,timeline,status);showToast('This computer is now primary.','success');}catch(error){status.textContent=error.message;showToast(error.message,'error');}finally{home.disabled=false;}};
+   actions.append(home,test,sync);hosting.append(actions);
+   const emergency=document.createElement('details');emergency.className='vh-cloud-emergency';emergency.innerHTML='<summary>Recovery if the private server is offline</summary><p>Use the last local mirror only when the server cannot be recovered. This detaches the remote copy to prevent two versions of the same life from running.</p>';
+   const fallback=document.createElement('button');fallback.type='button';fallback.className='tool-btn';fallback.textContent='Emergency: use local backup';fallback.onclick=async()=>{if(!confirm('Emergency failover uses the last saved local backup without contacting the cloud. Continue only if the cloud cannot be recovered. If it resumes later, it must remain detached to avoid two diverging lives.'))return;fallback.disabled=true;try{await vh2EmergencyLocalFailover(companion,timeline,status);showToast('Local backup promoted. The cloud copy is detached.','success');}catch(error){status.textContent=error.message;showToast(error.message,'error');}finally{fallback.disabled=false;}};emergency.append(fallback);hosting.append(emergency);
+  }
+ }else if(timeline?.vh2?.worldId){
+  hosting.innerHTML='<div class="vh-cloud-heading"><span class="vh-cloud-state">Runs on this computer</span><div><h3>Keep this life running when this computer is off</h3><p>Move the active life to a private VH2 server you control. Its history, memory and current state move together; the server becomes the only active runtime.</p></div></div><div class="vh-cloud-not-backup"><strong>This moves the running life—it is not just a cloud backup.</strong><span>After the move, this computer pauses the original and keeps a recovery mirror you can switch back to.</span></div>';
+  const progress=document.createElement('ol');progress.className='vh-cloud-progress';progress.setAttribute('aria-label','Private server setup progress');
+  for(const label of ['Choose host','Connect','Move life']){const item=document.createElement('li');item.innerHTML='<span></span><strong></strong>';item.querySelector('strong').textContent=label;progress.append(item);}hosting.append(progress);
+  const pages=[1,2,3].map(step=>{const page=document.createElement('section');page.className='vh-cloud-step';page.dataset.cloudStep=String(step);hosting.append(page);return page;});
+  pages[0].innerHTML='<h4>Choose where this life will run</h4><p>Horde Studio is local-first. To keep one life active while this computer is off, you need a separate hosting account. Horde does not sell or operate that host.</p><div class="vh-cloud-host-options" role="group" aria-label="Hosting choices"><button type="button" class="vh-cloud-host-card is-recommended" data-cloud-host="railway"><span class="vh-cloud-host-badge">Recommended</span><strong>Set up with Railway</strong><small>Guided · no terminal or domain</small><p>Usually starts at $5/month. You create the account; Horde walks you through the exact dashboard clicks.</p></button><button type="button" class="vh-cloud-host-card" data-cloud-host="existing"><span class="vh-cloud-host-badge">Already set up</span><strong>Connect my server</strong><small>About 1 minute</small><p>Use this if somebody already gave you a running VH2 server address and private key.</p></button><button type="button" class="vh-cloud-host-card" data-cloud-host="advanced"><span class="vh-cloud-host-badge">Advanced</span><strong>Use my own Linux server</strong><small>Terminal, DNS and Docker required</small><p>For people who already administer a VPS. Every required file and command is explained.</p></button></div><p class="vh-cloud-free-note"><strong>Why there is no “free host” recommendation:</strong> free services commonly sleep or erase local storage. That is unsafe for an always-running life. A free trial is fine for testing, not permanent storage.</p><div class="vh-cloud-host-guide" data-cloud-host-guide hidden></div>';
+  const studioOrigin=location.protocol==='http:'||location.protocol==='https:'?location.origin:'the exact Horde Studio URL shown in your browser';
+  const localProvider=companionTextProviderId(companion)==='local';
+  if(localProvider){const warning=document.createElement('p');warning.className='vh-cloud-provider-warning';warning.innerHTML='<strong>One change is required before the final move.</strong> This human’s current text provider runs only on this computer. Choose a cloud-capable text provider so the hosted life can reply while this computer is off.';pages[0].insertBefore(warning,pages[0].querySelector('[data-cloud-host-guide]'));}
+  pages[1].innerHTML='<h4>Connect to the running VH2 server</h4><p>Paste the address created by your host. If you used the Railway walkthrough, the private key is already filled in. Testing only checks the connection; it does not upload or change this life.</p>';
+  const fields=vh2PrivateHostFields(pages[1]),connectActions=document.createElement('div');connectActions.className='vh-private-host-actions';
+  const backToPrepare=document.createElement('button');backToPrepare.type='button';backToPrepare.className='tool-btn';backToPrepare.textContent='Change host';
+  const test=document.createElement('button');test.type='button';test.className='btn btn-primary';test.textContent='Test private server';connectActions.append(backToPrepare,test);pages[1].append(connectActions);
+  pages[2].innerHTML='<h4>Review the move</h4><div class="vh-cloud-transfer"><div><span>MOVES TO YOUR SERVER</span><strong>Active life</strong><p>Timeline, conversations, memory, relationships, routines and current state.</p></div><div><span>STAYS ON THIS COMPUTER</span><strong>Paused recovery mirror</strong><p>It does not keep living here. You can switch the active life back later.</p></div></div><p class="vh-cloud-final-note"><strong>After you move:</strong> automatic activity and replies happen on the private server. Keep that server online and protect its access token.</p>';
+  const destination=document.createElement('p');destination.className='vh-cloud-destination';destination.hidden=true;pages[2].append(destination);
+  const moveActions=document.createElement('div');moveActions.className='vh-private-host-actions';
+  const edit=document.createElement('button');edit.type='button';edit.className='tool-btn';edit.textContent='Edit connection';
+  const move=document.createElement('button');move.type='button';move.className='btn btn-primary';move.textContent='Move running life to private server';move.disabled=true;moveActions.append(edit,move);pages[2].append(moveActions);
+  const setStep=(step,focus=false)=>{hosting.dataset.cloudStep=String(step);pages.forEach((page,index)=>page.hidden=index!==step-1);[...progress.children].forEach((item,index)=>{item.classList.toggle('is-current',index===step-1);item.classList.toggle('is-complete',index<step-1);if(index===step-1)item.setAttribute('aria-current','step');else item.removeAttribute('aria-current');});if(focus){const heading=pages[step-1].querySelector('h4');heading?.setAttribute('tabindex','-1');heading?.focus({preventScroll:true});}};
+  const hostGuide=pages[0].querySelector('[data-cloud-host-guide]'),setupKey=vh2GeneratePrivateServerKey();
+  const markHostChoice=choice=>pages[0].querySelectorAll('[data-cloud-host]').forEach(button=>button.classList.toggle('is-selected',button.dataset.cloudHost===choice));
+  const renderRailwayGuide=()=>{
+   markHostChoice('railway');hostGuide.hidden=false;
+   hostGuide.innerHTML='<div class="vh-cloud-host-guide-heading"><div><span>Recommended path</span><h5>Railway setup — about 5–10 minutes</h5><p>No terminal, custom domain, Docker commands or port configuration. Railway builds the included VH2 server and gives it HTTPS.</p></div><a class="vh-cloud-guide" href="https://railway.com/new" target="_blank" rel="noopener noreferrer">Open Railway ↗</a></div><ol class="vh-cloud-railway-steps"><li><span>1</span><div><strong>Create the service</strong><p>In Railway choose <b>New Project</b> → <b>Deploy from GitHub repo</b>, then select the Horde Studio repository. Authorize GitHub if asked.</p><code>https://github.com/ddkhan24/hordestudio</code></div></li><li><span>2</span><div><strong>Paste these four settings</strong><p>Open the new service → <b>Variables</b> → <b>Raw Editor</b>. Paste the block below exactly, then save. The long random value is this server’s private key; do not share it. The other lines select the VH2 server, let it write to permanent storage, and allow this copy of Studio to connect.</p><textarea class="vh-cloud-config" data-railway-config readonly aria-label="Railway configuration"></textarea><div class="vh-cloud-inline-actions"><button type="button" class="tool-btn" data-copy-config>Copy settings</button></div><small data-copy-result aria-live="polite"></small></div></li><li><span>3</span><div><strong>Add permanent storage</strong><p>Open your project canvas, right-click → <b>New</b> → <b>Volume</b>. Attach it to the service and set the mount path to <code>/data</code>. This is where the life survives restarts.</p></div></li><li><span>4</span><div><strong>Create its address</strong><p>Open <b>Settings</b> → <b>Networking</b> → <b>Generate Domain</b>. If Railway asks for a target port, enter <code>8080</code>. Wait until the deployment is green, then copy the complete <code>https://…up.railway.app</code> address.</p></div></li></ol><div class="vh-cloud-completion"><p><strong>Return with:</strong> the Railway address. Horde has already created and remembered the matching private key for this setup.</p><button type="button" class="btn btn-primary" data-railway-done>I have my Railway address</button></div><p class="vh-cloud-cost-note">Railway bills the hosting account directly. Check the price shown before deploying; its free trial is temporary and should not be treated as permanent life storage.</p>';
+   const config=`RAILWAY_DOCKERFILE_PATH=/deploy/vh2-self-host/Dockerfile\nRAILWAY_RUN_UID=0\nHORDE_VH2_ACCESS_TOKEN=${setupKey}\nHORDE_VH2_ALLOWED_ORIGINS=${studioOrigin}`;
+   const configField=hostGuide.querySelector('[data-railway-config]');configField.value=config;
+   const result=hostGuide.querySelector('[data-copy-result]');
+   hostGuide.querySelector('[data-copy-config]').onclick=async event=>{event.currentTarget.disabled=true;try{await vh2CopyText(config);result.textContent='Settings copied. Paste them into Railway’s Raw Editor.';}catch(error){result.textContent=error.message;}finally{event.currentTarget.disabled=false;}};
+   hostGuide.querySelector('[data-railway-done]').onclick=()=>{fields.token.value=setupKey;setStep(2,true);fields.url.focus();status.textContent='Paste the Railway address, then test the connection. Nothing has moved yet.';};
+   hostGuide.scrollIntoView({block:'nearest',behavior:'smooth'});
+  };
+  const renderAdvancedGuide=()=>{
+   markHostChoice('advanced');hostGuide.hidden=false;
+   hostGuide.innerHTML='<div class="vh-cloud-host-guide-heading"><div><span>Advanced path</span><h5>Run VH2 on your own Linux server</h5><p>Choose this only if you are comfortable using SSH, DNS and Docker. A domain alone cannot host VH2.</p></div></div><div class="vh-cloud-advanced-explainer"><p><strong>What “deployment files” means:</strong> clone or download the complete Horde Studio repository. The build needs the application code as well as <code>deploy/vh2-self-host/Dockerfile</code>, <code>compose.yaml</code>, <code>Caddyfile</code> and <code>.env.example</code>. Copying only those four files will not work.</p><p>The included Compose setup stores life data in a persistent Docker volume, runs VH2 on port 8080 internally, and uses Caddy to create HTTPS for your domain. The full guide explains the VM, DNS, firewall and commands in order.</p></div><div class="vh-private-host-actions"><a class="vh-cloud-guide" href="https://github.com/ddkhan24/hordestudio/tree/main/deploy/vh2-self-host" target="_blank" rel="noopener noreferrer">Open advanced server guide ↗</a><button type="button" class="btn btn-primary" data-advanced-done>My VH2 server is running</button></div>';
+   hostGuide.querySelector('[data-advanced-done]').onclick=()=>setStep(2,true);
+   hostGuide.scrollIntoView({block:'nearest',behavior:'smooth'});
+  };
+  pages[0].querySelector('[data-cloud-host="railway"]').onclick=renderRailwayGuide;
+  pages[0].querySelector('[data-cloud-host="existing"]').onclick=()=>{markHostChoice('existing');setStep(2,true);};
+  pages[0].querySelector('[data-cloud-host="advanced"]').onclick=renderAdvancedGuide;
+  backToPrepare.onclick=()=>setStep(1,true);edit.onclick=()=>setStep(2,true);setStep(1);
+  const resetTest=()=>{move.disabled=true;destination.hidden=true;if(hosting.dataset.cloudStep==='3')setStep(2);status.textContent='Connection details changed. Test the private server again.';};fields.url.addEventListener('input',resetTest);fields.token.addEventListener('input',resetTest);
+  test.onclick=async()=>{test.disabled=true;move.disabled=true;status.textContent='Testing the server. Nothing is being uploaded…';try{const config=vh2PrivateHostConfig(fields.url.value,fields.token.value);await vh2VerifyPrivateHost(config);destination.textContent='Destination: '+config.baseUrl;destination.hidden=false;status.textContent=localProvider?'Server connected. Change this human to a cloud-capable text provider before moving.':'Server connected. Nothing has moved yet. Review the move before continuing.';move.disabled=localProvider;setStep(3,true);}catch(error){status.textContent=error.message;}finally{test.disabled=false;}};
+  move.onclick=async()=>{if(!confirm('Move this complete life to your private server now? The server will become the only active runtime. This computer will pause its original and keep a recovery mirror.'))return;move.disabled=true;test.disabled=true;status.textContent='Starting the move…';try{await vh2MoveToPrivateHost(companion,timeline,{baseUrl:fields.url.value,accessToken:fields.token.value},status);fields.token.value='';showToast('Move complete. The private server is active and the local recovery mirror is current.','success');}catch(error){status.textContent=error.message;showToast(error.message,'error');move.disabled=localProvider;}finally{test.disabled=false;}};
+ }else{
+  hosting.innerHTML='<div class="vh-cloud-heading"><span class="vh-cloud-state">Not started</span><div><h3>Start this life before moving it</h3><p>Private hosting moves a real, running timeline. Start the persistent life first so its state, memory and history have a canonical source.</p></div></div>';
+  const start=document.createElement('button');start.type='button';start.className='btn btn-primary';start.textContent='Go to life overview';start.onclick=()=>vhOpenWorkspace('overview');hosting.append(start);
+ }
+ hosting.append(status);panel.append(hosting);vh2RenderStorageControls(panel,timeline);panel.append(archiveTools);
+ const label=document.createElement('label');label.className='form-label';label.textContent='Restore a timeline archive on this device';const file=document.createElement('input');file.type='file';file.accept='.gz,application/gzip';label.append(file);archiveTools.append(label);
+ file.onchange=async()=>{const archive=file.files?.[0];if(!archive)return;file.disabled=true;try{
+  const result=await mcpBridgeRequest('/vh2/restore',{method:'POST',body:archive,timeoutMs:120000});
+  const projection=await mcpBridgeRequest('/vh2/projection?worldId='+encodeURIComponent(result.worldId)),snapshot=projection.state.truth.companion;
+  const originalId=projection.state.integration?.sourceCompanionId;let target=originalId?getCompanion(originalId):null;
+  if(!target){target=normalizeCompanion({...snapshot,id:originalId||crypto.randomUUID()});state.companions.push(target);ensureCompanionTimelineStore(target.id);}
+  const restored=createCompanionTimeline(target,{name:'Recovered VH2 · '+target.name});restored.vh2={worldId:result.worldId,outbox:[],error:'',running:false};
+  state.activeCompanionId=target.id;await saveVirtualHumansState();switchView('companionChat');await vh2Poll(target,restored);renderCompanionThread();showToast('Timeline restored and paused. Review provider settings before resuming.','success');
+ }catch(error){showToast(error.message,'error');}finally{file.disabled=false;file.value='';}};
+ host.append(panel);
 }
 
 function vh2ReadinessIssues(link){
@@ -936,7 +1316,7 @@ async function vh2GenerateReferenceViews(companion,timeline,requested,options={}
  try{
   // Read authoritative capture state before creating anything, including after a reload.
   await vh2Flush(timeline);
-  const projection=await mcpBridgeRequest('/vh2/projection?worldId='+encodeURIComponent(timeline.vh2.worldId));
+  const projection=await vh2Request(timeline,'/vh2/projection?worldId='+encodeURIComponent(timeline.vh2.worldId));
   timeline.vh2.photos=projection.state.photos||[];
   const pending=vh2PendingReferenceCapture(timeline);if(pending)throw Error('No new generation started. Resolve the existing capture below.');
   const entries=projection.state.truth.companion.vh2Assets?.entries||timeline.vh2.bible?.entries||[];
@@ -952,12 +1332,12 @@ async function vh2GenerateReferenceViews(companion,timeline,requested,options={}
    const photoId=timeline.vh2.lastPhotoId;
    await vh2GeneratePhoto(companion,timeline,'','front_camera_selfie','reference',photoId,null,report);
    report('saving to Reference Library…');await vh2Enqueue(timeline,'add_bible_asset',{role:selection.role,entityId:selection.entityId,label:(selection.label||name+' reference').slice(0,120),tags:[selection.view,...(selection.view==='front_face'?['face']:[])],photoId});await vh2Flush(timeline);await vh2Poll(companion,timeline);
-   const fresh=await mcpBridgeRequest('/vh2/projection?worldId='+encodeURIComponent(timeline.vh2.worldId));entries.splice(0,entries.length,...(fresh.state.truth.companion.vh2Assets?.entries||[]));
+   const fresh=await vh2Request(timeline,'/vh2/projection?worldId='+encodeURIComponent(timeline.vh2.worldId));entries.splice(0,entries.length,...(fresh.state.truth.companion.vh2Assets?.entries||[]));
    vh2SetReferenceProgress(timeline,{completed:index+1});
   }
   vh2SetReferenceProgress(timeline,{running:false,error:false,message:views.length?`${views.length} reference${views.length===1?'':'s'} saved. Review and approve the images below.`:'These references already exist. Review any pending images below.'});
  }catch(error){
-  try{const p=await mcpBridgeRequest('/vh2/projection?worldId='+encodeURIComponent(timeline.vh2.worldId));timeline.vh2.photos=p.state.photos||[];}catch(_){}
+  try{const p=await vh2Request(timeline,'/vh2/projection?worldId='+encodeURIComponent(timeline.vh2.worldId));timeline.vh2.photos=p.state.photos||[];}catch(_){}
   vh2SetReferenceProgress(timeline,{running:false,error:true,message:'Generation stopped. '+error.message});
  }finally{vh2BibleGenerationLocks.delete(timeline.id);vh2PaintReferenceProgress(timeline);}
 }
@@ -978,7 +1358,7 @@ function vh2EcosystemPanels(host,companion,timeline){
  const flights=panel('Flight connection — Aviationstack');note(flights,'Optional authenticated flight listings. Add an Aviationstack feed below with two airport codes mapped to physical places. Keys stay in the local bridge and are excluded from timeline backups. Each refresh counts toward your provider quota, including failed requests. No booking or ticket purchase is made.');
  const steps=document.createElement('ol');for(const text of ['Create an Aviationstack account and copy its API key.','Paste the key below, set a daily request limit and enable requests.','Save, then return to World information → Flights to link two airports to saved places.']){const li=document.createElement('li');li.textContent=text;steps.append(li);}flights.append(steps);const docs=document.createElement('a');docs.href='https://docs.apilayer.com/aviationstack/docs/api-documentation';docs.target='_blank';docs.rel='noopener noreferrer';docs.textContent='Aviationstack account and API setup guide';flights.append(docs);
  const fp=link.flightProvider||{},flightEnabled=input(flights,'Enable Aviationstack requests',!!fp.enabled,'checkbox'),flightKey=input(flights,fp.hasKey?'Replace Aviationstack API key (leave blank to keep)':'Aviationstack API key','','password'),flightLimit=input(flights,'Maximum flight API requests per day',fp.dailyLimit||4,'number'),flightClear=input(flights,'Remove saved flight API key',false,'checkbox');note(flights,`${fp.hasKey?'API key configured':'API key missing'} · ${fp.usedToday||0} requests reserved today. Live feeds only refresh near current real time.`);
- flights.append(button('Save flight connection',async b=>{b.disabled=true;try{await mcpBridgeRequest('/vh2/flight-provider',{method:'POST',body:{scope:'horde:'+companion.id,enabled:flightEnabled.checked,apiKey:flightKey.value,clearKey:flightClear.checked,dailyLimit:Number(flightLimit.value)}});flightKey.value='';await vh2Poll(companion,timeline);}catch(error){showToast(error.message,'error');}finally{b.disabled=false;}}));
+ flights.append(button('Save flight connection',async b=>{b.disabled=true;try{await vh2Request(timeline,'/vh2/flight-provider',{method:'POST',body:{scope:'horde:'+companion.id,enabled:flightEnabled.checked,apiKey:flightKey.value,clearKey:flightClear.checked,dailyLimit:Number(flightLimit.value)}});flightKey.value='';await vh2Poll(companion,timeline);}catch(error){showToast(error.message,'error');}finally{b.disabled=false;}}));
  const feeds=panel('World feeds & awareness');note(feeds,'Public HTTPS RSS/Atom, iCalendar, transit, flight-timetable and OpenLigaDB feeds refresh in the local bridge while this timeline runs, even with the browser closed. Flight JSON needs a compatible source; it is not a booking or aircraft-position feed. Feed publication is not an event date. A place scope is context. Only confirm a calendar venue for a feed whose events actually take place there; calendar entries need explicit start/end times. Unsupported recurrence and all-day entries are reported.');
  for(const source of link.signals?.sources||[]){const row=document.createElement('div');note(row,`${source.url} · ${source.warning||''} ${source.error|| (source.lastSuccessAt?`${source.itemCount} recent claims received`:'Waiting for refresh when running')}`);row.append(button('Remove feed',b=>send('remove_world_feed',{sourceId:source.id},b)));feeds.append(row);}
  const networks=panel('Supporting-person network');note(networks,'Optional private encounters between independently simulated people who share a place. Encounters can change boredom, stress and their recorded bond; they do not automatically become player knowledge.');
@@ -1001,11 +1381,11 @@ function vh2EcosystemPanels(host,companion,timeline){
  const bible=panel('Asset bible');note(bible,'Generate a character sheet, supporting portraits, places and props in the Reference Library. These tools manage individual legacy references. Approve each reference before use. Photos freeze selected reference IDs and versions, so later edits cannot change an earlier capture.');
  const entries=link.bible?.entries||[];
  vh2ReferenceGenerationControl(bible,companion,timeline,'Generate character sheet',()=>vh2GenerateReferenceViews(companion,timeline));note(bible,'Generating a character sheet uses your configured image provider and credits. New images remain pending until approved.');note(bible,`${entries.filter(e=>e.status==='approved').length} approved references. Roles without approved coverage: ${['identity','place','person','garment','pose'].filter(r=>!entries.some(e=>e.role===r&&e.status==='approved')).join(', ')||'none'}.`);
- for(const e of entries.filter(e=>e.status!=='archived')){const row=document.createElement('div');row.className='vh-reference-tile';row.dataset.referenceOwner=e.entityId;row.dataset.referenceRole=e.role;row.dataset.referenceStatus=e.status;row.dataset.referenceLabel=e.label;row.style.cssText='display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0';const img=document.createElement('img');img.src=vh2PhotoAssetUrl(link.worldId,e.assetId);img.alt=e.label;img.style.cssText='width:72px;height:72px;object-fit:cover;border-radius:8px';row.append(img);note(row,`${e.label} · ${e.role} · ${e.status} · v${e.version}`);if(e.status!=='approved')row.append(button('Approve reference',b=>send('review_bible_asset',{entryId:e.id,status:'approved'},b)));if(e.status!=='rejected')row.append(button('Reject reference',b=>send('review_bible_asset',{entryId:e.id,status:'rejected'},b)));row.append(button('Archive reference',b=>send('archive_bible_asset',{entryId:e.id},b)));bible.append(row);}
+ for(const e of entries.filter(e=>e.status!=='archived')){const row=document.createElement('div');row.className='vh-reference-tile';row.dataset.referenceOwner=e.entityId;row.dataset.referenceRole=e.role;row.dataset.referenceStatus=e.status;row.dataset.referenceLabel=e.label;row.style.cssText='display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0';const img=document.createElement('img');img.src=vh2PhotoAssetUrl(link.worldId,e.assetId,timeline);img.alt=e.label;img.style.cssText='width:72px;height:72px;object-fit:cover;border-radius:8px';row.append(img);note(row,`${e.label} · ${e.role} · ${e.status} · v${e.version}`);if(e.status!=='approved')row.append(button('Approve reference',b=>send('review_bible_asset',{entryId:e.id,status:'approved'},b)));if(e.status!=='rejected')row.append(button('Reject reference',b=>send('review_bible_asset',{entryId:e.id,status:'rejected'},b)));row.append(button('Archive reference',b=>send('archive_bible_asset',{entryId:e.id},b)));bible.append(row);}
  const role=select(bible,'Reference role',['identity','place','zone','person','prop','garment','pose'].map(r=>[r,r])),owner=select(bible,'Reference subject',[]);
  const owners=()=>{owner.replaceChildren();const items=role.value==='identity'?[[link.entityId,companion.name]]:role.value==='pose'?[['pose','Identity-independent pose']]:role.value==='place'?(link.travelPlaces||[]).map(p=>[p.id,p.label]):role.value==='zone'?(link.visual?.zones||[]).map(z=>[z.id,z.label]):role.value==='person'?(link.knownPeople||[]).map(p=>[p.id,p.name]):(link.gifts?.items||[]).map(i=>[i.id,i.name]);for(const [id,name] of items){const o=document.createElement('option');o.value=id;o.textContent=name;owner.append(o);}};role.onchange=owners;owners();
  const label=input(bible,'Reference label',''),refTags=input(bible,'Reference tags (face, profile, mirror_selfie…)',''),photo=input(bible,'Upload reference image','','file');photo.accept='image/png,image/jpeg,image/webp';const generated=select(bible,'Or use a rendered timeline photo',[['','Upload a new image'],...(link.photos||[]).filter(p=>p.assetId).map(p=>[p.id,p.scene||p.id])]);
- bible.append(button('Add reference for review',async b=>{try{let image='';if(!generated.value){const file=photo.files?.[0];if(!file)throw Error('Choose an image or rendered photo.');image=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(Error('Could not read image.'));reader.readAsDataURL(file);});}await send('add_bible_asset',{role:role.value,entityId:owner.value,label:label.value,tags:refTags.value.split(',').map(x=>x.trim()).filter(Boolean),...(generated.value?{photoId:generated.value}:{image})},b);}catch(error){showToast(error.message,'error');}}));
+ bible.append(button('Add reference for review',async b=>{try{let image='';if(!generated.value)image=await vh2NormalizeUploadedImage(photo.files?.[0]);await send('add_bible_asset',{role:role.value,entityId:owner.value,label:label.value,tags:refTags.value.split(',').map(x=>x.trim()).filter(Boolean),...(generated.value?{photoId:generated.value}:{image})},b);}catch(error){showToast(error.message,'error');}}));
 }
 
 function vh2ImageSettingsFields(host,companion,timeline){
@@ -1152,7 +1532,7 @@ function vh2HistoryImportPanel(host,companion,timeline){
  const button=document.createElement('button');button.type='button';button.className='tool-btn';button.textContent='Import reviewed conversation';button.disabled=true;panel.append(button);let sourceText='',report=null;
  const refresh=()=>{const session=report?.timelines.find(x=>x.id===choices.value);review.textContent=session?`${report.name}: ${session.name||session.id}, ${session.messages} source messages. Source player: ${session.personaId||'unspecified'} → target player: ${link.canonicalPersonaId}. ${report.issues.length} source warnings; historical runtime is preserved only.`:'';button.disabled=link.running||!checked.checked||!session||report.kind==='character-template'||report.issues.some(x=>x.severity==='error');};
  choices.onchange=()=>{checked.checked=false;refresh();};checked.onchange=refresh;
- file.onchange=async()=>{report=null;sourceText='';checked.checked=false;choices.replaceChildren();button.disabled=true;try{const selected=file.files[0];if(!selected)return;if(selected.size>12*1024*1024)throw Error('Archive limit is 12 MB.');sourceText=await selected.text();report=await mcpBridgeRequest('/vh2/migration/preview',{method:'POST',body:{sourceText}});for(const s of report.timelines){const o=document.createElement('option');o.value=s.id;o.textContent=s.name||s.id;choices.append(o);}refresh();if(report.issues.some(x=>x.severity==='error'))review.textContent=report.issues.filter(x=>x.severity==='error').map(x=>x.message).join(' ');}catch(error){review.textContent=error.message;}};
+ file.onchange=async()=>{report=null;sourceText='';checked.checked=false;choices.replaceChildren();button.disabled=true;try{const selected=file.files[0];if(!selected)return;if(selected.size>12*1024*1024)throw Error('Archive limit is 12 MB.');sourceText=await selected.text();report=await vh2Request(timeline,'/vh2/migration/preview',{method:'POST',body:{sourceText}});for(const s of report.timelines){const o=document.createElement('option');o.value=s.id;o.textContent=s.name||s.id;choices.append(o);}refresh();if(report.issues.some(x=>x.severity==='error'))review.textContent=report.issues.filter(x=>x.severity==='error').map(x=>x.message).join(' ');}catch(error){review.textContent=error.message;}};
  button.onclick=async()=>{button.disabled=true;try{await vhUiCommand(timeline,'import_vh1_history',{sourceText,expectedDigest:report.archiveDigest,sessionId:choices.value,targetPersonaId:link.canonicalPersonaId,reviewed:checked.checked});showToast('Historical conversation attached. Life remains paused.','success');}catch(error){showToast(error.message,'error');refresh();}};
 }
 
@@ -1257,7 +1637,7 @@ async function vh2OpenImageActivity(companion,timeline=getActiveCompanionTimelin
    let repair=card.actions.querySelector('[data-binding-repair]');if(bindingIssue&&!repair){repair=document.createElement('button');repair.type='button';repair.dataset.bindingRepair='';repair.textContent='Open Reference Library';repair.onclick=()=>{d.close();vhOpenWorkspace('references',companion.id);};card.actions.append(repair);}if(repair)repair.hidden=!bindingIssue;
    card.generate.textContent=view.state==='waiting'?'Generate image':'Generate again';card.generate.dataset.command=view.state==='waiting'?'queue_photo_render':'retry_photo_render';
    card.uncertain.hidden=job?.status!=='unknown'&&!(photo.status==='submitted'&&!job);
-   if(photo.assetId&&!card.row.querySelector('img')){const image=document.createElement('img');image.src=vh2PhotoAssetUrl(timeline.vh2.worldId,photo.assetId);image.alt=photo.scene||'Generated image';card.row.append(image);}
+  if(photo.assetId&&!card.row.querySelector('img')){const image=document.createElement('img');image.src=vh2PhotoAssetUrl(timeline.vh2.worldId,photo.assetId,timeline);image.alt=photo.scene||'Generated image';card.row.append(image);}
   }
   let empty=list.querySelector('.vh-image-empty');if(!cards.size&&!empty){empty=document.createElement('p');empty.className='vh-image-empty';empty.textContent='No unfinished images. New captures will appear here.';list.append(empty);}if(cards.size&&empty)empty.remove();
  };
@@ -1280,7 +1660,7 @@ async function vh2OpenImageActivity(companion,timeline=getActiveCompanionTimelin
    if(status.textContent==='Request saved. Follow its status below.'||status.textContent==='Attempt dismissed.'||status.textContent==='Image imported.')paint();
   }
   generate.onclick=()=>run(generate.dataset.command);dismiss.onclick=()=>run('dismiss_photo_render');
-  file.onchange=()=>{const f=file.files?.[0];if(!f)return;if(f.size>8500000){detail.textContent='Choose an image smaller than 8.5 MB.';return;}const reader=new FileReader();reader.onload=()=>run('import_photo',{image:reader.result});reader.onerror=()=>{detail.textContent='Could not read the image.';};reader.readAsDataURL(f);};
+  file.onchange=async()=>{const f=file.files?.[0];if(!f)return;try{detail.textContent='Optimizing image for storage…';await run('import_photo',{image:await vh2NormalizeUploadedImage(f)});}catch(error){detail.textContent=error.message;}};
  }
  async function refreshData(){
   if(refreshing)return;refreshing=true;refresh.disabled=true;

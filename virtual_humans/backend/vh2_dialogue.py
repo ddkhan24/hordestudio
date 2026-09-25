@@ -22,16 +22,127 @@ CREATE TABLE IF NOT EXISTS dialogue_jobs (
 CREATE TABLE IF NOT EXISTS dialogue_receipts (job_id TEXT PRIMARY KEY REFERENCES dialogue_jobs(id), usage TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_dialogue ON dialogue_jobs(world_id)
  WHERE status IN ('queued','leased');
-CREATE TRIGGER IF NOT EXISTS dialogue_input_immutable
+DROP TRIGGER IF EXISTS dialogue_input_immutable;
+DROP TRIGGER IF EXISTS dialogue_terminal_compact;
+DROP TRIGGER IF EXISTS dialogue_terminal_insert_compact;
+UPDATE dialogue_jobs SET
+ snapshot=json_object(
+  'retentionVersion',1,
+  'context',json_object(
+   'personaId',json_extract(snapshot,'$.context.personaId'),
+   'readyMessageIds',json(COALESCE(json_extract(snapshot,'$.context.readyMessageIds'),'[]'))),
+  'provider',json_object(
+   'version',json_extract(snapshot,'$.provider.version'),
+   'scope',json_extract(snapshot,'$.provider.scope'),
+   'model',json_extract(snapshot,'$.provider.model')),
+  'summary',json_object(
+   'conversationMessages',COALESCE(json_array_length(snapshot,'$.context.conversation'),0),
+   'providerMessages',COALESCE(json_array_length(snapshot,'$.messages'),0),
+   'snapshotBytes',length(CAST(snapshot AS BLOB)))),
+ fixture='',result=NULL
+ WHERE status IN ('delivered','failed','superseded','abandoned')
+ AND COALESCE(json_extract(snapshot,'$.retentionVersion'),0)<>1;
+CREATE TRIGGER dialogue_input_immutable
  BEFORE UPDATE OF snapshot,context_digest,adapter,fixture,world_id ON dialogue_jobs
+ WHEN NEW.context_digest IS NOT OLD.context_digest
+   OR NEW.adapter IS NOT OLD.adapter
+   OR NEW.world_id IS NOT OLD.world_id
+   OR NOT (OLD.status IN ('delivered','failed','superseded','abandoned')
+           AND NEW.status=OLD.status
+           AND COALESCE(json_extract(NEW.snapshot,'$.retentionVersion'),0)=1
+           AND NEW.fixture='')
  BEGIN SELECT RAISE(ABORT, 'Dialogue input is immutable'); END;
+CREATE TRIGGER dialogue_terminal_compact
+ AFTER UPDATE OF status ON dialogue_jobs
+ WHEN NEW.status IN ('delivered','failed','superseded','abandoned')
+  AND COALESCE(json_extract(NEW.snapshot,'$.retentionVersion'),0)<>1
+ BEGIN
+  UPDATE dialogue_jobs SET
+   snapshot=json_object(
+    'retentionVersion',1,
+    'context',json_object(
+     'personaId',json_extract(NEW.snapshot,'$.context.personaId'),
+     'readyMessageIds',json(COALESCE(json_extract(NEW.snapshot,'$.context.readyMessageIds'),'[]'))),
+    'provider',json_object(
+     'version',json_extract(NEW.snapshot,'$.provider.version'),
+     'scope',json_extract(NEW.snapshot,'$.provider.scope'),
+     'model',json_extract(NEW.snapshot,'$.provider.model')),
+    'summary',json_object(
+     'conversationMessages',COALESCE(json_array_length(NEW.snapshot,'$.context.conversation'),0),
+     'providerMessages',COALESCE(json_array_length(NEW.snapshot,'$.messages'),0),
+     'snapshotBytes',length(CAST(NEW.snapshot AS BLOB)))),
+   fixture='',result=NULL WHERE id=NEW.id;
+ END;
+CREATE TRIGGER dialogue_terminal_insert_compact
+ AFTER INSERT ON dialogue_jobs
+ WHEN NEW.status IN ('delivered','failed','superseded','abandoned')
+  AND COALESCE(json_extract(NEW.snapshot,'$.retentionVersion'),0)<>1
+ BEGIN
+  UPDATE dialogue_jobs SET
+   snapshot=json_object(
+    'retentionVersion',1,
+    'context',json_object(
+     'personaId',json_extract(NEW.snapshot,'$.context.personaId'),
+     'readyMessageIds',json(COALESCE(json_extract(NEW.snapshot,'$.context.readyMessageIds'),'[]'))),
+    'provider',json_object(
+     'version',json_extract(NEW.snapshot,'$.provider.version'),
+     'scope',json_extract(NEW.snapshot,'$.provider.scope'),
+     'model',json_extract(NEW.snapshot,'$.provider.model')),
+    'summary',json_object(
+     'conversationMessages',COALESCE(json_array_length(NEW.snapshot,'$.context.conversation'),0),
+     'providerMessages',COALESCE(json_array_length(NEW.snapshot,'$.messages'),0),
+     'snapshotBytes',length(CAST(NEW.snapshot AS BLOB)))),
+   fixture='',result=NULL WHERE id=NEW.id;
+ END;
 '''
 LEASE_MS=60_000
 MAX_ATTEMPTS=3
 MAX_MESSAGE_BYTES=128000
+MAX_TERMINAL_JOBS=200
+TERMINAL_STATUSES=('delivered','failed','superseded','abandoned')
 
 def encode(value):
     return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False)
+
+def compact_snapshot(value):
+    """Return the no-content audit record used after a dialogue job is terminal."""
+    raw=value if isinstance(value,str) else encode(value)
+    snapshot=json.loads(raw)
+    if snapshot.get('retentionVersion')==1:return snapshot
+    context=snapshot.get('context') if isinstance(snapshot.get('context'),dict) else {}
+    provider=snapshot.get('provider') if isinstance(snapshot.get('provider'),dict) else {}
+    ready=context.get('readyMessageIds',[])
+    return {'retentionVersion':1,
+        'context':{'personaId':context.get('personaId'),
+                   'readyMessageIds':[item for item in ready if isinstance(item,str)] if isinstance(ready,list) else []},
+        'provider':{key:provider.get(key) for key in ('version','scope','model')},
+        'summary':{'conversationMessages':len(context.get('conversation',[])) if isinstance(context.get('conversation'),list) else 0,
+                   'providerMessages':len(snapshot.get('messages',[])) if isinstance(snapshot.get('messages'),list) else 0,
+                   'snapshotBytes':len(raw.encode())}}
+
+def compact_row(row):
+    """Compact a portable terminal row without mutating the source database."""
+    item=dict(row)
+    if item.get('status') in TERMINAL_STATUSES:
+        item.update(snapshot=encode(compact_snapshot(item['snapshot'])),fixture='',result=None,
+                    token=None,lease_until=None)
+    return item
+
+def prune_terminal_jobs(db,world_id,now):
+    """Bound audit rows without weakening the current UTC-day spend ledger."""
+    day=int(now)//86_400_000*86_400_000
+    protected={row[0] for row in db.execute(
+        'SELECT u.job_id FROM dialogue_usage u JOIN dialogue_jobs d ON d.id=u.job_id '
+        'WHERE d.world_id=? AND u.at>=? AND u.at<?',(world_id,day,day+86_400_000))}
+    rows=db.execute("SELECT id FROM dialogue_jobs WHERE world_id=? AND status IN ('delivered','failed','superseded','abandoned') "
+                    'ORDER BY created_at DESC,rowid DESC',(world_id,)).fetchall()
+    victims=[row[0] for row in rows[MAX_TERMINAL_JOBS:] if row[0] not in protected]
+    for start in range(0,len(victims),500):
+        chunk=victims[start:start+500];marks=','.join('?' for _ in chunk)
+        db.execute('DELETE FROM dialogue_receipts WHERE job_id IN ('+marks+')',chunk)
+        db.execute('DELETE FROM dialogue_usage WHERE job_id IN ('+marks+')',chunk)
+        db.execute('DELETE FROM dialogue_jobs WHERE id IN ('+marks+')',chunk)
+    return len(victims)
 
 def plain_text_parts(output):
     """Conservative compatibility for short texts from unstructured providers.
@@ -103,6 +214,28 @@ class DialogueQueue:
             'scope':'Authored general reasoning anchor, specific cognitive abilities, learned expertise, knowledge gaps, learning pattern, adaptive skills and blind spots. Specific dimensions override the overall anchor. This is characterization, not diagnosis. It never supplies morality, personality, education, omniscience, childish speech or human worth.'}
         context['mind']={'profile':c.get('mindProfile',{}),'runtime':c.get('mindRuntime',{}),'resolved':c.get('mindContext',{}),
             'scope':'Private authored tendencies and mechanically activated cue pressures. Pressure changes salience and urges, not facts, consent, permission or a compulsory action. The person may express, mask, redirect, ritualize, resist, regret or act according to restraint, values, boundaries, circumstances and consequences. Adult cues require the separate adult desire system. Clinical-lived-experience modules never imply violence, stalking, sexuality or split personalities.'}
+        # A visible promise to send a photo is only valid when the same durable
+        # reply transaction can queue the image job. Do not ask the model to
+        # infer provider readiness from character prose or Studio settings.
+        from . import vh2_workers
+        provider=None
+        scope=state.get('integration',{}).get('providerScope')
+        if scope:
+            with self.service.connect() as media_db:provider=vh2_workers.current(media_db,scope)
+        image_config=json.loads(provider['config']) if provider else {}
+        has_identity_reference=any(entry.get('role')=='identity' and entry.get('status')=='approved' and entry.get('assetId')
+                                   for entry in c.get('vh2Assets',{}).get('entries',[]))
+        image_busy=any(photo.get('status') in ('captured','submitted') and photo.get('origin')!='autonomous'
+                       for photo in state.get('photos',[]))
+        photo_enabled=(c.get('allowPhotos') is not False and has_identity_reference and not image_busy and bool(provider)
+                       and image_config.get('enabled') is True
+                       and (image_config.get('provider') in ('magnific','higgsfield')
+                            or bool(provider.get('api_key'))))
+        context['mediaActions']={'photo':{
+            'enabled':photo_enabled,
+            'scope':'A photo action queues one real image job after this reply is accepted. The image arrives as a separate chat message only after the provider returns it. Never describe a photo as sent, attached, shown or already visible unless this response includes the action.',
+            **({'captureTypes':['front_camera_selfie','mirror_selfie'],'sceneLimit':600}
+               if photo_enabled else {'reason':'Photo sending is unavailable or automatic image generation is off. Do not claim to send an image.'})}}
         context['conversationBrief']=vh2_conversation.brief(context)
         # An unread follow-up changes the response batch without leaking its text.
         pending=[m['id'] for m in state.get('communication',{}).get('messages',[]) if m.get('awaitingReply')]
@@ -127,6 +260,10 @@ class DialogueQueue:
             request['messages'][0]['content'] += ' This exchange is a phone call. Return reply as one string. Speak naturally in short spoken turns; no stage directions or written emoji/abbreviations read aloud. Current activity still governs availability. Never claim to see the caller or their surroundings without supplied evidence.'
         else:
             request['messages'][0]['content'] += ' For this text exchange, return only a JSON reply envelope. When the response contains independent short thoughts that would be sent as separate text messages, return a JSON reply array of 1–4 nonempty strings, one actual bubble per string. An answer followed by a separate reaction can be two texts even when each is only a fragment. Do not encode separate bubbles using single or double newlines inside one string. A string means one coherent message; keep genuine paragraphs within one message in that string. Do not split every sentence, inflate a short answer or add filler to reach a number of bubbles. All bubbles express one response to this pending batch; they are not a scripted future conversation.'
+            if photo_enabled:
+                request['messages'][0]['content'] += ' If this person chooses to take and send a photo now, include one optional photoAction object with exactly {"decision":"send","scene":"a concrete, physically possible description of the photograph","captureType":"front_camera_selfie" or "mirror_selfie"}. This is a costly real action, never required just because the player asks. The action queues the image; phrase the visible reply as an intention or brief lead-in, never as though the image is already attached, delivered or visible. Omit photoAction when declining, postponing or only discussing a photo.'
+            else:
+                request['messages'][0]['content'] += ' Photo sending is unavailable for this turn. Do not include photoAction and do not say or imply that a photo was sent, attached or is visible.'
         return request,digest
 
     def queue(self,db,world_id,revision,state,body):
@@ -144,7 +281,7 @@ class DialogueQueue:
         if adapter=='chat_completions':
             recent=db.execute("SELECT status,reason,snapshot FROM dialogue_jobs WHERE world_id=? ORDER BY rowid DESC LIMIT 20",(world_id,)).fetchall()
             if any(row['status']=='failed' and row['reason']=='Malformed structured reply; no metadata was delivered.' and json.loads(row['snapshot'])['context']['readyMessageIds']==request['context']['readyMessageIds'] for row in recent):
-                request['messages'].append({'role':'system','content':'Output formatting recovery: return exactly one valid JSON object with only the key "reply" containing an array of 1 to 4 short text strings. No markdown fences, commentary, appraisals, commitments or conversationMove. Do not mention this formatting instruction in the reply.'})
+                request['messages'].append({'role':'system','content':'Output formatting recovery: return exactly one valid JSON object with only the key "reply" containing an array of 1 to 4 short text strings. No markdown fences, commentary, appraisals, commitments, conversationMove or photoAction. Do not claim a photo was sent, attached or shown in this recovery reply. Do not mention this formatting instruction in the reply.'})
         if adapter=='chat_completions':request['provider']=self.service.dialogue_provider.freeze(db,state.get('integration',{}).get('providerScope'))
         # The immutable job also retains the full audit context. That record is
         # not sent to the provider and must not count the character's life twice.
@@ -157,7 +294,10 @@ class DialogueQueue:
                    (job_id,world_id,encode(request),digest,adapter,text.strip() if adapter=='offline_fixture' else '', 'queued',self.service.clock()))
         after['communication']['replyJob']={'id':job_id,'status':'queued'}
         revision=self.service.commit_event(db,world_id,revision,state,after,'DIALOGUE_QUEUED',
-            {'jobId':job_id,'snapshot':request,'contextDigest':digest,'adapter':adapter})
+            {'jobId':job_id,'contextDigest':digest,'adapter':adapter,
+             'personaId':request['context'].get('personaId'),
+             'readyMessageCount':len(request['context']['readyMessageIds']),
+             'model':(request.get('provider') or {}).get('model')})
         return revision,after,job_id
 
     def maybe_queue(self,db,world_id,revision,state):
@@ -246,6 +386,7 @@ class DialogueQueue:
         after['communication']['replyJob']={'id':job['id'],'status':status,'reason':reason}
         self.service.commit_event(db,job['world_id'],revision,state,after,'DIALOGUE_'+status.upper(),
                                   {'jobId':job['id'],'reason':reason,'attempt':job['attempt']})
+        prune_terminal_jobs(db,job['world_id'],self.service.clock())
 
     def claim(self):
         s=self.service
@@ -296,11 +437,11 @@ class DialogueQueue:
                 output=fenced.group(1).strip()
                 if not output.startswith('{'):
                     self.transition(db,job,'failed','Malformed structured reply; no metadata was delivered.');return False
-            proposals=[];commitments=[];conversation_move=None;parts=None
+            proposals=[];commitments=[];conversation_move=None;photo_action=None;parts=None
             if output.lstrip().startswith(('{','[','```')):
                 try:
                     envelope=json.loads(output,parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Non-finite number')))
-                    if not isinstance(envelope,dict) or 'reply' not in envelope or set(envelope)-{'reply','appraisals','commitments','conversationMove'} or not isinstance(envelope.get('appraisals',[]),list) or len(envelope.get('appraisals',[]))>3:raise ValueError()
+                    if not isinstance(envelope,dict) or 'reply' not in envelope or set(envelope)-{'reply','appraisals','commitments','conversationMove','photoAction'} or not isinstance(envelope.get('appraisals',[]),list) or len(envelope.get('appraisals',[]))>3:raise ValueError()
                     raw_reply=envelope['reply'];parts=raw_reply if isinstance(raw_reply,list) else [raw_reply]
                     if not 1<=len(parts)<=4 or any(not isinstance(part,str) or not part.strip() for part in parts):raise ValueError()
                     parts=[part.strip() for part in parts];output='\n\n'.join(parts)
@@ -309,6 +450,12 @@ class DialogueQueue:
                     conversation_move=envelope.get('conversationMove')
                     if conversation_move is not None and conversation_move not in vh2_conversation.MOVES:raise ValueError()
                     if not isinstance(commitments,list) or len(commitments)>2:raise ValueError()
+                    photo_action=envelope.get('photoAction')
+                    if photo_action is not None:
+                        if (not isinstance(photo_action,dict) or set(photo_action)!={'decision','scene','captureType'}
+                            or photo_action.get('decision')!='send'
+                            or not isinstance(photo_action.get('scene'),str) or not 1<=len(photo_action['scene'].strip())<=600
+                            or photo_action.get('captureType') not in ('front_camera_selfie','mirror_selfie')):raise ValueError()
                     if re.search(r'<(?:\|(?:channel|im_start|im_end)|/?(?:think|analysis|reasoning)\b)',output,re.I):raise ValueError()
                 except (ValueError,TypeError):
                     self.transition(db,job,'failed','Malformed structured reply; no metadata was delivered.');return False
@@ -323,10 +470,30 @@ class DialogueQueue:
             ready=request['context']['readyMessageIds']
             if digest!=job['context_digest'] or not ready:
                 self.transition(db,job,'superseded','Conversation, attention or situation changed during expression.');return False
+            if photo_action and (not request['context'].get('mediaActions',{}).get('photo',{}).get('enabled')
+                                 or (request['context'].get('call') or {}).get('status')=='active'):
+                self.transition(db,job,'failed','Photo action was unavailable; no partial reply was delivered.');return False
             if proposals or commitments:
                 after['truth']=s.kernel({'companion':after['truth']['companion'],'now':after['simAt'],'inspect':True,
                     'appraisal':{'proposals':proposals,'commitments':commitments,'personaId':after['communication'].get('personaId'),
                     'messages':[m for m in after['communication']['messages'] if m['id'] in ready]}})
+            photo_id=None
+            if photo_action:
+                # The capture, provider job and reply either all persist or none
+                # do. A provider/settings race must not leave text claiming an
+                # image is coming when no durable image job exists.
+                from . import vh2_media, vh2_workers
+                db.execute('SAVEPOINT dialogue_photo_action')
+                try:
+                    revision,after,photo_id=vh2_media.command(s,db,job['world_id'],revision,after,{
+                        'type':'capture_photo','key':job['id']+':photo','scene':photo_action['scene'].strip(),
+                        'captureType':photo_action['captureType'],'destination':'private_chat','origin':'dialogue_action'})
+                    revision,after=vh2_workers.queue_image(s,db,job['world_id'],revision,after,photo_id,
+                                                          automatic=True,purpose='dialogue')
+                    db.execute('RELEASE dialogue_photo_action')
+                except (ValueError,self.conflict):
+                    db.execute('ROLLBACK TO dialogue_photo_action');db.execute('RELEASE dialogue_photo_action')
+                    self.transition(db,job,'failed','Photo action could not be queued; no partial reply was delivered.');return False
             # One atomic provider result may be several authored text bubbles.
             # A call remains one spoken turn; no extra jobs, artificial waits or
             # repeated appraisals are introduced by a text burst.
@@ -340,7 +507,8 @@ class DialogueQueue:
             after['communication']['replyJob']={'id':job['id'],'status':'delivered'}
             db.execute("UPDATE dialogue_jobs SET status='delivered',result=?,token=NULL,lease_until=NULL,reason='' WHERE id=?",(output.strip(),job['id']))
             s.commit_event(db,job['world_id'],revision,state,after,'REPLY_DELIVERED',
-                           {'jobId':job['id'],'messageId':job['id'],'messageIds':message_ids,'sourceMessageIds':ready,'contextDigest':digest,'conversationMove':conversation_move,'conversationQuality':vh2_conversation.quality_flags(request['context'],output.strip())})
+                           {'jobId':job['id'],'messageId':job['id'],'messageIds':message_ids,'sourceMessageIds':ready,'contextDigest':digest,'conversationMove':conversation_move,'photoId':photo_id,'conversationQuality':vh2_conversation.quality_flags(request['context'],output.strip())})
+            prune_terminal_jobs(db,job['world_id'],s.clock())
             return True
 
     def dismiss_unknown(self,db,world_id,job_id):
@@ -447,5 +615,8 @@ class DialogueQueue:
                     remaining-=min(len(content),remaining)
                     if not remaining:
                         truncated=truncated or len(preview)<len(snapshot.get('messages',[]));break
-                item['promptPreview']=preview;item['promptTruncated']=truncated;result.append(item)
+                item['promptPreview']=preview;item['promptTruncated']=truncated
+                item['promptExpired']=snapshot.get('retentionVersion')==1
+                item['promptSummary']=snapshot.get('summary') if item['promptExpired'] else None
+                result.append(item)
             return result

@@ -1,5 +1,5 @@
 """Durable incoming attachments; binary data never replaces message history."""
-import base64,hashlib
+import base64
 
 def store(db,world,message_id,body):
  kind=body.get('messageType','text')
@@ -16,7 +16,9 @@ def store(db,world,message_id,body):
    if not valid:raise ValueError()
   if kind=='photo' and not (raw.startswith(b'\x89PNG\r\n\x1a\n') or raw.startswith(b'\xff\xd8\xff') or raw.startswith(b'RIFF') and raw[8:12]==b'WEBP'):raise ValueError()
  except (ValueError,TypeError):raise ValueError('Choose a supported image or audio file.')
- ident=hashlib.sha256((world+message_id).encode()+raw).hexdigest();db.execute('INSERT INTO photo_assets VALUES (?,?,?,?)',(ident,world,mime,raw))
+ from .vh2_media import optimize_image_bytes,store_asset
+ if kind=='photo':mime,raw=optimize_image_bytes(mime,raw)
+ ident=store_asset(db,world,mime,raw)
  fmt={'audio/wav':'wav','audio/x-wav':'wav','audio/mpeg':'mp3','audio/mp3':'mp3','audio/mp4':'m4a','audio/x-m4a':'m4a','audio/webm':'webm','audio/webm;codecs=opus':'webm','audio/ogg':'ogg'}.get(mime)
  return {'type':kind,'assetId':ident,'attachmentMime':mime,**({'audioFormat':fmt} if fmt else {})}
 

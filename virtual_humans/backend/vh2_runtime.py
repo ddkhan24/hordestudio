@@ -35,26 +35,54 @@ from . import vh2_gifts
 from . import vh2_transcript
 from . import vh2_library
 from . import vh2_conversations
+from . import vh2_memory
 from contextlib import contextmanager
+import base64
+import binascii
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import threading
 import time
 import uuid
+import zlib
 from .vh2_migration import inspect_archive
 from .vh2_dialogue import DialogueQueue, SCHEMA as DIALOGUE_SCHEMA
 from .vh2_provider import ProviderStore, SCHEMA as PROVIDER_SCHEMA
 from .vh2_entities import entities, transitions, PROJECTION_VERSION
 
 SCHEMA_VERSION = 1
-DATABASE_VERSION = 9
+DATABASE_VERSION = 10
 KERNEL_VERSION = 'vh2-foundation-1'
 QUANTUM = 300_000
 MAX_BATCH = 12
+EVENT_COMPRESSION_PREFIX = 'zlib-json-v1:'
+MAX_EVENT_PAYLOAD_BYTES = 128 * 1024 * 1024
+# The event table is a replay aid, not the canonical home for conversations,
+# memories or media.  Keep a useful recent window, then replace older deltas
+# with one verified state checkpoint.  This prevents cumulative arrays in a
+# complex life from turning an O(days) simulation into O(days^2) disk growth.
+MAX_DETAILED_EVENT_ROWS = 1024
+LANDMARK_DETAILS_MAX_BYTES = 8192
+
+ROUTINE_EVENT_KINDS = {
+    'SIMULATION_ADVANCED', 'COMMUNICATION_TIME_SYNCHRONIZED',
+    'WEATHER_REFRESH_REQUESTED', 'WEATHER_OBSERVED', 'WEATHER_REFRESH_FAILED',
+    'WORLD_FEED_REFRESHED', 'LIFE_ADVISER_STATUS', 'ROUTE_RESOLVED',
+    'DIALOGUE_QUEUED', 'DIALOGUE_LEASED', 'DIALOGUE_SUBMITTED',
+    'DIALOGUE_SUPERSEDED', 'DIALOGUE_FAILED', 'HISTORY_RESOLVED',
+}
+MILESTONE_EVENT_KINDS = {
+    'WORLD_CREATED', 'LIVES_MERGED', 'LIFE_MERGED_INTO', 'LIFE_REBOOTED',
+    'KERNEL_UPGRADED', 'LIFE_SETUP_APPLIED',
+}
+MILESTONE_EVENT_WORDS = ('MILESTONE','MARRIAGE','ENGAGEMENT','BREAKUP','BIRTH','DEATH','GRADUAT','MOVED_HOME')
+IMPORTANT_EVENT_WORDS = ('RELATIONSHIP','MEMORY','GIFT','MESSAGE','REPLY_DELIVERED','PHOTO_STORED','PHOTO_DELIVERED',
+                         'SOCIAL_EXPRESSION_COMPLETED','PERSON_LIFE','PLAYER_PROFILE','CONVERSATION_OPENED')
 
 class Conflict(ValueError):
     pass
@@ -62,6 +90,50 @@ class Conflict(ValueError):
 
 def encode(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+def encode_event_payload(value):
+    """Store large immutable deltas compactly without changing their meaning."""
+    raw = encode(value).encode('utf-8')
+    if len(raw) > MAX_EVENT_PAYLOAD_BYTES:
+        raise ValueError('VH2 event payload exceeds the 128 MB safety limit.')
+    if len(raw) < 4096:
+        return raw.decode('utf-8')
+    packed = zlib.compress(raw, level=6)
+    encoded = base64.b64encode(packed).decode('ascii')
+    return EVENT_COMPRESSION_PREFIX + encoded if len(encoded) + len(EVENT_COMPRESSION_PREFIX) < len(raw) else raw.decode('utf-8')
+
+
+def decode_event_payload(value):
+    """Read both legacy JSON event rows and compact v1 rows."""
+    if isinstance(value, bytes):
+        value = value.decode('utf-8')
+    if not isinstance(value, str):
+        raise ValueError('Invalid VH2 event payload.')
+    if not value.startswith(EVENT_COMPRESSION_PREFIX):
+        if len(value.encode('utf-8')) > MAX_EVENT_PAYLOAD_BYTES:
+            raise ValueError('VH2 event payload exceeds the 128 MB safety limit.')
+        return json.loads(value)
+    encoded=value[len(EVENT_COMPRESSION_PREFIX):]
+    # A payload produced by encode_event_payload() can never need more than
+    # base64's 4/3 expansion of the raw safety limit. Reject oversized input
+    # before base64 decoding so a damaged/imported row cannot force a second,
+    # much larger allocation ahead of the decompression bound below.
+    if len(encoded)>((MAX_EVENT_PAYLOAD_BYTES+2)//3)*4+16:
+        raise ValueError('VH2 event payload exceeds the 128 MB safety limit.')
+    try:
+        packed = base64.b64decode(encoded, validate=True)
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(packed, MAX_EVENT_PAYLOAD_BYTES + 1)
+        if (len(raw) > MAX_EVENT_PAYLOAD_BYTES or inflater.unconsumed_tail or
+                inflater.unused_data or not inflater.eof):
+            raise ValueError()
+        raw += inflater.flush()
+        if len(raw) > MAX_EVENT_PAYLOAD_BYTES:
+            raise ValueError()
+        return json.loads(raw.decode('utf-8'))
+    except (binascii.Error, UnicodeDecodeError, ValueError, zlib.error, json.JSONDecodeError):
+        raise ValueError('Damaged compressed VH2 event payload.') from None
 
 
 def delta(before, after, path=()):
@@ -94,6 +166,205 @@ def apply_delta(state, changes):
     return state
 
 
+def event_priority(kind, details=None):
+    """Return 0=routine, 1=notable, 2=important, 3=tentpole.
+
+    Producers may explicitly flag a durable landmark. Unknown event kinds are
+    retained as small notable metadata so a new meaningful feature is never
+    silently classified as disposable simulation noise.
+    """
+    details=details if isinstance(details,dict) else {}
+    explicit=details.get('landmarkPriority')
+    if type(explicit) is int and 0<=explicit<=3:return explicit
+    if kind in ROUTINE_EVENT_KINDS:return 0
+    if kind in MILESTONE_EVENT_KINDS or any(word in kind for word in MILESTONE_EVENT_WORDS):return 3
+    if any(word in kind for word in IMPORTANT_EVENT_WORDS):return 2
+    return 1
+
+
+def compact_landmark_details(value, depth=0):
+    """Keep descriptive metadata, never another embedded state snapshot."""
+    if value is None or type(value) in (bool,int,float):return value
+    if isinstance(value,str):return value[:600]
+    if depth>=3:return None
+    if isinstance(value,list):
+        result=[]
+        for item in value[:20]:
+            compact=compact_landmark_details(item,depth+1)
+            if compact is not None:result.append(compact)
+        return result
+    if isinstance(value,dict):
+        omitted={'snapshot','state','changes','entityChanges','request','response','prompt','promptPreview'}
+        result={}
+        for key in sorted(value):
+            if key in omitted or not isinstance(key,str):continue
+            compact=compact_landmark_details(value[key],depth+1)
+            if compact is not None:result[key[:100]]=compact
+            if len(encode(result).encode())>LANDMARK_DETAILS_MAX_BYTES:
+                result.pop(key[:100],None);break
+        return result
+    return None
+
+
+def event_landmark(kind, at, details=None):
+    details=details if isinstance(details,dict) else {}
+    priority=event_priority(kind,details)
+    if not priority:return None
+    explicit=details.get('landmarkSummary')
+    summary=(explicit.strip()[:240] if isinstance(explicit,str) and explicit.strip()
+             else kind.replace('_',' ').strip().title()[:240])
+    compact=compact_landmark_details(details)
+    if isinstance(compact,dict):
+        compact.pop('landmarkPriority',None);compact.pop('landmarkSummary',None)
+    return {'at':at,'kind':kind,'priority':priority,'summary':summary,'details':compact or {}}
+
+
+def store_event_landmark(db, world_id, seq, kind, at, details=None):
+    landmark=event_landmark(kind,at,details)
+    if landmark:
+        db.execute('INSERT OR IGNORE INTO event_landmarks VALUES (?,?,?,?,?,?,?)',
+                   (world_id,seq,landmark['at'],landmark['kind'],landmark['priority'],
+                    landmark['summary'],encode(landmark['details'])))
+    return landmark
+
+
+@contextmanager
+def exclusive_storage_file_lock(database_path):
+    """Best-effort cross-process gate for destructive SQLite maintenance."""
+    lock_path=Path(str(database_path)+'.maintenance.lock')
+    descriptor=os.open(lock_path,os.O_CREAT|os.O_RDWR,0o600)
+    try:
+        try:
+            import fcntl
+            fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except ImportError:
+            # SQLite's own exclusive lock remains the fallback on platforms
+            # without POSIX flock support.
+            pass
+        except BlockingIOError:
+            raise Conflict('Another process is maintaining this life database.') from None
+        yield
+    finally:
+        try:
+            if 'fcntl' in locals():fcntl.flock(descriptor,fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def compact_event_history(db, world_id, revision, state, kernel_version, max_rows=MAX_DETAILED_EVENT_ROWS):
+    """Bound internal replay history without deleting user-visible history.
+
+    The first event is retained for migration/repair evidence.  The current
+    canonical state becomes a root checkpoint at the current sequence.  New
+    detailed events continue from there, so replay remains exact while
+    transcript, memories, media and all other durable projection tables are
+    untouched.
+    """
+    row_count = db.execute('SELECT COUNT(*) FROM events WHERE world_id=?', (world_id,)).fetchone()[0]
+    if row_count <= max_rows:
+        return None
+    first = db.execute(
+        'SELECT world_id,seq,at,kind,payload FROM events WHERE world_id=? ORDER BY seq LIMIT 1',
+        (world_id,),
+    ).fetchone()
+    if first is None or first['seq'] == revision:
+        return None
+    # Preserve the shape of the old life at human resolution before removing
+    # low-level deltas. This reads only indexed event metadata, not payloads.
+    for row in db.execute('SELECT seq,at,kind FROM events WHERE world_id=? ORDER BY seq',(world_id,)):
+        store_event_landmark(db,world_id,row['seq'],row['kind'],row['at'])
+    checkpoint = {
+        'schemaVersion': SCHEMA_VERSION,
+        'kernelVersion': kernel_version,
+        'changes': [{'path': [], 'value': state}],
+        'details': {
+            'synthetic': True,
+            'historyCheckpoint': True,
+            'compactedEventCount': row_count,
+            'firstSequence': first['seq'],
+            'sourceRevision': revision,
+        },
+    }
+    # SQLite schema changes are transactional.  The delete guard is restored
+    # before this transaction can commit, and a rollback restores it too.
+    db.execute('DROP TRIGGER IF EXISTS events_no_delete')
+    try:
+        db.execute('DELETE FROM events WHERE world_id=?', (world_id,))
+        db.execute('INSERT INTO events VALUES (?,?,?,?,?)', tuple(first))
+        db.execute(
+            'INSERT INTO events VALUES (?,?,?,?,?)',
+            (world_id, revision, state['simAt'], 'HISTORY_CHECKPOINT', encode_event_payload(checkpoint)),
+        )
+    finally:
+        db.execute('''CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
+            BEGIN SELECT RAISE(ABORT, 'World events are append-only'); END''')
+    replayed={}
+    for row in db.execute('SELECT payload FROM events WHERE world_id=? ORDER BY seq',(world_id,)):
+        replayed=apply_delta(replayed,decode_event_payload(row[0])['changes'])
+    if replayed!=state:
+        raise RuntimeError('Event checkpoint verification failed; original ledger was not changed.')
+    return {'before': row_count, 'after': 2, 'revision': revision}
+
+
+def compact_photo_capture_history(db, world_states):
+    """Rewrite legacy capture documents to the minimal immutable image input.
+
+    The photo snapshot trigger protects ordinary application writes. Explicit
+    storage maintenance may replace only the representation, and active
+    captures are compiled before and after to prove prompt/reference/request
+    equivalence before the transaction can commit.
+    """
+    before_bytes=db.execute('SELECT COALESCE(SUM(LENGTH(snapshot)),0) FROM photo_jobs').fetchone()[0]
+    prepared=[];verified=0
+    verification_config={'model':'vh2-storage-equivalence','maxReferences':20,'provider':'openrouter'}
+    photos={world_id:{item.get('id'):item for item in state.get('photos',[]) if isinstance(item,dict)}
+            for world_id,state in world_states.items()}
+
+    def compiled(world_id,state,snapshot,photo):
+        try:
+            request,hashes,reference_ids=vh2_workers.compile_image(
+                db,world_id,state,snapshot,verification_config,photo
+            )
+            return ('compiled',request,hashes,reference_ids)
+        except ValueError as error:
+            # An unfinished capture may intentionally be waiting for a missing
+            # approved reference. Its exact pre-existing failure is semantic too.
+            return ('rejected',type(error).__name__,str(error))
+
+    # Stream legacy documents one at a time; a real long-running life can have
+    # hundreds of megabytes here and maintenance must not duplicate all of it
+    # in process memory before doing useful work.
+    for row in db.execute('SELECT id,world_id,snapshot FROM photo_jobs ORDER BY world_id,id'):
+        old=json.loads(row['snapshot'])
+        compact=vh2_media.compact_capture_snapshot(old)
+        encoded=encode(compact)
+        if encoded==row['snapshot']:continue
+        state=world_states.get(row['world_id'])
+        photo=photos.get(row['world_id'],{}).get(row['id'])
+        if state is None:raise RuntimeError('A photo capture refers to a missing life.')
+        if photo is None:
+            archived=db.execute("SELECT data FROM media_records WHERE world_id=? AND kind='photo' AND id=?",
+                                (row['world_id'],row['id'])).fetchone()
+            if archived:photo=json.loads(archived['data'])
+        if photo and photo.get('status') in ('captured','submitted'):
+            if compiled(row['world_id'],state,old,photo)!=compiled(row['world_id'],state,compact,photo):
+                raise RuntimeError('Photo snapshot compaction changed an active image request; no storage changes were committed.')
+            verified+=1
+        prepared.append((encoded,row['id'],row['world_id']))
+
+    if prepared:
+        db.execute('DROP TRIGGER IF EXISTS photo_snapshot_immutable')
+        try:
+            db.executemany('UPDATE photo_jobs SET snapshot=? WHERE id=? AND world_id=?',prepared)
+        finally:
+            db.execute('''CREATE TRIGGER IF NOT EXISTS photo_snapshot_immutable BEFORE UPDATE ON photo_jobs
+                BEGIN SELECT RAISE(ABORT,'Photo captures are immutable'); END''')
+    after_bytes=db.execute('SELECT COALESCE(SUM(LENGTH(snapshot)),0) FROM photo_jobs').fetchone()[0]
+    return {'beforeBytes':before_bytes,'afterBytes':after_bytes,
+            'bytesReduced':max(0,before_bytes-after_bytes),'rowsCompacted':len(prepared),
+            'activeRowsVerified':verified}
+
+
 class WorldService:
     def __init__(self, path, node, app_dir, clock=None):
         self.path, self.node, self.app_dir = Path(path), node, Path(app_dir)
@@ -105,6 +376,8 @@ class WorldService:
         self.clock = clock or (lambda: int(time.time()*1000))
         self._stop = threading.Event()
         self._worker_lock=threading.Lock();self._worker_pending={};self._worker_pool=None
+        self._storage_lock=threading.Lock()
+        self._storage_optimizing=False;self._storage_owner=None
         self.route_executor=None;self.image_executor=vh2_workers.image_transport
         self._feed_lock = threading.Lock()
         self._thread = None
@@ -114,11 +387,20 @@ class WorldService:
         self.dialogue_provider = ProviderStore(self)
         self.last_error = ''
         self.maintenance_health = {}
+        self.storage_last_compaction = None
+        self.storage_last_memory_resolution = None
+        self._last_memory_maintenance_at = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, DATABASE_VERSION):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, DATABASE_VERSION):
                 raise ValueError('Unsupported VH2 database version; preserve it and upgrade the application.')
+            # Fresh databases support incremental page reclamation. Freed pages
+            # are immediately reusable; the explicit verified optimiser returns
+            # them to the filesystem. Existing stores switch mode there too.
+            if version == 0 and not db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone():
+                db.execute('PRAGMA auto_vacuum=INCREMENTAL')
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS worlds (
                     id TEXT PRIMARY KEY, revision INTEGER NOT NULL, state TEXT NOT NULL);
@@ -135,6 +417,17 @@ class WorldService:
                 BEGIN SELECT RAISE(ABORT, 'World events are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
                 BEGIN SELECT RAISE(ABORT, 'World events are append-only'); END;
+                CREATE TABLE IF NOT EXISTS event_landmarks (
+                    world_id TEXT NOT NULL REFERENCES worlds(id), seq INTEGER NOT NULL,
+                    at INTEGER NOT NULL, kind TEXT NOT NULL, priority INTEGER NOT NULL,
+                    summary TEXT NOT NULL, details TEXT NOT NULL,
+                    PRIMARY KEY(world_id,seq));
+                CREATE INDEX IF NOT EXISTS event_landmarks_time
+                    ON event_landmarks(world_id,priority,at);
+                CREATE TRIGGER IF NOT EXISTS event_landmarks_no_update BEFORE UPDATE ON event_landmarks
+                BEGIN SELECT RAISE(ABORT, 'Life landmarks are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS event_landmarks_no_delete BEFORE DELETE ON event_landmarks
+                BEGIN SELECT RAISE(ABORT, 'Life landmarks are immutable'); END;
                 CREATE TABLE IF NOT EXISTS checkpoints (
                     id TEXT PRIMARY KEY, source_text TEXT NOT NULL, report TEXT NOT NULL, created_at INTEGER NOT NULL);
                 CREATE TRIGGER IF NOT EXISTS checkpoints_no_update BEFORE UPDATE ON checkpoints
@@ -158,31 +451,48 @@ class WorldService:
             db.executescript(DIALOGUE_SCHEMA)
             db.executescript(PROVIDER_SCHEMA)
             db.executescript(vh2_transcript.SCHEMA)
+            db.executescript(vh2_memory.SCHEMA)
             db.executescript(vh2_library.SCHEMA)
-            for row in db.execute('SELECT id,state FROM worlds').fetchall():
-                old=json.loads(row['state']);vh2_library.index(db,row['id'],'photo',old.get('photos',[]));vh2_library.index(db,row['id'],'post',old.get('social',{}).get('posts',[]))
-            for row in db.execute('SELECT id,state FROM worlds').fetchall():
-                vh2_transcript.index(db,row['id'],json.loads(row['state']).get('communication',{}).get('messages',[]))
+            # Versions before 9 kept media/transcript history only inside each
+            # world JSON document. Backfill those projection tables once during
+            # migration. Version 9 and later are maintained transactionally by
+            # commit_event(); reparsing every multi-megabyte active state on
+            # every launcher start added pure startup cost and no new data.
+            if version < 9:
+                for row in db.execute('SELECT id,state FROM worlds').fetchall():
+                    old=json.loads(row['state']);vh2_library.index(db,row['id'],'photo',old.get('photos',[]));vh2_library.index(db,row['id'],'post',old.get('social',{}).get('posts',[]))
+                for row in db.execute('SELECT id,state FROM worlds').fetchall():
+                    vh2_transcript.index(db,row['id'],json.loads(row['state']).get('communication',{}).get('messages',[]))
             db.executescript(_vh_import_module('.vh2_social_worker',__package__).SCHEMA)
             db.executescript(_vh_import_module('.vh2_story',__package__).SCHEMA)
             db.executescript(vh2_workers.SCHEMA)
             db.executescript(vh2_flights.SCHEMA)
             db.executescript(vh2_ticketmaster.SCHEMA)
             db.execute("UPDATE vh2_provider_jobs SET status='unknown',error='Host restarted after submission; do not automatically retry.' WHERE status='submitted'")
-            db.execute('PRAGMA user_version=9')
+            db.execute(f'PRAGMA user_version={DATABASE_VERSION}')
             db.execute('DROP INDEX IF EXISTS one_active_dialogue_v2')
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active_dialogue_v3 ON dialogue_jobs(world_id) WHERE status IN ('queued','leased','submitted')")
-            for row in db.execute('SELECT id,revision,state FROM worlds').fetchall():
-                saved=json.loads(row['state'])
-                if not saved.get('mergedInto') and saved['kernelVersion']==self.kernel_version:
-                    vh2_social.repair_starter_duplicates(self,db,row['id'],row['revision'],saved)
+            if version < 9:
+                for row in db.execute('SELECT id,revision,state FROM worlds').fetchall():
+                    saved=json.loads(row['state'])
+                    if not saved.get('mergedInto') and saved['kernelVersion']==self.kernel_version:
+                        vh2_social.repair_starter_duplicates(self,db,row['id'],row['revision'],saved)
         os.chmod(self.path, 0o600)
 
     @contextmanager
     def connect(self):
+        if self._storage_optimizing and threading.get_ident()!=self._storage_owner:
+            raise Conflict('Life storage maintenance is in progress. Try again when it finishes.')
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA foreign_keys=ON')
+        # auto_vacuum must be selected before WAL creates the first database
+        # pages.  Setting it later is silently ignored by SQLite, which left
+        # fresh installations able to reuse freed pages but unable to return
+        # them to disk during background resolution.
+        if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone():
+            db.execute('PRAGMA auto_vacuum=INCREMENTAL')
         db.execute('PRAGMA journal_mode=WAL')
         db.execute('PRAGMA synchronous=FULL')
         try:
@@ -233,14 +543,14 @@ class WorldService:
         payload = {'schemaVersion': SCHEMA_VERSION, 'kernelVersion': self.kernel_version,
                    'changes': delta(before, after), 'details': {**(details or {}), 'entityChanges':transitions(before,after)}}
         db.execute('INSERT INTO events VALUES (?,?,?,?,?)',
-                   (world_id, revision, after['simAt'], kind, encode(payload)))
+                   (world_id, revision, after['simAt'], kind, encode_event_payload(payload)))
+        store_event_landmark(db,world_id,revision,kind,after['simAt'],details)
         db.execute('UPDATE worlds SET revision=?,state=? WHERE id=?', (revision,encode(after),world_id))
         self.index_entities(db,world_id,revision,after)
         prior_ids={e['id'] for e in before.get('truth',{}).get('companion',{}).get('vh2Psychology',{}).get('episodes',[])}
         for episode in after['truth']['companion'].get('vh2Psychology',{}).get('episodes',[]):
             if episode['id'] not in prior_ids:
-                db.execute('INSERT OR IGNORE INTO memory_episodes VALUES (?,?,?,?,?,?)',
-                           (world_id,episode['id'],revision,episode['at'],episode['summary'],encode(episode)))
+                vh2_memory.store_episode(db,world_id,episode,revision)
         # The next wakeup is committed with the state, not held only in memory.
         if after['running']:
             due = after['wallAnchor'] + self.next_boundary(after) - after['simAnchor']
@@ -478,8 +788,8 @@ class WorldService:
                 elif kind in ('receive_message','stage_reply','deliver_reply'):
                     revision,state=self.communication_command(db,world_id,revision,state,body)
                 elif kind == 'upgrade_kernel':
-                    origin=db.execute('SELECT payload FROM events WHERE world_id=? AND seq=1',(world_id,)).fetchone()
-                    if not origin or not any(json.loads(origin[0])['details'].get(k) for k in ('synthetic','profileCopy')):
+                    origin=db.execute('SELECT payload FROM events WHERE world_id=? ORDER BY seq LIMIT 1',(world_id,)).fetchone()
+                    if not origin or not any(decode_event_payload(origin[0])['details'].get(k) for k in ('synthetic','profileCopy','transferCheckpoint')):
                         raise Conflict('This world has no supported kernel upgrade path.')
                     checkpoint_id=hashlib.sha256((world_id+':'+str(revision)+':'+encode(state)).encode()).hexdigest()
                     db.execute('INSERT OR IGNORE INTO kernel_checkpoints VALUES (?,?,?,?)',
@@ -607,8 +917,12 @@ class WorldService:
             if message['id'] in ready:
                 message.update(awaitingReply=False,attention={**message['attention'],'stage':'answered',
                     'nextCheckAt':0,'reason':'Reply delivered to this message.'})
+        # Exact words already live in communication.messages and are indexed
+        # into the durable transcript by commit_event().  Keep only the small
+        # delivery marker here; duplicating reply bodies made event deltas grow
+        # quadratically across long conversations.
         state['playerKnowledge'].append({'kind':'message_delivered','messageId':message_id,
-            'sourceSequence':sequence,'at':now,'text':text})
+            'sourceSequence':sequence,'at':now})
         state['truth']['companion']['continuityRuntime']['lastExchangeAt']=now
         inbox.pop('draft',None);inbox['nextAt']=None
         self.evaluate(state,sequence)
@@ -756,10 +1070,66 @@ class WorldService:
                 'lastSuccessAt':now,'nextAttemptAt':0,
                 'lastRecoveredAt':now if prior.get('state')=='recovering' else prior.get('lastRecoveredAt')}
 
+    def compact_due_event_history(self):
+        """Checkpoint one oversized ledger and gradually return resolved pages."""
+        if not self._storage_lock.acquire(blocking=False):return
+        try:
+            # This is bounded background housekeeping, not the destructive
+            # service-wide optimiser.  Do not raise the global maintenance
+            # gate: doing so rejected unrelated commands every five seconds,
+            # even when no ledger or free page needed work. SQLite's write
+            # transaction and busy timeout safely serialize the short update.
+            with exclusive_storage_file_lock(self.path):
+                report=None
+                with self.connect() as db:
+                    writing=False
+                    row=db.execute('''SELECT world_id,COUNT(*) AS rows FROM events
+                        GROUP BY world_id HAVING COUNT(*)>? ORDER BY rows DESC LIMIT 1''',
+                        (MAX_DETAILED_EVENT_ROWS,)).fetchone()
+                    if row:
+                        db.execute('BEGIN IMMEDIATE')
+                        writing=True
+                        revision,state=self.read(db,row['world_id'])
+                        report=compact_event_history(db,row['world_id'],revision,state,state['kernelVersion'])
+                        if report:self.storage_last_compaction={'worldId':row['world_id'],**report,'at':self.clock()}
+                    memory_row=None;maintenance_at=self.clock()
+                    if maintenance_at-self._last_memory_maintenance_at>=300_000:
+                        self._last_memory_maintenance_at=maintenance_at
+                        memory_row=db.execute('''SELECT w.id,w.state FROM worlds w WHERE
+                            EXISTS (SELECT 1 FROM memory_episodes m LEFT JOIN memory_episode_retention r
+                                ON r.world_id=m.world_id AND r.id=m.id
+                                WHERE m.world_id=w.id AND r.id IS NULL)
+                            OR EXISTS (SELECT 1 FROM memory_episodes m JOIN memory_episode_retention r
+                                ON r.world_id=m.world_id AND r.id=m.id WHERE m.world_id=w.id
+                                AND r.pinned=0 AND ((r.priority=0 AND m.at<json_extract(w.state,'$.simAt')-?)
+                                  OR (r.priority=1 AND m.at<json_extract(w.state,'$.simAt')-?)))
+                            ORDER BY w.id LIMIT 1''',(vh2_memory.ROUTINE_MAX_AGE_MS,
+                                                      vh2_memory.NOTABLE_MAX_AGE_MS)).fetchone()
+                    if memory_row:
+                        if not writing:db.execute('BEGIN IMMEDIATE')
+                        memory_report=vh2_memory.resolve_history(
+                            db,memory_row['id'],json.loads(memory_row['state']),max_delete=256)
+                        self.storage_last_memory_resolution={'worldId':memory_row['id'],
+                            **memory_report,'at':self.clock()}
+                maintenance=sqlite3.connect(self.path,timeout=30)
+                try:
+                    if maintenance.execute('PRAGMA auto_vacuum').fetchone()[0]==2:
+                        free=maintenance.execute('PRAGMA freelist_count').fetchone()[0]
+                        # SQLite commonly releases one tail page per invocation
+                        # even when N is supplied. A short bounded loop avoids a
+                        # long maintenance stall while continuing on later ticks.
+                        for _ in range(min(256,free)):
+                            maintenance.execute('PRAGMA incremental_vacuum(1)')
+                        if free:maintenance.execute('PRAGMA wal_checkpoint(PASSIVE)')
+                finally:
+                    maintenance.close()
+        finally:
+            self._storage_lock.release()
+
     def tick(self):
         from . import vh2_weather
         from . import vh2_social_worker
-        for name,callback in [('clock',self.reconcile_live_clocks),('scheduler',self.reconcile_job_schedule),
+        for name,callback in [('storage',self.compact_due_event_history),('clock',self.reconcile_live_clocks),('scheduler',self.reconcile_job_schedule),
                               ('media',lambda:vh2_workers.poll(self)),('feeds',lambda:vh2_feeds.poll(self)),
                               ('weather',lambda:vh2_weather.poll(self)),('social',lambda:vh2_social_worker.poll(self)),('life_adviser',lambda:_vh_import_module('.vh2_story',__package__).poll(self))]:
             self.run_maintenance(name,callback)
@@ -902,16 +1272,189 @@ class WorldService:
     def events(self, world_id, after=0):
         with self.connect() as db:
             self.read(db,world_id)
-            return [dict(row)|{'payload':json.loads(row['payload'])} for row in db.execute(
+            return [dict(row)|{'payload':decode_event_payload(row['payload'])} for row in db.execute(
                 'SELECT * FROM events WHERE world_id=? AND seq>? ORDER BY seq LIMIT 100',(world_id,after))]
+
+    def landmarks(self, world_id, before=0, minimum_priority=1):
+        """Return the permanent human-resolution life outline, newest first."""
+        if type(before) is not int or before<0 or type(minimum_priority) is not int or not 1<=minimum_priority<=3:
+            raise ValueError('Choose a valid landmark cursor and priority from 1 to 3.')
+        with self.connect() as db:
+            self.read(db,world_id)
+            upper=before or 9223372036854775807
+            return [{'worldId':row['world_id'],'sequence':row['seq'],'at':row['at'],'kind':row['kind'],
+                     'priority':row['priority'],'summary':row['summary'],'details':json.loads(row['details'])}
+                    for row in db.execute('''SELECT * FROM event_landmarks
+                        WHERE world_id=? AND seq<? AND priority>=? ORDER BY seq DESC LIMIT 100''',
+                        (world_id,upper,minimum_priority))]
 
     def replay(self, world_id):
         with self.connect() as db:
             self.read(db,world_id)
             state={}
             for row in db.execute('SELECT payload FROM events WHERE world_id=? ORDER BY seq',(world_id,)):
-                state=apply_delta(state,json.loads(row[0])['changes'])
+                state=apply_delta(state,decode_event_payload(row[0])['changes'])
             return state
+
+    def storage_status(self, world_id):
+        """Fast, service-wide disk facts without scanning giant event values."""
+        with self.connect() as db:
+            world=db.execute('SELECT revision,LENGTH(state) AS state_bytes FROM worlds WHERE id=?',(world_id,)).fetchone()
+            if world is None:raise ValueError('Unknown VH2 world')
+            revision=world['revision'];state_bytes=world['state_bytes']
+            page_size=db.execute('PRAGMA page_size').fetchone()[0]
+            page_count=db.execute('PRAGMA page_count').fetchone()[0]
+            free_pages=db.execute('PRAGMA freelist_count').fetchone()[0]
+            event_count=db.execute('SELECT COUNT(*) FROM events WHERE world_id=?',(world_id,)).fetchone()[0]
+            landmark_count=db.execute('SELECT COUNT(*) FROM event_landmarks WHERE world_id=?',(world_id,)).fetchone()[0]
+            photo_count,photo_bytes=db.execute(
+                'SELECT COUNT(*),COALESCE(SUM(LENGTH(bytes)),0) FROM photo_assets WHERE world_id=?',(world_id,)).fetchone()
+            service_photo_bytes=db.execute('SELECT COALESCE(SUM(LENGTH(bytes)),0) FROM photo_assets').fetchone()[0]
+            memory_count,memory_bytes=db.execute(
+                'SELECT COUNT(*),COALESCE(SUM(LENGTH(data)),0) FROM memory_episodes WHERE world_id=?',
+                (world_id,)).fetchone()
+            service_memory_count,service_memory_bytes=db.execute(
+                'SELECT COUNT(*),COALESCE(SUM(LENGTH(data)),0) FROM memory_episodes').fetchone()
+            memory_priorities={vh2_memory.PRIORITY_LABELS[row['priority']]:row['rows']
+                for row in db.execute('''SELECT priority,COUNT(*) AS rows
+                    FROM memory_episode_retention WHERE world_id=? GROUP BY priority''',(world_id,))}
+            snapshot_stats=db.execute('''SELECT COUNT(*) AS service_count,
+                COALESCE(SUM(bytes),0) AS service_bytes,
+                COALESCE(SUM(CASE WHEN compact=0 THEN 1 ELSE 0 END),0) AS service_legacy,
+                COALESCE(SUM(CASE WHEN world_id=? THEN 1 ELSE 0 END),0) AS life_count,
+                COALESCE(SUM(CASE WHEN world_id=? THEN bytes ELSE 0 END),0) AS life_bytes,
+                COALESCE(SUM(CASE WHEN world_id=? AND compact=0 THEN 1 ELSE 0 END),0) AS life_legacy
+                FROM (SELECT world_id,LENGTH(snapshot) AS bytes,
+                    INSTR(snapshot,'"captureSnapshotVersion":1')>0 AS compact FROM photo_jobs)''',
+                (world_id,world_id,world_id)).fetchone()
+            mode=db.execute('PRAGMA auto_vacuum').fetchone()[0]
+        database_bytes=self.path.stat().st_size if self.path.exists() else page_count*page_size
+        wal_path=Path(str(self.path)+'-wal');shm_path=Path(str(self.path)+'-shm')
+        wal_bytes=wal_path.stat().st_size if wal_path.exists() else 0
+        shm_bytes=shm_path.stat().st_size if shm_path.exists() else 0
+        reclaimable=free_pages*page_size
+        return {'scope':'service','worldId':world_id,'lifetimeRevision':revision,
+                'databaseFileBytes':database_bytes,'walBytes':wal_bytes,'sharedMemoryBytes':shm_bytes,
+                'serviceDiskBytes':database_bytes+wal_bytes+shm_bytes,
+                'estimatedDatabaseUsedBytes':max(0,database_bytes-reclaimable),'reclaimableBytes':reclaimable,
+                'retainedEventRows':event_count,'eventCount':event_count,'eventWindowLimit':MAX_DETAILED_EVENT_ROWS,
+                'landmarkCount':landmark_count,'stateBytes':state_bytes,
+                'photoCount':photo_count,'photoBytes':photo_bytes,'servicePhotoBytes':service_photo_bytes,
+                'memoryCount':memory_count,'memoryBytes':memory_bytes,
+                'serviceMemoryCount':service_memory_count,'serviceMemoryBytes':service_memory_bytes,
+                'memoryPriorities':{label:memory_priorities.get(label,0)
+                    for label in vh2_memory.PRIORITY_LABELS.values()},
+                'unclassifiedMemoryCount':max(0,memory_count-sum(memory_priorities.values())),
+                'memoryRetentionPolicy':{'routineDays':vh2_memory.ROUTINE_MAX_AGE_MS//vh2_memory.DAY,
+                    'routineRows':vh2_memory.ROUTINE_MAX_ROWS,
+                    'notableDays':vh2_memory.NOTABLE_MAX_AGE_MS//vh2_memory.DAY,
+                    'notableRows':vh2_memory.NOTABLE_MAX_ROWS,
+                    'important':'permanent','tentpole':'permanent','pinned':'permanent'},
+                'photoSnapshotCount':snapshot_stats['life_count'],'photoSnapshotBytes':snapshot_stats['life_bytes'],
+                'legacyPhotoSnapshotCount':snapshot_stats['life_legacy'],
+                'servicePhotoSnapshotCount':snapshot_stats['service_count'],
+                'servicePhotoSnapshotBytes':snapshot_stats['service_bytes'],
+                'serviceLegacyPhotoSnapshotCount':snapshot_stats['service_legacy'],
+                'autoVacuum':{0:'off',1:'full',2:'incremental'}.get(mode,'unknown'),
+                'lastCompaction':self.storage_last_compaction,
+                'lastMemoryResolution':self.storage_last_memory_resolution}
+
+    def optimize_storage(self, world_id):
+        """Checkpoint all ledgers in this service and rebuild SQLite pages.
+
+        VACUUM is SQLite's crash-safe path for returning freelist pages to the
+        filesystem. It needs a short exclusive maintenance window, so every
+        life and provider-owned job must be settled first.
+        """
+        if not self._storage_lock.acquire(blocking=False):
+            raise Conflict('Storage optimization is already running.')
+        self._storage_optimizing=True;self._storage_owner=threading.get_ident()
+        try:
+            with exclusive_storage_file_lock(self.path):
+                before=self.storage_status(world_id)
+                connection=sqlite3.connect(self.path,timeout=300)
+                try:
+                    connection.execute('PRAGMA busy_timeout=300000')
+                    checkpoint=connection.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+                    if checkpoint and checkpoint[0]:
+                        raise Conflict('Another database reader is active. Close other Horde Studio windows and try again.')
+                    with self.connect() as db:
+                        rows=db.execute('SELECT id,revision,state FROM worlds').fetchall()
+                        running=[row['id'] for row in rows if json.loads(row['state']).get('running') is True]
+                        if running:
+                            raise Conflict('Pause every life on this service before optimizing storage.')
+                        active=[]
+                        for table,statuses in [('dialogue_jobs',('queued','leased','submitted')),
+                                               ('vh2_provider_jobs',('queued','submitted','rendered')),
+                                               ('vh2_social_jobs',('submitted',)),('vh2_story_jobs',('submitted',))]:
+                            marks=','.join('?' for _ in statuses)
+                            count=db.execute(f'SELECT COUNT(*) FROM {table} WHERE status IN ({marks})',statuses).fetchone()[0]
+                            if count:active.append(f'{count} {table}')
+                        if active:
+                            raise Conflict('Wait for provider work to settle before optimizing storage: '+', '.join(active)+'.')
+                        asset_bytes=db.execute('SELECT COALESCE(SUM(LENGTH(bytes)),0) FROM photo_assets').fetchone()[0]
+                        state_bytes=sum(len(row['state'].encode()) for row in rows)
+                    # Check space before the irreversible resolution change.
+                    # Media dominates non-ledger storage; the additional state
+                    # allowance covers projection tables and SQLite overhead.
+                    required=max(512*1024*1024,asset_bytes+state_bytes*4+256*1024*1024)
+                    if shutil.disk_usage(self.path.parent).free < required:
+                        raise ValueError('Not enough free disk space to safely rebuild the compact database.')
+                    with self.connect() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        # Re-read and re-check while holding the write lock.
+                        rows=db.execute('SELECT id,revision,state FROM worlds').fetchall()
+                        world_states={row['id']:json.loads(row['state']) for row in rows}
+                        if any(state.get('running') is True for state in world_states.values()):
+                            raise Conflict('A life resumed while storage preparation was starting. Pause every life and retry.')
+                        photo_compaction=compact_photo_capture_history(db,world_states)
+                        compacted=[];conversation_resolution=[];memory_resolution=[];job_resolution=[]
+                        dialogue_module=_vh_import_module('.vh2_dialogue',__package__)
+                        social_module=_vh_import_module('.vh2_social_worker',__package__)
+                        story_module=_vh_import_module('.vh2_story',__package__)
+                        maintenance_now=self.clock()
+                        for row in rows:
+                            state=world_states[row['id']]
+                            memories=vh2_memory.resolve_history(db,row['id'],state)
+                            memory_resolution.append({'worldId':row['id'],**memories})
+                            job_resolution.append({'worldId':row['id'],
+                                'dialogue':dialogue_module.prune_terminal_jobs(db,row['id'],maintenance_now),
+                                'mediaAndRoutes':vh2_workers.prune_terminal_jobs(db,row['id'],maintenance_now),
+                                'social':social_module.prune_terminal_jobs(db,row['id'],maintenance_now),
+                                'lifeAdviser':story_module.prune_terminal_jobs(db,row['id'],maintenance_now)})
+                            before_state=json.loads(row['state']);revision=row['revision']
+                            resolved=vh2_transcript.resolve_player_knowledge(db,row['id'],state)
+                            if resolved['changed']:
+                                revision=self.commit_event(db,row['id'],revision,before_state,state,'HISTORY_RESOLVED',
+                                    {'landmarkPriority':0,'replyBodiesRemoved':resolved['replyBodiesRemoved'],
+                                     'markersTrimmed':resolved['markersTrimmed']})
+                                conversation_resolution.append({'worldId':row['id'],**resolved})
+                            report=compact_event_history(db,row['id'],revision,state,state['kernelVersion'],max_rows=2)
+                            if report:compacted.append({'worldId':row['id'],**report})
+                    # The checkpoint transaction is verified and durable before
+                    # VACUUM. Interruption leaves a valid bounded ledger.
+                    checkpoint=connection.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+                    if checkpoint and checkpoint[0]:
+                        raise RuntimeError('Could not obtain the exclusive SQLite maintenance window.')
+                    connection.execute('PRAGMA auto_vacuum=INCREMENTAL')
+                    connection.execute('VACUUM')
+                    if connection.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                        raise RuntimeError('SQLite integrity verification failed after optimization.')
+                    connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                finally:
+                    connection.close()
+                for row in rows:
+                    if self.replay(row['id']) != self.projection(row['id'])['state']:
+                        raise RuntimeError('Life replay verification failed after storage optimization.')
+                after=self.storage_status(world_id)
+                return {'scope':'service','worldId':world_id,'before':before,'after':after,'compacted':compacted,
+                        'photoSnapshots':photo_compaction,
+                        'conversationHistory':conversation_resolution,
+                        'memoryHistory':memory_resolution,
+                        'jobHistory':job_resolution,
+                        'bytesReclaimed':max(0,before['serviceDiskBytes']-after['serviceDiskBytes'])}
+        finally:
+            self._storage_optimizing=False;self._storage_owner=None;self._storage_lock.release()
 
     def status(self):
         with self.connect() as db:

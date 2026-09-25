@@ -43,7 +43,13 @@ try{
  const style=await page.evaluate(()=>{clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);const c=getCompanion('save-alex');return {textingStyle:c.textingStyle,chatExamples:c.chatExamples,appearance:c.appearance};});
  assert.equal(style.textingStyle,'Brief and direct messages.');assert.match(style.chatExamples,/good to hear from you/);assert(style.appearance.length>800);
  await page.evaluate(()=>{hideGlobalSettings();exportCompanionArchive('save-alex');});
- const downloading=page.waitForEvent('download');await page.locator('#export-companion-json-btn').click();const download=await downloading;
+	 let download;
+	 try{
+	  [download]=await Promise.all([page.waitForEvent('download',{timeout:45000}),page.locator('#export-companion-json-btn').click()]);
+	 }catch(error){
+	  const diagnostic=await page.evaluate(()=>({progress:document.getElementById('companion-export-progress')?.textContent,progressHidden:document.getElementById('companion-export-progress')?.classList.contains('hidden'),buttonDisabled:document.getElementById('export-companion-json-btn')?.disabled,target:companionExportTargetId,pollLocks:[...vh2PollLocks.keys()],flushLocks:[...vh2FlushLocks.keys()],activeTimeline:getActiveCompanionTimeline('save-alex')?.id,issues:[...vhRecentIssues],toasts:[...document.querySelectorAll('.toast')].map(node=>node.textContent)}));
+	  console.error('Export timeout diagnostic',diagnostic);throw error;
+	 }
  assert.match(download.suggestedFilename(),/\.json$/);const raw=JSON.parse(fs.readFileSync(await download.path(),'utf8'));
  assert.equal(raw._kind,'character-template');assert.equal(raw.companion.textingStyle,style.textingStyle);assert.equal(raw.companion.appearance,style.appearance);
  raw.companion.name='Edited JSON copy';raw.companion.textingStyle='Manually edited without a checksum.';

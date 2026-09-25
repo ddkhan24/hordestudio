@@ -37,6 +37,12 @@ class Communication(unittest.TestCase):
         body,result=self.command('deliver_reply',draftId=draft['id'])
         self.assertEqual(result,self.service.command(body));self.assertEqual(2,len(self.context()['conversation']))
         self.assertEqual(1,len(self.state()['playerKnowledge']))
+        self.assertNotIn('text',self.state()['playerKnowledge'][0])
+        with self.service.connect() as db:
+            stored=__import__('json').loads(db.execute(
+                'SELECT data FROM transcript_messages WHERE world_id=? AND id=?',
+                (self.w['worldId'],self.state()['playerKnowledge'][0]['messageId'])).fetchone()['data'])
+        self.assertEqual(stored['text'],'Oh, nice.')
         self.assertEqual('answered',self.state()['communication']['messages'][0]['attention']['stage'])
         self.assertEqual(self.state(),self.service.replay(self.w['worldId']))
         self.command('receive_message',text='Hi again')

@@ -37,7 +37,7 @@ class Backup(unittest.TestCase):
   copied=vh2_backup.restore_character(self.dest,{'companionId':'receipt-copy','importId':'receipt-copy','archives':[{'worldId':self.w,'data':archive}]})['worlds'][0]['worldId']
   self.assertEqual(self.dest.dialogue.list(copied)[0]['usage']['total_tokens'],34)
  def test_archives_before_token_receipts_remain_readable(self):
-  envelope=json.loads(gzip.decompress(vh2_backup.export(self.source,self.w)));payload=envelope['payload'];payload['tables'].pop('dialogue_receipts')
+  envelope=json.loads(gzip.decompress(vh2_backup.export(self.source,self.w)));payload=envelope['payload'];payload['databaseVersion']=9;payload['tables'].pop('dialogue_receipts');payload['tables'].pop('event_landmarks')
   vh2_backup.restore(self.dest,vh2_backup.compress_payload(payload));self.assertEqual(self.dest.dialogue.list(self.w),[])
  def test_corruption_and_failed_commit_leave_no_partial_world(self):
   archive=vh2_backup.export(self.source,self.w);bad=json.loads(gzip.decompress(archive));bad['payload']['state']['simAt']+=1
@@ -56,6 +56,49 @@ class Backup(unittest.TestCase):
   state=self.dest.projection(self.w)['state'];self.assertEqual(state['communication']['replyJob']['status'],'unknown');self.assertFalse(state['running'])
  def test_original_world_is_unchanged_by_export(self):
   before=self.source.projection(self.w);vh2_backup.export(self.source,self.w);self.assertEqual(before,self.source.projection(self.w))
+ def test_transfer_checkpoint_compacts_ledger_and_preserves_playable_life(self):
+  # Model a pathological replay ledger without making transfer cost depend on
+  # every historical delta. The source database is never rewritten.
+  self.cmd('receive_message',text='Remember the blue greenhouse and our long conversation.')
+  photo=self.cmd('capture_photo',scene='Blue greenhouse',destination='gallery')['photoId'];self.cmd('submit_photo',photoId=photo);self.cmd('import_photo',photoId=photo,image=PNG)
+  with self.source.connect() as db:
+   revision,state=self.source.read(db,self.w)
+   for index in range(18):
+    before=json.loads(json.dumps(state));state=json.loads(json.dumps(state))
+    # Incompressible-enough deterministic history; only the latest value is
+    # needed to resume the life.
+    state['transferAuditNoise']=''.join(hashlib.sha256(f'{index}:{part}'.encode()).hexdigest() for part in range(2048))
+    details={'index':index}
+    if index==0:details.update(landmarkPriority=3,landmarkSummary='Blue greenhouse promise')
+    revision=self.source.commit_event(db,self.w,revision,before,state,'TRANSFER_AUDIT_HISTORY',details)
+   ledger_bytes=db.execute('SELECT SUM(length(payload)) FROM events WHERE world_id=?',(self.w,)).fetchone()[0]
+   db.execute('INSERT INTO memory_episodes VALUES (?,?,?,?,?,?)',(self.w,'transfer-memory',revision,state['simAt'],'Blue greenhouse memory',json.dumps({'id':'transfer-memory','summary':'Blue greenhouse memory','at':state['simAt'],'sourceSequence':revision})))
+  before=self.source.projection(self.w);checkpoint=vh2_backup.export_checkpoint(self.source,self.w)
+  info=vh2_backup.inspect_world_archive(checkpoint)
+  self.assertEqual(info['archiveMode'],'checkpoint');self.assertEqual(info['revision'],before['revision'])
+  self.assertLess(len(checkpoint),ledger_bytes)
+  restored=vh2_backup.restore(self.dest,checkpoint);self.assertEqual(restored['archiveMode'],'checkpoint')
+  after=self.dest.projection(self.w);self.assertEqual(after['state'],self.dest.replay(self.w));self.assertEqual(after['state']['transferAuditNoise'],before['state']['transferAuditNoise'])
+  with self.dest.connect() as db:
+   self.assertEqual(db.execute('SELECT COUNT(*) FROM photo_assets WHERE world_id=?',(self.w,)).fetchone()[0],1)
+   self.assertEqual(db.execute('SELECT COUNT(*) FROM transcript_messages WHERE world_id=?',(self.w,)).fetchone()[0],1)
+   self.assertEqual(db.execute('SELECT COUNT(*) FROM memory_episodes WHERE world_id=? AND id=?',(self.w,'transfer-memory')).fetchone()[0],1)
+   landmark=db.execute('SELECT priority,summary FROM event_landmarks WHERE world_id=? AND summary=?',(self.w,'Blue greenhouse promise')).fetchone()
+   self.assertEqual(dict(landmark),{'priority':3,'summary':'Blue greenhouse promise'})
+   events=db.execute('SELECT seq,kind FROM events WHERE world_id=? ORDER BY seq',(self.w,)).fetchall()
+   self.assertEqual([row['kind'] for row in events],['WORLD_TRANSFER_CHECKPOINT','WORLD_RESTORED'])
+   self.assertEqual(events[0]['seq'],before['revision'])
+  # A later ordinary backup of the hosted checkpoint remains portable even
+  # though its event sequence intentionally begins at the retained revision.
+  later=vh2_backup.export(self.dest,self.w);third=self.open('third')
+  try:
+   vh2_backup.restore(third,later);self.assertEqual(third.projection(self.w)['state'],third.replay(self.w))
+  finally:third.close()
+  copied=self.open('copied-checkpoint')
+  try:
+   result=vh2_backup.restore_character(copied,{'companionId':'checkpoint-copy','importId':'checkpoint-copy','archives':[{'worldId':self.w,'data':later}]})
+   copied_id=result['worlds'][0]['worldId'];self.assertEqual(copied.projection(copied_id)['state'],copied.replay(copied_id))
+  finally:copied.close()
  def package(self,body,extra=None):
   out=io.BytesIO();metadata={'format':'horde-character-lives','version':1,**body,'archives':[]}
   with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as z:

@@ -8,7 +8,7 @@
 
 Character cards & group rooms · Living Worlds · Virtual Humans 2.0 · Optional RPG rules · Multiplayer · Video Adventures
 
-[**Download v18.1.1**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.1.1) · [Release notes](docs/releases/v18.1.1.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
+[**Download v18.2.0**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.2.0) · [Release notes](docs/releases/v18.2.0.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
 
 Horde Studio brings your characters, stories and simulations into one local application. Import a character card and start a conversation, build a world with places and consequences, host a campaign with friends, or create a virtual human whose conversations draw on an ongoing life. Connect your own local models or cloud providers; the application does not include paid inference.
 
@@ -51,7 +51,7 @@ What changes in practice:
 
 Aslyn includes **28 starter posts, two private gallery photos, five clips and 62 approved visual references**, covering all **22 authored places and six rooms**. These are included starter assets, not a promise of automatic paid generation.
 
-The local server must stay running for background life. Catch-up resumes after downtime; nothing simulates while the computer is off. This is a model of decisions and continuity, not a claim of consciousness or guaranteed human realism. Results vary by the model and provider you connect.
+By default the local server must stay running for background life. Version 18.2 can instead move one running life to a private VH2 server in a hosting account you control, while this computer keeps a paused recovery mirror. See the in-app **Always-on private server** walkthrough or the [private-server guide](deploy/vh2-self-host/README.md). This is a model of decisions and continuity, not a claim of consciousness or guaranteed human realism. Results vary by the model and provider you connect.
 
 [Start with Virtual Humans 2.0 →](docs/vh2/START-HERE.md)
 
@@ -128,7 +128,7 @@ Horde Studio is free to run and its source is available in this repository. The 
 
 ## Quick start
 
-Download the [v18.1.1 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.1.1), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
+Download the [v18.2.0 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.2.0), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
 
 ### Requirements
 

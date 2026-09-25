@@ -1715,7 +1715,10 @@
         };
         bindImageInput(byId('video-world-player-reference'), byId('video-world-player-reference-preview'), data => { byId('video-world-player-reference-preview').dataset.image = data; });
         byId('video-world-player').onerror = () => showToast('This clip is missing from the local Video Adventure media folder.', 'error');
-        renderLibrary();
+        // The app opens on Chat Library. Building every Video Adventure card
+        // here rendered a hidden screen on every launch; on media-heavy
+        // libraries that delayed the first useful paint. onView() renders it
+        // when the user actually opens Video Adventures.
     }
 
     function onView(viewName) {

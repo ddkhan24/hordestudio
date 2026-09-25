@@ -1,0 +1,4 @@
+{$VH2_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy vh2:8080
+}

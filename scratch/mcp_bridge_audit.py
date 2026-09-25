@@ -15,6 +15,106 @@ import horde_mcp_bridge as bridge
 
 
 class McpBridgeAudit(unittest.TestCase):
+    @staticmethod
+    def vh2_handler(path):
+        handler = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
+        handler.path = path
+        handler.headers = {}
+        handler.origin_allowed = mock.Mock(return_value=True)
+        handler.remote_surface_allowed = mock.Mock(return_value=True)
+        handler.serve_app_file = mock.Mock(return_value=False)
+        handler.vh2_access_allowed = mock.Mock(return_value=True)
+        handler.respond = mock.Mock()
+        return handler
+
+    @mock.patch.object(bridge, "get_vh2_service")
+    def test_vh2_storage_and_landmark_routes_forward_scoped_queries(self, get_service):
+        service = get_service.return_value
+        service.storage_status.return_value = {"scope": "service", "worldId": "life-1"}
+        storage = self.vh2_handler("/vh2/storage?worldId=life-1")
+        storage.do_GET()
+        service.storage_status.assert_called_once_with("life-1")
+        storage.respond.assert_called_once_with(200, {"scope": "service", "worldId": "life-1"})
+
+        service.landmarks.return_value = [{"sequence": 41, "priority": 3}]
+        landmarks = self.vh2_handler(
+            "/vh2/landmarks?worldId=life-1&before=42&minimumPriority=2"
+        )
+        landmarks.do_GET()
+        service.landmarks.assert_called_once_with("life-1", 42, 2)
+        landmarks.respond.assert_called_once_with(
+            200, {"landmarks": [{"sequence": 41, "priority": 3}]}
+        )
+
+    @mock.patch.object(bridge, "get_vh2_service")
+    def test_vh2_storage_get_routes_map_validation_and_maintenance_errors(self, get_service):
+        invalid = self.vh2_handler("/vh2/landmarks?worldId=life-1&before=not-a-number")
+        invalid.do_GET()
+        invalid.respond.assert_called_once()
+        self.assertEqual(invalid.respond.call_args.args[0], 400)
+
+        get_service.return_value.storage_status.side_effect = bridge.VH2Conflict("maintenance")
+        busy = self.vh2_handler("/vh2/storage?worldId=life-1")
+        busy.do_GET()
+        busy.respond.assert_called_once_with(409, {"error": "maintenance"})
+
+    @mock.patch.object(bridge, "get_vh2_service")
+    def test_vh2_storage_routes_require_authorization(self, get_service):
+        status = self.vh2_handler("/vh2/storage?worldId=life-1")
+        status.vh2_access_allowed.return_value = False
+        status.do_GET()
+        status.respond.assert_called_once_with(403, {"error": "VH2 world access is not authorized."})
+
+        optimize = self.vh2_handler("/vh2/storage/optimize?worldId=life-1")
+        optimize.vh2_access_allowed.return_value = False
+        optimize.do_POST()
+        optimize.respond.assert_called_once_with(
+            403, {"error": "VH2 storage maintenance is not authorized."}
+        )
+        get_service.assert_not_called()
+
+    @mock.patch.object(bridge, "get_vh2_service")
+    def test_vh2_storage_optimize_forwards_scope_and_maps_conflicts(self, get_service):
+        service = get_service.return_value
+        service.optimize_storage.return_value = {"scope": "service", "bytesReclaimed": 123}
+        handler = self.vh2_handler("/vh2/storage/optimize?worldId=life-1")
+        handler.do_POST()
+        service.optimize_storage.assert_called_once_with("life-1")
+        handler.respond.assert_called_once_with(200, {"scope": "service", "bytesReclaimed": 123})
+
+        service.optimize_storage.reset_mock()
+        service.optimize_storage.side_effect = bridge.VH2Conflict("Pause every life")
+        busy = self.vh2_handler("/vh2/storage/optimize?worldId=life-1")
+        busy.do_POST()
+        busy.respond.assert_called_once_with(409, {"error": "Pause every life"})
+
+    def test_static_app_files_revalidate_without_retransmitting_the_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "app.js"
+            target.write_bytes(b"console.log('cached');")
+            first = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
+            first.headers = {}
+            first.send_response = mock.Mock()
+            first.send_header = mock.Mock()
+            first.end_headers = mock.Mock()
+            first.cors = mock.Mock()
+            first.wfile = __import__('io').BytesIO()
+            first.serve_cached_app_file(target, "text/javascript")
+            first.send_response.assert_called_once_with(200)
+            self.assertEqual(first.wfile.getvalue(), target.read_bytes())
+            etag = next(call.args[1] for call in first.send_header.call_args_list if call.args[0] == "ETag")
+
+            second = bridge.BridgeHandler.__new__(bridge.BridgeHandler)
+            second.headers = {"If-None-Match": etag}
+            second.send_response = mock.Mock()
+            second.send_header = mock.Mock()
+            second.end_headers = mock.Mock()
+            second.cors = mock.Mock()
+            second.wfile = __import__('io').BytesIO()
+            second.serve_cached_app_file(target, "text/javascript")
+            second.send_response.assert_called_once_with(304)
+            self.assertEqual(second.wfile.getvalue(), b"")
+
     @mock.patch.object(bridge, "http_request", return_value=(200, {}, b""))
     @mock.patch.object(bridge, "call_tool")
     def test_magnific_local_reference_upload_and_finalize(self, call, put):
@@ -391,6 +491,27 @@ class McpBridgeAudit(unittest.TestCase):
         )
         with mock.patch.object(sys, "argv", ["horde_mcp_bridge.py"]), mock.patch.object(bridge, "get_vh2_service"):
             bridge.main()
+
+    @mock.patch.object(bridge.threading, "Timer")
+    @mock.patch.object(bridge, "ThreadingHTTPServer")
+    def test_launcher_serves_before_existing_vh2_database_warmup(self, server_factory, timer_factory):
+        server = server_factory.return_value
+        timer = timer_factory.return_value
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory)
+            (config / "vh2-worlds.sqlite").touch()
+            with mock.patch.object(sys, "argv", ["horde_mcp_bridge.py"]), \
+                 mock.patch.object(bridge, "CONFIG_DIR", config), \
+                 mock.patch.object(bridge, "REMOTE_VH2_MODE", False), \
+                 mock.patch.object(bridge, "get_vh2_service") as get_service, \
+                 mock.patch.object(bridge.always_on_runtime, "stop"), \
+                 mock.patch.object(bridge.multiplayer_runtime, "shutdown"):
+                bridge.main()
+        get_service.assert_not_called()
+        timer_factory.assert_called_once_with(1.5, bridge.warm_vh2_service)
+        timer.start.assert_called_once()
+        server.serve_forever.assert_called_once()
+        timer.cancel.assert_called_once()
 
     @mock.patch.object(bridge, "http_request")
     @mock.patch.object(bridge, "ThreadingHTTPServer")

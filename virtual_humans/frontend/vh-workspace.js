@@ -1,7 +1,7 @@
 /* Horde human workspace. UI state only; life changes remain service commands. */
 'use strict';
 const VH_EXPRESSION_FIELDS=[...new Set([...VH2_PROFILE_TRANSFER_FIELDS,'regulationProfile','conflictRecovery','emotionExpression','ruminationStyle','reactionTiming','emotionalGranularity','appearance','personality','behaviorExamples','description','backstory','chatStyle','textingStyle','conversationStyle','chatExamples','chatAvoid','chatLength','values','contradictions','vulnerabilities','relationshipStyle','habits','photoStyle','photoDirection'])];
-const vhStudioSaves=new Set();
+const vhStudioSaves=new Map(),vhStudioLifeSyncs=new Map(),vhStudioEditVersions=new Map();
 function vhIsCreationDraft(companion){
  if(!companion)return false;
  const hasConversation=typeof getCompanionThread==='function'&&getCompanionThread(companion.id).length>0;
@@ -19,12 +19,29 @@ async function vhApplyExpression(companion,timeline){
  // Flush returns only after the command receipt, unlike a poll which may be busy.
  await vh2Enqueue(timeline,'configure_expression_profile',{fields});await vh2Flush(timeline);
  if(timeline.vh2.outbox.some(c=>c.type==='configure_expression_profile'))throw Error('The change is queued but not yet acknowledged. Reconnect before continuing.');
- const projection=await mcpBridgeRequest('/vh2/projection?worldId='+encodeURIComponent(timeline.vh2.worldId));
+ const projection=await vh2Request(timeline,'/vh2/projection?worldId='+encodeURIComponent(timeline.vh2.worldId));
  const actual=projection.state.truth.companion;
  const stable=v=>JSON.stringify((function sort(x){return Array.isArray(x)?x.map(sort):x&&typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,sort(x[k])])):x;})(v));
  for(const [key,value] of Object.entries(fields))if(stable(key==='voice'?actual.lifeProfile.world.voice:actual[key])!==stable(value))throw Error('The active expression differs from this draft. Reload the life before applying again.');
  if(timeline.vh2.imageProvider?.configured&&timeline.vh2.imageStudioFingerprint!==undefined&&timeline.vh2.imageStudioFingerprint!==vh2ImageStudioFingerprint(companion))await vh2SyncImageConfiguration(companion,timeline,{fromStudio:true});
- timeline.vh2.expressionApplied={revision:projection.revision,at:Date.now()};await saveState();await vh2Poll(companion,timeline);return projection.revision;
+ timeline.vh2.expressionApplied={revision:projection.revision,at:Date.now()};await (typeof saveVirtualHumansState==='function'?saveVirtualHumansState():saveState());await vh2Poll(companion,timeline);return projection.revision;
+}
+function vhStudioStatus(companionId,message,error=false,throughVersion=null){
+ if(state.editingCompanionId!==companionId)return;
+ if(throughVersion!==null&&(vhStudioEditVersions.get(companionId)||0)>throughVersion)return;
+ const status=document.getElementById('vh-save-status');if(!status)return;
+ status.textContent=message;if(error)status.setAttribute('data-error','true');else status.removeAttribute('data-error');
+}
+function vhQueueStudioLifeSync(companion,timeline,version){
+ const key=companion.id+'|'+timeline.id,existing=vhStudioLifeSyncs.get(key);
+ if(existing){existing.version=Math.max(existing.version,version);return existing.promise;}
+ const job={version,promise:null};
+ job.promise=(async()=>{
+  let applied=-1,lastRevision=null;
+  while(applied<job.version){const target=job.version;lastRevision=await vhApplyExpression(companion,timeline);applied=target;}
+  vhStudioStatus(companion.id,`Saved. Current life updated at revision ${lastRevision}.`,false,applied);return true;
+ })().catch(error=>{console.error('Virtual Human active-life sync failed:',error);if(typeof vhRecordIssue==='function')vhRecordIssue('Update current life',error);vhStudioStatus(companion.id,`Human saved on this device. Current life update needs attention: ${error.message}`,true,job.version);return false;}).finally(()=>{if(vhStudioLifeSyncs.get(key)===job)vhStudioLifeSyncs.delete(key);});
+ vhStudioLifeSyncs.set(key,job);return job.promise;
 }
 function vhStudioScope(companion){
  if(!companion||typeof document==='undefined')return;
@@ -41,7 +58,7 @@ function vhStudioScope(companion){
  let destinations=banner.querySelector('[data-life-links]');
  if(!destinations){destinations=document.createElement('nav');destinations.dataset.lifeLinks='';destinations.className='vh-studio-destinations';destinations.setAttribute('aria-label','Life tools');banner.append(destinations);}
  destinations.hidden=!linked;destinations.replaceChildren();
- for(const [section,label] of [['references','Reference Library / Bible'],['connections','Providers, feeds & events']]){const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=()=>vhOpenWorkspace(section,companion.id);destinations.append(b);}
+ for(const [section,label] of [['references','Reference Library / Bible'],['connections','Providers, feeds & events']]){const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=async()=>{if(!await vhSaveStudio())return;vhOpenWorkspace(section,companion.id);};destinations.append(b);}
  vhRenderPrimaryBar(companion,'studio');vhStudioSetupOverview(companion);
  const save=document.getElementById('save-companion-btn');if(save){save.textContent=linked?'Save changes':'Save human';save.disabled=vhStudioSaves.has(companion.id);}
  const remove=document.getElementById('delete-companion-btn');if(remove)remove.textContent=vhIsCreationDraft(companion)?'Discard draft':'Delete human';
@@ -55,19 +72,24 @@ async function vhSaveStudio(){
    if(status){status.textContent='No Virtual Human selected to save.';status.setAttribute('data-error','true');}
    return false;
  }
- if(vhStudioSaves.has(companion.id)){
-   if(status){status.textContent='Save already in progress.';}
-   return false;
+ const version=vhStudioEditVersions.get(companion.id)||0,existing=vhStudioSaves.get(companion.id);
+ if(existing){
+   if(status){status.removeAttribute('data-error');status.textContent='Finishing the current device save…';}
+   const saved=await existing.promise;
+   if(!saved)return false;
+   return (vhStudioEditVersions.get(companion.id)||0)>existing.version?vhSaveStudio():true;
  }
- vhStudioSaves.add(companion.id);const timeline=getActiveCompanionTimeline(companion.id),scope=document.getElementById('vh-save-scope')?.value;
- let templateSaved=false;
+ const timeline=getActiveCompanionTimeline(companion.id),scope=document.getElementById('vh-save-scope')?.value;
  if(button)button.disabled=true;
- try{if(status){status.removeAttribute('data-error');status.textContent='Saving human…';}await saveState();templateSaved=true;
-  if(scope==='active'&&timeline?.vh2){if(status)status.textContent='Template saved. Waiting for this life to acknowledge expression changes…';const revision=await vhApplyExpression(companion,timeline);if(status)status.textContent=`Saved. Expression active in this life at revision ${revision}. Other changes saved to template only.`;}
-  else if(status)status.textContent='Saved human. Existing persistent lives were not changed.';
-  renderCompanionsGrid();return true;
- }catch(error){console.error('Virtual Human studio save failed:', error);if(typeof vhRecordIssue==='function')vhRecordIssue('Save human',error);if(status){status.textContent=`${templateSaved?'Human saved; active-life update was not confirmed.':'Human was not saved.'} ${error.message} Your draft is retained.`;status.setAttribute('data-error','true');}return false;
- }finally{vhStudioSaves.delete(companion.id);if(button)button.disabled=false;}
+ const operation=(async()=>{
+  try{if(status){status.removeAttribute('data-error');status.textContent='Saving human on this device…';}await (typeof saveCompanionTemplatesState==='function'?saveCompanionTemplatesState():saveState());
+   if(scope==='active'&&timeline?.vh2){vhStudioStatus(companion.id,'Saved on this device. Updating the current life in the background…',false,version);void vhQueueStudioLifeSync(companion,timeline,version);}
+   else vhStudioStatus(companion.id,'Saved human. Existing persistent lives were not changed.',false,version);
+   return true;
+  }catch(error){console.error('Virtual Human studio save failed:', error);if(typeof vhRecordIssue==='function')vhRecordIssue('Save human',error);vhStudioStatus(companion.id,`Human was not saved. ${error.message} Your draft is retained.`,true);return false;}
+ })();
+ const entry={promise:operation,version};vhStudioSaves.set(companion.id,entry);
+ try{return await operation;}finally{if(vhStudioSaves.get(companion.id)===entry)vhStudioSaves.delete(companion.id);if(button)button.disabled=false;}
 }
 const VH_WORKSPACE_SECTIONS={
  overview:['Overview','This life at a glance. System health is separate from character availability.'],
@@ -81,10 +103,10 @@ const VH_WORKSPACE_SECTIONS={
  media:['Media','Author view: captured moments, generation jobs and publishing controls.'],
  connections:['Providers, feeds & events','Ticketmaster events, RSS feeds, images, Maps and world information.'],
  inspector:['Inspector','Author-only decisions, internal state, memory and diagnostics.'],
- recovery:['Backup & migration','Preserve existing lives, import history and recover safely.']
+ recovery:['Always-on server','Move this running life to your private server, switch it back safely, or manage recovery copies.']
 };
 const VH_PANEL_GROUPS={
- 'Timeline backup & recovery':'recovery','Bring prior conversation into VH2':'recovery',
+ 'Timeline backup & recovery':'recovery','Timeline backup & hosting':'recovery','Cloud hosting & local backup':'recovery','Private server & recovery':'recovery','Bring prior conversation into VH2':'recovery',
  'Scheduled transport':'places','Travel disruption recovery':'life','Overnight visits & vacations':'life',
  'Build room, person, garment & pose references':'references','Photo capture preview':'media','Shared plans':'life',
  'Local people & introductions':'people','Independent people & transport':'people','Friendships, contact & romantic progression':'people',
@@ -109,7 +131,10 @@ function vhWorkspaceSelect(section){
     const title=document.getElementById('vh-workspace-title');
     const main=document.querySelector('.vh-workspace-main');
     if (search) search.value='';
-    vhRenderWorkspace();
+    // Section changes only filter the already-built workspace. Rebuilding all
+    // life controls here made every sidebar click increasingly expensive.
+    const controls=document.getElementById('vh2-chat-controls');
+    if(controls?.children.length)vhFilterWorkspace();else vhRenderWorkspace();
     if (main) main.scrollTop=0;
     if (title) title.focus({preventScroll:true});
 }
@@ -128,7 +153,7 @@ function vhRenderWorkspace(){
      if(!document.getElementById('vh-mobile-section')){const label=document.createElement('label');label.className='vh-mobile-section';label.textContent='Workspace section';const select=document.createElement('select');select.id='vh-mobile-section';for(const [key,[name]] of Object.entries(VH_WORKSPACE_SECTIONS)){const option=document.createElement('option');option.value=key;option.textContent=name;select.append(option);}select.onchange=()=>vhWorkspaceSelect(select.value);label.append(select);nav.before(label);}
      const mobileSelect=document.getElementById('vh-mobile-section');if(mobileSelect){mobileSelect.value=vhWorkspaceSection;mobileSelect.closest('label').hidden=!linked;}
      if(!nav.children.length){
-      const groups=[['This life',['overview','life','people','places']],['Belongings',['closet','possessions','money']],['Images & media',['references','media']],['Settings & recovery',['connections','inspector','recovery']]];
+      const groups=[['This life',['overview','life','people','places']],['Belongings',['closet','possessions','money']],['Images & media',['references','media']],['Settings & cloud',['connections','inspector','recovery']]];
       for(const [index,[title,keys]] of groups.entries()){const group=document.createElement(index?'details':'section');group.className='vh-workspace-nav-group';const heading=document.createElement(index?'summary':'h2');heading.textContent=title;group.append(heading);for(const key of keys){const button=document.createElement('button');button.type='button';button.textContent=VH_WORKSPACE_SECTIONS[key][0];button.dataset.section=key;button.onclick=()=>vhWorkspaceSelect(key);group.append(button);}nav.append(group);}
      }
     const backButton=document.querySelector('[data-vh-back-chat]'),editTemplateButton=document.querySelector('[data-vh-edit-template]');
@@ -153,7 +178,7 @@ function vhArrangeWorkspace(companion,timeline){
  const overview=document.getElementById('vh-workspace-overview');const link=timeline?.vh2;
  overview.innerHTML=`<div class="vh-overview-grid"><article><span>Active life</span><strong>${escapeHTML(timeline?.name||'Original timeline')}</strong><p>${link?(link.running?(Date.now()-(link.simAt||Date.now())>300000?'Catching up automatically in the background · '+Math.ceil((Date.now()-link.simAt)/60000)+' minutes remaining.':'Running in the background. Missed time catches up automatically.'):'Paused. Resume life to catch up automatically.'):'Original life engine. Your conversation is preserved.'}</p></article><article><span>Connection</span><strong>${link?.error?'Needs attention':link?(link.lastSyncedAt?'Last sync '+new Date(link.lastSyncedAt).toLocaleTimeString():'Connection not yet verified'):'Browser-owned life'}</strong><p>${escapeHTML(link?.error||'Open Connections to review effective providers and limits.')}</p></article><article><span>Your profile</span><strong>${escapeHTML(link?.playerProfile?.name||state.personas.find(p=>p.id===timeline?.personaId)?.name||'Not selected')}</strong><p>Choose the profile shared in this chat from its profile control.</p></article></div>`;
  if(!link)overview.replaceChildren();
- else overview.innerHTML+='<div class="vh-overview-actions"><button type="button" data-open-section="life">Explore this life</button><button type="button" data-open-section="references">Reference Library</button><button type="button" data-open-section="connections">Providers, feeds &amp; events</button><button type="button" data-maps-direct>Maps &amp; places</button><button type="button" data-ticketmaster-direct>Ticketmaster events</button><button type="button" data-reboot-life>Reboot life</button></div>';
+ else overview.innerHTML+='<div class="vh-overview-actions"><button type="button" data-open-section="life">Explore this life</button><button type="button" data-open-section="recovery">Always-on private server</button><button type="button" data-open-section="references">Reference Library</button><button type="button" data-open-section="connections">Providers, feeds &amp; events</button><button type="button" data-maps-direct>Maps &amp; places</button><button type="button" data-ticketmaster-direct>Ticketmaster events</button><button type="button" data-reboot-life>Reboot life</button></div>';
  overview.querySelector('[data-maps-direct]')?.addEventListener('click',()=>vhMapsSetup());
  overview.querySelector('[data-ticketmaster-direct]')?.addEventListener('click',()=>vhTicketmasterSetup(companion,(link.signals?.sources||[]).find(s=>s.kind==='ticketmaster')||null));
  overview.querySelector('[data-reboot-life]')?.addEventListener('click',()=>vhRebootLife(companion));
@@ -248,7 +273,7 @@ function vhLifeReadiness(link={}){
 }
 
 async function vhSetAutomaticReplies(companion,timeline,enabled){
- if(enabled)await vh2SyncProvider(companion);
+ if(enabled)await vh2SyncProvider(companion,{timeline});
  await vhUiCommand(timeline,'configure_auto_replies',{enabled});
 }
 function vhOpenLifeStatus(companion){
@@ -260,7 +285,7 @@ function vhOpenLifeStatus(companion){
   const items=entries.filter(entry=>entry.state===state);if(!items.length)continue;const section=document.createElement('section');section.dataset.readinessState=state;const heading=document.createElement('h3');heading.textContent=label;section.append(heading);for(const entry of items){const row=document.createElement('article');row.className='vh-job-card';const copy=document.createElement('p');copy.textContent=entry.message;const button=document.createElement('button');button.type='button';button.textContent=entry.action;button.onclick=()=>open(entry);row.append(copy,button);section.append(row);}form.append(section);
  }};
  const renderRecovery=()=>{form.querySelector('[data-maintenance]')?.remove();const section=document.createElement('section');section.dataset.maintenance='';const title=document.createElement('h3');title.textContent='Automatic recovery';section.append(title);const records=Object.entries(maintenance||{}).filter(([,r])=>r.state==='recovering');const info=document.createElement('p');info.className='form-hint';info.textContent=maintenanceError||(maintenanceDialogueError?'The reply worker is recovering. The saved message remains in this life. '+maintenanceDialogueError:'')||(maintenanceWorldError?'A life step is waiting for recovery. The service will retry from its saved state; history is preserved. '+maintenanceWorldError:'')||(!maintenance?'Checking background services…':records.length?'A background service is recovering. Life continues independently.':'Background services are healthy. Clock and wakeup recovery run automatically.');section.append(info);for(const [name,r] of records){const p=document.createElement('p');p.textContent=({clock:'Life clock',scheduler:'Life wakeups',media:'Images and routes',feeds:'World feeds',weather:'Weather',social:'Social expression'}[name]||name)+': '+r.error+' · Next check in '+Math.max(0,Math.ceil((r.nextAttemptAt-Date.now())/1000))+'s.';section.append(p);}form.prepend(section);};
- const refreshRecovery=async()=>{try{const result=await mcpBridgeRequest('/vh2/status');maintenance=result.maintenance||{};maintenanceWorldError=(result.worlds||[]).find(w=>w.worldId===timeline.vh2.worldId)?.error||'';maintenanceDialogueError=result.dialogueError||result.lastError||'';maintenanceError='';}catch(error){maintenanceError='Background service status is unavailable. '+error.message;}if(d.open)renderRecovery();};
+ const refreshRecovery=async()=>{try{const result=await vh2Request(timeline,'/vh2/status');maintenance=result.maintenance||{};maintenanceWorldError=(result.worlds||[]).find(w=>w.worldId===timeline.vh2.worldId)?.error||'';maintenanceDialogueError=result.dialogueError||result.lastError||'';maintenanceError='';}catch(error){maintenanceError='Background service status is unavailable. '+error.message;}if(d.open)renderRecovery();};
  const runtime=document.createElement('section');runtime.className='vh-current-card';form.before(runtime);
  const renderRuntime=()=>{runtime.replaceChildren();const link=timeline.vh2,heading=document.createElement('h3');heading.textContent=link.running?'Life is running':'Life is paused';const activity=document.createElement('p');activity.textContent=(link.present?.activity||'No current activity recorded')+' · '+(link.present?.availability||'availability unknown');const pending=(timeline.messages||[]).filter(m=>m.role==='user'&&m.awaitingReply),reply=document.createElement('p');reply.setAttribute('role','status');const attention=pending.find(m=>m.attention?.reason)?.attention;if(link.running===false)reply.textContent='Simulation time and attention timers are paused. Resume life to let waiting messages progress.';else if(link.dialogueError&&pending.length)reply.textContent=link.dialogueError;else if(link.replyJob?.reason)reply.textContent=link.replyJob.reason;else if(link.autoReplies===false&&pending.length)reply.textContent='Automatic replies are off. The message is saved; enable replies in Connections when you want it to continue.';else if(attention?.stage==='ready')reply.textContent='Attention is available and the reply is being handed to the selected text model.';else reply.textContent=attention?.reason||(pending.length?'A message is waiting. Refresh status for the latest attention or generation state.':'No waiting message is recorded.');if(attention?.nextCheckAt>link.simAt&&link.running)reply.textContent+=' Next attention check in about '+Math.max(1,Math.ceil((attention.nextCheckAt-link.simAt)/60000))+' minute(s) of life time; this is not a promised reply time.';const toggle=document.createElement('button');toggle.type='button';toggle.textContent=link.running?'Pause life':'Resume life';toggle.onclick=async()=>{toggle.disabled=true;try{await vhUiCommand(timeline,'set_running',{running:!timeline.vh2.running});renderRuntime();render();await refreshRecovery();}catch(error){reply.textContent=error.message;toggle.disabled=false;}};const routines=document.createElement('button');routines.type='button';routines.textContent='Edit activity and availability';routines.onclick=()=>{d.close();vhOpenWorkspace('life',companion.id);};const reboot=document.createElement('button');reboot.type='button';reboot.textContent='Restart life service state…';reboot.onclick=()=>{d.close();vhRebootLife(companion);};runtime.append(heading,activity,reply,toggle,routines,reboot);};renderRuntime();
  const refresh=document.createElement('button');refresh.type='button';refresh.textContent='Refresh status';refresh.onclick=async()=>{refresh.disabled=true;status.textContent='Refreshing…';try{await vh2Poll(companion,timeline,{force:true,throwOnError:true});if(d.open){render();renderRuntime();await refreshRecovery();}}catch(error){status.textContent='Could not refresh: '+error.message;}finally{refresh.disabled=false;}};d.querySelector('header').after(refresh);render();renderRecovery();void refreshRecovery();
@@ -276,7 +301,7 @@ function vhSetupChatActions(){
  more.addEventListener('keydown',e=>{if(e.key==='Escape'){more.open=false;more.querySelector('summary').focus();}});
  document.addEventListener('click',e=>{if(!more.contains(e.target))more.open=false;});
 }
-document.addEventListener('DOMContentLoaded',()=>{vhSetupChatActions();const title=document.getElementById('vh-workspace-title');if(title)title.tabIndex=-1;const studio=document.getElementById('companion-studio-view');studio?.addEventListener('input',event=>{if(studio.classList.contains('is-creating')||event.target.matches('#vh-studio-section,input[type=search]'))return;const status=document.getElementById('vh-save-status');if(status&&!vhStudioSaves.size){status.textContent='Unsaved changes. Save to apply the selected scope.';status.removeAttribute('data-error');}});});
+document.addEventListener('DOMContentLoaded',()=>{vhSetupChatActions();const title=document.getElementById('vh-workspace-title');if(title)title.tabIndex=-1;const studio=document.getElementById('companion-studio-view');studio?.addEventListener('input',event=>{if(event.target.matches('#vh-studio-section,input[type=search]'))return;const id=state.editingCompanionId;if(id)vhStudioEditVersions.set(id,(vhStudioEditVersions.get(id)||0)+1);if(studio.classList.contains('is-creating'))return;const status=document.getElementById('vh-save-status');if(status&&!vhStudioSaves.size){status.textContent='Unsaved changes. Save to apply the selected scope.';status.removeAttribute('data-error');}});});
 async function vhUiCommand(timeline,type,body){
  if(!timeline?.vh2)throw Error('Select a persistent life before saving this change.');
  const owner=state.companions.find(c=>(state.companionTimelines[c.id]?.sessions||[]).some(t=>t===timeline||t?.id===timeline.id));
@@ -674,7 +699,7 @@ async function vhEntityPhotos(companion,timeline,role,entityId,label,description
  const d=document.createElement('dialog');d.className='vh-review-dialog';d.setAttribute('aria-label',label+' photos');d.innerHTML=`<header><h2>${escapeHTML(label)} · Photos</h2><button type="button" class="btn btn-ghost" data-close>Close</button></header><p>Linked to ${escapeHTML(label)}. New images need approval before use.</p><div data-assets></div><form><label>Photo label<input name="label" value="${escapeHTML(label)} reference" required maxlength="120"></label><label>Upload<input name="image" type="file" accept="image/png,image/jpeg,image/webp" required></label><button type="submit">Upload for review</button></form><details><summary>Generate a reference</summary><label>Visual details<textarea data-description>${escapeHTML(description)}</textarea></label><p>One image using this character’s image provider. You will review the prompt before submission.</p><button type="button" data-generate>Review generation</button></details><p role="status"></p>`;
  const view=document.createElement('select');view.name='view';view.setAttribute('aria-label','Reference view');view.innerHTML=vhOptions(VH_REFERENCE_VIEWS[role]||[]);const viewLabel=document.createElement('label');viewLabel.textContent='View';viewLabel.append(view);d.querySelector('form').before(viewLabel);
  const status=d.querySelector('[role=status]');const refresh=()=>{const host=d.querySelector('[data-assets]');host.replaceChildren();for(const entry of timeline.vh2.bible?.entries||[]){if(entry.entityId!==entityId||entry.role!==role||entry.status==='archived')continue;const row=document.createElement('article');row.className='vh-entity-card';row.innerHTML=`<img style="width:120px;height:120px;object-fit:contain" src="${escapeHTML(vh2PhotoAssetUrl(timeline.vh2.worldId,entry.assetId))}" alt="${escapeHTML(entry.label)}"><p>${escapeHTML(entry.label)} · ${escapeHTML(entry.status)}</p>`;for(const [text,type,body] of [['Approve','review_bible_asset',{entryId:entry.id,status:'approved'}],['Remove from use','archive_bible_asset',{entryId:entry.id}]]){const b=document.createElement('button');b.textContent=text;b.onclick=async()=>{b.disabled=true;try{await vhUiCommand(timeline,type,body);refresh();}catch(e){status.textContent=e.message;b.disabled=false;}};row.append(b);}host.append(row);}};
- d.querySelector('form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit],button:not([type])');b.disabled=true;try{const file=f.elements.image.files[0];if(!file)throw Error('Choose an image to upload.');if(file.size>1_900_000)throw Error('Choose an image smaller than 8 MB.');const image=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(Error('Could not read this image.'));reader.readAsDataURL(file);});await vhUiCommand(timeline,'add_bible_asset',{role,entityId,label:f.elements.label.value,tags:[view.value],image});status.textContent='Uploaded. Approve to use in future photos.';refresh();}catch(error){status.textContent=error.message;}finally{b.disabled=false;}};
+ d.querySelector('form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit],button:not([type])');b.disabled=true;try{const file=f.elements.image.files[0];if(!file)throw Error('Choose an image to upload.');status.textContent='Optimizing image for storage…';const image=await vh2NormalizeUploadedImage(file);await vhUiCommand(timeline,'add_bible_asset',{role,entityId,label:f.elements.label.value,tags:[view.value],image});status.textContent='Uploaded. Approve to use in future photos.';refresh();}catch(error){status.textContent=error.message;}finally{b.disabled=false;}};
  d.querySelector('[data-generate]').onclick=async e=>{e.target.disabled=true;const selectedView=view.value;try{await vhUiCommand(timeline,'capture_reference',{role,entityId,view:view.value,description:d.querySelector('[data-description]').value});const capturedPhotoId=timeline.vh2.lastPhotoId;await vhOpenPhotoReview(companion,timeline,capturedPhotoId,async()=>{await vhUiCommand(timeline,'add_bible_asset',{role,entityId,label:label+' reference',tags:[selectedView],photoId:capturedPhotoId});refresh();});}catch(error){status.textContent=error.message;}finally{e.target.disabled=false;}};
  refresh();d.querySelector('[data-close]').onclick=()=>d.close();d.onclose=()=>d.remove();document.body.append(d);d.showModal();
 }
@@ -718,7 +743,7 @@ function vhLifeDraftOverview(dialog,built,proposal,current,options={}){
 
 const vhLifeDraftJobs=new Map();
 async function vhImportTemplateReferences(companion,timeline){
- let added=0;for(const place of companion.lifeProfile.places||[]){if(!place.photo||place.referenceDisabled||!timeline.vh2.travelPlaces.some(p=>p.id===place.id))continue;const existing=(timeline.vh2.bible?.entries||[]).some(e=>e.entityId===place.id&&e.tags.includes('blueprint_import'));if(existing)continue;await vhUiCommand(timeline,'add_bible_asset',{role:'place',entityId:place.id,label:place.label+' · imported reference',tags:['blueprint_import'],image:await vh2PhotoData(place.photo)});added++;}showToast(added?`${added} references imported for review.`:'No unmatched place photos to import. Places must already exist in this life.','info');vhRenderWorkspace();
+ let added=0;for(const place of companion.lifeProfile.places||[]){if(!place.photo||place.referenceDisabled||!timeline.vh2.travelPlaces.some(p=>p.id===place.id))continue;const existing=(timeline.vh2.bible?.entries||[]).some(e=>e.entityId===place.id&&e.tags.includes('blueprint_import'));if(existing)continue;await vhUiCommand(timeline,'add_bible_asset',{role:'place',entityId:place.id,label:place.label+' · imported reference',tags:['blueprint_import'],image:await vh2NormalizeStoredImage(place.photo)});added++;}showToast(added?`${added} references imported for review.`:'No unmatched place photos to import. Places must already exist in this life.','info');vhRenderWorkspace();
 }
 
 // Task-first authoring. Engine forms remain available under Advanced settings.
@@ -780,7 +805,7 @@ async function vhSaveAuthorSection(companion,key,rows,reviewedVersion,expectedTi
   const limits={wardrobe:30,socialCircle:30,places:48,weeklySchedule:160,activityOptions:16,styleProfiles:20};
   if(limits[key]&&map.size>limits[key])throw Error('This section supports '+limits[key]+' entries. Edit an existing entry or remove one before adding another.');
   target[field]=[...map.values()];
-  try{await saveState();}catch(error){target[field]=previous;throw error;}
+  try{await saveCompanionTemplatesState();}catch(error){target[field]=previous;throw error;}
  }
  document.dispatchEvent(new CustomEvent('vh-author-saved',{detail:{companionId:companion.id,key}}));
 }
@@ -802,7 +827,7 @@ async function vhSaveBlueprintProposal(companion,selected,options={}){
  if(selected.expression)candidate.lifeSetupPolicies.expression={...candidate.lifeSetupPolicies.expression,...selected.expression};
  const keys=[...new Set(['lifeProfile','lifeRuntime','lifeStyleProfiles','lifeSetupPolicies','currentOutfit','currentLocationDetail',...(selected.expression?Object.keys(selected.expression).filter(k=>k!=='voice'):[]),...(options.personDraft&&selected.expression?[...COMPANION_BUILDER_FIELDS,'moodBaseline','mood']:[])])],previous=Object.fromEntries(keys.map(key=>[key,companion[key]])),timeline=getActiveCompanionTimeline(companion.id),previousRuntime=timeline?.runtime;
  for(const key of keys)companion[key]=candidate[key];
- try{await saveState();}catch(error){Object.assign(companion,previous);if(timeline)timeline.runtime=previousRuntime;throw error;}
+ try{await saveVirtualHumansState();}catch(error){Object.assign(companion,previous);if(timeline)timeline.runtime=previousRuntime;throw error;}
 }
 function vhOutfitEditor(companion,preset={}){
  preset=safeJsonClone(preset);const saveTimeline=getActiveCompanionTimeline(companion.id);let reviewedVersion=getActiveCompanionTimeline(companion.id)?.vh2?.setupVersion;
@@ -986,7 +1011,7 @@ function vhBlueprintPlaces(companion){
  const d=vhProductDialog('Places & photos','Starting blueprint · Save the places they return to and a photo of each setting.');d.id='vh-blueprint-places';d.querySelector('form').remove();
  const refs=document.getElementById('cs-legacy-place-references'),anchor=document.createComment('blueprint place photos');refs.before(anchor);refs.hidden=false;d.querySelector('header').after(refs);
  const toolbar=document.createElement('div');toolbar.className='vh-task-heading';toolbar.innerHTML='<p>Photos are optional. Upload a reference or describe the setting to generate one.</p><button type="button" class="btn btn-ghost">Add place</button>';refs.before(toolbar);
- toolbar.querySelector('button').onclick=()=>{const editor=vhProductDialog('Add blueprint place','Add a recurring place to this person’s starting setup.');const f=editor.querySelector('form');f.innerHTML='<label>Place name<input name="label" required maxlength="160" placeholder="e.g. Apartment or favourite café"></label><label>Type<select name="kind"><option value="home">Home</option><option value="work">Work</option><option value="study">Study</option><option value="social">Social</option><option value="outdoor">Outdoors</option><option value="other">Other</option></select></label><button type="submit">Add place</button>';f.onsubmit=async e=>{e.preventDefault();const b=f.querySelector('button');b.disabled=true;try{companion.lifeProfile.places.push(normalizeCompanionLifePlace({id:'place_'+crypto.randomUUID(),label:f.elements.label.value,kind:f.elements.kind.value}));await saveState();renderCompanionPhotoLocations(companion);editor.close();}catch(error){editor.querySelector('[role=status]').textContent=error.message;b.disabled=false;}};};
+ toolbar.querySelector('button').onclick=()=>{const editor=vhProductDialog('Add blueprint place','Add a recurring place to this person’s starting setup.');const f=editor.querySelector('form');f.innerHTML='<label>Place name<input name="label" required maxlength="160" placeholder="e.g. Apartment or favourite café"></label><label>Type<select name="kind"><option value="home">Home</option><option value="work">Work</option><option value="study">Study</option><option value="social">Social</option><option value="outdoor">Outdoors</option><option value="other">Other</option></select></label><button type="submit">Add place</button>';f.onsubmit=async e=>{e.preventDefault();const b=f.querySelector('button');b.disabled=true;try{companion.lifeProfile.places.push(normalizeCompanionLifePlace({id:'place_'+crypto.randomUUID(),label:f.elements.label.value,kind:f.elements.kind.value}));await saveCompanionTemplatesState();renderCompanionPhotoLocations(companion);editor.close();}catch(error){editor.querySelector('[role=status]').textContent=error.message;b.disabled=false;}};};
  renderCompanionPhotoLocations(companion);
  d.addEventListener('close',()=>{refs.hidden=true;anchor.replaceWith(refs);},{once:true});
 }
@@ -1022,7 +1047,7 @@ function vhRenderPrimaryBar(companion,surface){
  const title=document.createElement('strong');title.className='vh-person-name';title.textContent=companion.name||'Your person';bar.append(title);
  const blank=vhIsBlankCreation(companion),entries=[['chat','Chat'],['studio','Edit human'],['life','Live human']];
  const library=document.createElement('button');library.type='button';library.className='vh-library-back';library.textContent='← Humans';library.setAttribute('aria-label','Back to Virtual Humans 2.0');
- library.onclick=async()=>{if(surface==='studio'){if(vhIsCreationDraft(companion)){commitCompanionStudioForm();if(vhIsBlankCreation(companion))deleteCompanion(companion.id);await saveState();}else if(!await vhSaveStudio())return;}switchView('companions');};bar.prepend(library);
+ library.onclick=async()=>{if(surface==='studio'){if(vhIsCreationDraft(companion)){commitCompanionStudioForm();const discarded=vhIsBlankCreation(companion);if(discarded)deleteCompanion(companion.id);await (typeof saveVirtualHumansState==='function'?(discarded?saveVirtualHumansState():saveCompanionTemplatesState()):saveState());}else if(!await vhSaveStudio())return;}switchView('companions');};bar.prepend(library);
  if(surface==='studio'){
   bar.classList.add('vh-studio-header');
   title.textContent=vhIsCreationDraft(companion)?'Create a virtual human':`Edit ${companion.name||'profile'}`;
@@ -1072,7 +1097,7 @@ function vhSelectAIModel(companion,initialScope='life'){
   e.preventDefault();const value=input.value.trim();if(!value)return;
   const key=scope.value==='chat'?'model':'lifeBuilderModel',previous=companion[key],button=form.querySelector('[type=submit]');button.disabled=true;form.inert=true;
   try{
-   companion[key]=value;try{await saveState();}catch(error){companion[key]=previous;throw error;}
+   companion[key]=value;try{await saveCompanionTemplatesState();}catch(error){companion[key]=previous;throw error;}
    if(state.editingCompanionId===companion.id){const field=document.getElementById(key==='model'?'cs-text-model-custom':'cs-life-builder-model');if(field)field.value=value;}
    for(const element of document.querySelectorAll('.vh-primary-bar'))if(element.dataset.companion===companion.id)vhRenderPrimaryBar(companion,element.id.replace('vh-primary-',''));
    vhStudioSetupOverview(companion);
@@ -1149,9 +1174,8 @@ async function vhReferenceUpload(companion,timeline,slot,file){
  if(!file)return;
  try{
   if(!['image/png','image/jpeg','image/webp'].includes(file.type))throw Error('Choose a PNG, JPEG or WebP image.');
-  if(file.size>8_500_000)throw Error('Choose an image smaller than 8.5 MB.');
   vh2SetReferenceProgress(timeline,{running:false,error:false,message:'Importing '+slot.label+'…'});
-  const image=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(Error('Could not read this image.'));reader.readAsDataURL(file);});
+  const image=await vh2NormalizeUploadedImage(file);
   await vhUiCommand(timeline,'add_bible_asset',{role:slot.role,entityId:slot.entityId,label:slot.label,tags:[slot.view,...(slot.view==='front_face'?['face']:[])],image});
   vh2SetReferenceProgress(timeline,{running:false,error:false,message:'Image added to '+slot.label+'. Review it below.'});vhRefreshReferenceLibrary(companion,timeline);
  }catch(error){vh2SetReferenceProgress(timeline,{running:false,error:true,message:error.message});}
@@ -1203,7 +1227,7 @@ function vhReferenceModelPicker(companion,timeline){
  provider.onchange=populate;void populate();
  form.onsubmit=async event=>{event.preventDefault();const source=provider.value,chosen=custom.value.trim()||model.value;if(source!=='inherit'&&!chosen&&!['local_image','comfyui','higgsfield','magnific'].includes(source)){status.textContent='Choose an image model or enter its ID.';return;}
   const previous=[companion.referenceImageSource,companion.referenceImageModel];submit.disabled=true;
-  try{companion.referenceImageSource=source==='inherit'?'':source;companion.referenceImageModel=source==='inherit'?'':chosen;await saveState();d.close();vhRefreshReferenceLibrary(companion,timeline);}
+  try{companion.referenceImageSource=source==='inherit'?'':source;companion.referenceImageModel=source==='inherit'?'':chosen;await saveCompanionTemplatesState();d.close();vhRefreshReferenceLibrary(companion,timeline);}
   catch(error){[companion.referenceImageSource,companion.referenceImageModel]=previous;status.textContent=error.message;submit.disabled=false;}
  };
 }
@@ -1332,11 +1356,11 @@ async function vhWorldSetup(companion){
  body.append(content);const coordinates=document.createElement('section');coordinates.innerHTML='<h3>Place by coordinates</h3><p>No map listing needed. Choose a saved place to enter latitude and longitude.</p>';for(const place of (link.travelPlaces||[]).filter(p=>!p.id.startsWith('osm:'))){const b=document.createElement('button');b.type='button';b.textContent=place.label+(place.mapCoordinates?' · Placed':' · Set position');b.onclick=()=>{dialog.close();vhOpenPlace(companion,place.id);};coordinates.append(b);}content.prepend(coordinates);const select=content.querySelector('[data-region]'),status=content.querySelector('[role=status]'),bindings=content.querySelector('[data-bindings]'),apply=content.querySelector('[data-apply]');let pack=null,selectionVersion=0;
  const appliedPack=()=>pack&&(timeline.vh2.geography?.packs||[]).find(p=>p.source===pack.source&&JSON.stringify(p.packId??null)===JSON.stringify(pack.id===undefined?(pack.bbox??null):pack.id));
  bindings.onchange=()=>{if(pack){apply.disabled=false;apply.textContent=appliedPack()?'Update region links':'Use this region';status.textContent='Links changed. Apply to save them to this life.';}};
- const refresh=async()=>{const library=await mcpBridgeRequest('/vh2/world-packs');const prior=select.value;select.innerHTML='<option value="">Choose an installed region</option>';for(const p of library.packs){const o=document.createElement('option');o.value=p.id;o.textContent=p.name+' · '+p.placeCount+' places · Available offline';select.append(o);}select.value=prior;return library;};
- select.onchange=async()=>{const version=++selectionVersion;pack=null;apply.disabled=true;bindings.replaceChildren();if(!select.value)return;status.textContent='Reading region…';try{const loaded=await mcpBridgeRequest('/vh2/world-packs?id='+encodeURIComponent(select.value));if(version!==selectionVersion)return;pack=loaded;const installed=appliedPack(),current=link.present?.placeId,home=link.travel?.residenceId;bindings.innerHTML='<h3>Link your saved places</h3><p>This links map coordinates and routes. Their actual place and history stay unchanged.</p>';for(const p of (link.travelPlaces||[]).filter(p=>!p.id.startsWith('osm:'))){const row=document.createElement('label');row.textContent=p.label+(p.id===current?' · Currently here':p.id===home?' · Home':'');const picker=document.createElement('select');picker.className='form-select';picker.dataset.savedPlace=p.id;const empty=document.createElement('option');empty.value='';empty.textContent='Keep existing location';picker.append(empty);for(const q of pack.places){const o=document.createElement('option');o.value=q.id;o.textContent=q.label+' · '+q.mapCoordinates.map(n=>n.toFixed(4)).join(', ');picker.append(o);}picker.value=Object.entries(installed?.bindings||{}).find(([,saved])=>saved===p.id)?.[0]||'';row.append(picker);bindings.append(row);}status.textContent=pack.license+(installed?' · Already used by this life. Update the links or reapply the saved region.':' · Unlinked locations keep their existing position.');apply.textContent=installed?'Update region links':'Use this region';apply.disabled=false;}catch(e){status.textContent='Could not read region: '+e.message;}};
+ const refresh=async()=>{const library=await vh2Request(timeline,'/vh2/world-packs');const prior=select.value;select.innerHTML='<option value="">Choose an installed region</option>';for(const p of library.packs){const o=document.createElement('option');o.value=p.id;o.textContent=p.name+' · '+p.placeCount+' places · Available offline';select.append(o);}select.value=prior;return library;};
+ select.onchange=async()=>{const version=++selectionVersion;pack=null;apply.disabled=true;bindings.replaceChildren();if(!select.value)return;status.textContent='Reading region…';try{const loaded=await vh2Request(timeline,'/vh2/world-packs?id='+encodeURIComponent(select.value));if(version!==selectionVersion)return;pack=loaded;const installed=appliedPack(),current=link.present?.placeId,home=link.travel?.residenceId;bindings.innerHTML='<h3>Link your saved places</h3><p>This links map coordinates and routes. Their actual place and history stay unchanged.</p>';for(const p of (link.travelPlaces||[]).filter(p=>!p.id.startsWith('osm:'))){const row=document.createElement('label');row.textContent=p.label+(p.id===current?' · Currently here':p.id===home?' · Home':'');const picker=document.createElement('select');picker.className='form-select';picker.dataset.savedPlace=p.id;const empty=document.createElement('option');empty.value='';empty.textContent='Keep existing location';picker.append(empty);for(const q of pack.places){const o=document.createElement('option');o.value=q.id;o.textContent=q.label+' · '+q.mapCoordinates.map(n=>n.toFixed(4)).join(', ');picker.append(o);}picker.value=Object.entries(installed?.bindings||{}).find(([,saved])=>saved===p.id)?.[0]||'';row.append(picker);bindings.append(row);}status.textContent=pack.license+(installed?' · Already used by this life. Update the links or reapply the saved region.':' · Unlinked locations keep their existing position.');apply.textContent=installed?'Update region links':'Use this region';apply.disabled=false;}catch(e){status.textContent='Could not read region: '+e.message;}};
  apply.onclick=async()=>{apply.disabled=true;status.textContent='Applying region to this life…';try{const links={};for(const picker of bindings.querySelectorAll('select'))if(picker.value){if(links[picker.value])throw Error('Each map place can link to only one saved place.');links[picker.value]=picker.dataset.savedPlace;}const installed=appliedPack();if(!Object.keys(links).length&&!installed)throw Error('Link at least one saved place to connect this life to the walking network.');await vhUiCommand(timeline,'import_world_pack',{packId:select.value,bindings:links,...(installed?{refresh:true}:{})});status.textContent=installed?'Region links updated. Saved history and current place preserved.':'Region applied. Saved history and current place preserved.';apply.textContent='Applied';}catch(e){status.textContent='Not applied: '+e.message;apply.disabled=false;}};
- try{const installed=await refresh();status.textContent='Choose an installed region, or add one below.';const response=await fetch('world-packs/catalog.json');if(response.ok)for(const item of await response.json()){if(!/^[a-z0-9-]+\.json$/.test(item.file))continue;const button=document.createElement('button');button.type='button';button.className='btn btn-secondary';button.textContent=installed.packs.some(p=>p.name===item.name)?item.name+' · Available offline':'Add '+item.name+' to library';button.disabled=installed.packs.some(p=>p.name===item.name);button.onclick=async()=>{button.disabled=true;status.textContent='Reading bundled region…';try{const response=await fetch('world-packs/'+item.file);if(!response.ok)throw Error('Region file unavailable.');const pack=await response.json();status.textContent='Saving region to the shared library…';await mcpBridgeRequest('/vh2/world-packs',{method:'POST',body:{name:item.name,pack}});await refresh();status.textContent='Available offline for every character. Choose it above to use it here.';button.textContent='Available offline';}catch(e){status.textContent='Region not installed: '+e.message;button.disabled=false;}};content.querySelector('[data-library]').append(button);}}catch(e){status.textContent='World library unavailable: '+e.message;}
- const upload=document.createElement('input');upload.type='file';upload.accept='.json,application/json';upload.hidden=true;const importButton=document.createElement('button');importButton.type='button';importButton.className='btn btn-secondary';importButton.textContent='Import region file';importButton.onclick=()=>upload.click();upload.onchange=async()=>{const file=upload.files[0];if(!file)return;importButton.disabled=true;status.textContent='Reading region file…';try{if(file.size>1900000)throw Error('Split regions larger than 1.9 MB.');await mcpBridgeRequest('/vh2/world-packs',{method:'POST',body:{name:file.name.replace(/\.json$/i,''),pack:JSON.parse(await file.text())}});await refresh();status.textContent='Region installed. Choose it above to use it here.';}catch(e){status.textContent='Import failed: '+e.message;}finally{importButton.disabled=false;upload.value='';}};content.querySelector('[data-library]').append(importButton,upload);
+ try{const installed=await refresh();status.textContent='Choose an installed region, or add one below.';const response=await fetch('world-packs/catalog.json');if(response.ok)for(const item of await response.json()){if(!/^[a-z0-9-]+\.json$/.test(item.file))continue;const button=document.createElement('button');button.type='button';button.className='btn btn-secondary';button.textContent=installed.packs.some(p=>p.name===item.name)?item.name+' · Available offline':'Add '+item.name+' to library';button.disabled=installed.packs.some(p=>p.name===item.name);button.onclick=async()=>{button.disabled=true;status.textContent='Reading bundled region…';try{const response=await fetch('world-packs/'+item.file);if(!response.ok)throw Error('Region file unavailable.');const pack=await response.json();status.textContent='Saving region to the shared library…';await vh2Request(timeline,'/vh2/world-packs',{method:'POST',body:{name:item.name,pack}});await refresh();status.textContent='Available offline for every character. Choose it above to use it here.';button.textContent='Available offline';}catch(e){status.textContent='Region not installed: '+e.message;button.disabled=false;}};content.querySelector('[data-library]').append(button);}}catch(e){status.textContent='World library unavailable: '+e.message;}
+ const upload=document.createElement('input');upload.type='file';upload.accept='.json,application/json';upload.hidden=true;const importButton=document.createElement('button');importButton.type='button';importButton.className='btn btn-secondary';importButton.textContent='Import region file';importButton.onclick=()=>upload.click();upload.onchange=async()=>{const file=upload.files[0];if(!file)return;importButton.disabled=true;status.textContent='Reading region file…';try{if(file.size>1900000)throw Error('Split regions larger than 1.9 MB.');await vh2Request(timeline,'/vh2/world-packs',{method:'POST',body:{name:file.name.replace(/\.json$/i,''),pack:JSON.parse(await file.text())}});await refresh();status.textContent='Region installed. Choose it above to use it here.';}catch(e){status.textContent='Import failed: '+e.message;}finally{importButton.disabled=false;upload.value='';}};content.querySelector('[data-library]').append(importButton,upload);
 }
 
 function vhCalendarOccurrence(row,year){

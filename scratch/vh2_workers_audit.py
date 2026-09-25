@@ -34,6 +34,11 @@ class Workers(unittest.TestCase):
   self.assertEqual(self.state(),self.s.replay(self.w));import gzip;self.assertNotIn(b'PRIVATE_FIXTURE_KEY',gzip.decompress(vh2_backup.export(self.s,self.w)))
  def test_unknown_is_never_resubmitted_after_restart(self):
   photo=self.prepare();self.s.image_executor=lambda *args:(_ for _ in ()).throw(UnknownOutcome('Unknown'));self.cmd('queue_photo_render',photoId=photo);self.finish();self.assertEqual(vh2_workers.status(self.s,self.w)[0]['status'],'unknown');self.s.close();self.s=self.open();self.s.image_executor=lambda *args:self.fail('Must not resubmit');vh2_workers.poll(self.s);self.assertEqual(self.state()['photos'][-1]['status'],'submitted')
+ def test_retry_capture_uses_compact_snapshot(self):
+  photo=self.prepare();result=self.cmd('retry_photo_render',photoId=photo);retry=result['photoId']
+  with self.s.connect() as db:
+   snapshot=json.loads(db.execute('SELECT snapshot FROM photo_jobs WHERE id=?',(retry,)).fetchone()[0])
+  self.assertEqual(snapshot['captureSnapshotVersion'],1);self.assertNotIn('lifeRuntime',snapshot['companion'])
  def test_prompt_only_result_is_failed_without_delivering_a_photo(self):
   photo=self.prepare();calls=[]
   def render(*args):calls.append(1);return 'Portrait of a person standing in a sunlit room.'

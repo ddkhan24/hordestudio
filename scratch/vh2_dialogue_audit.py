@@ -5,7 +5,9 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from virtual_humans.backend.vh2_runtime import WorldService, Conflict, encode, QUANTUM
 from virtual_humans.backend.vh2_dialogue import LEASE_MS
+from virtual_humans.backend import vh2_workers
 ROOT=Path(__file__).resolve().parents[1]
+PNG='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='
 class Dialogue(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.now=1788764400000
@@ -68,6 +70,49 @@ class Dialogue(unittest.TestCase):
         self.assertTrue(self.s.dialogue.finish(job['id'],job['token'],output))
         self.assertEqual(self.state()['communication']['messages'][-1]['text'],'Yep.')
         self.assertEqual(self.state(),self.s.replay(self.w))
+
+    def enable_dialogue_photos(self):
+        with self.s.connect() as db:
+            db.execute('BEGIN IMMEDIATE');revision,state=self.s.read(db,self.w);before=json.loads(encode(state))
+            state['integration']={'providerScope':'horde:alex','autoReplies':False,'source':'test'}
+            state['truth']['companion']['allowPhotos']=True
+            self.s.commit_event(db,self.w,revision,before,state,'TEST_PHOTO_INTEGRATION')
+        companion_id=self.state()['truth']['companion']['id']
+        self.cmd('add_bible_asset',role='identity',entityId=companion_id,label='Identity',tags=['face'],image=PNG)
+        entry=self.state()['truth']['companion']['vh2Assets']['entries'][0]
+        self.cmd('review_bible_asset',entryId=entry['id'],status='approved')
+        vh2_workers.settings(self.s,dict(scope='horde:alex',provider='magnific',tool='fixture.generate',
+            enabled=True,model='fixture/image',dailyLimit=2,maxReferences=10))
+
+    def test_photo_action_queues_real_image_and_delivers_after_provider_result(self):
+        self.enable_dialogue_photos();self.queue();job=self.s.dialogue.claim()
+        self.assertTrue(job['snapshot']['context']['mediaActions']['photo']['enabled'])
+        output=json.dumps({'reply':'One sec—I’ll take one now.','photoAction':{
+            'decision':'send','scene':'A casual front-camera selfie at the recorded location.',
+            'captureType':'front_camera_selfie'}})
+        self.assertTrue(self.s.dialogue.finish(job['id'],job['token'],output))
+        state=self.state();photo=state['photos'][-1]
+        self.assertEqual((photo['origin'],photo['destination'],photo['status']),('dialogue_action','private_chat','submitted'))
+        self.assertEqual(state['communication']['messages'][-1]['text'],'One sec—I’ll take one now.')
+        with self.s.connect() as db:
+            queued=json.loads(db.execute('SELECT snapshot FROM vh2_provider_jobs WHERE id=?',('image:'+photo['id'],)).fetchone()[0])
+        self.assertEqual((queued['automatic'],queued['purpose']),(True,'dialogue'))
+        self.s.image_executor=lambda *args:PNG;self.cmd('set_running',running=True)
+        for _ in range(20):
+            vh2_workers.poll(self.s)
+            if any(message.get('type')=='photo' for message in self.state()['communication']['messages']):break
+        delivered=self.state()
+        self.assertTrue(any(message.get('type')=='photo' and message.get('assetId') for message in delivered['communication']['messages']))
+        self.assertEqual(delivered,self.s.replay(self.w))
+
+    def test_photo_action_is_rejected_when_no_durable_image_route_exists(self):
+        self.queue();job=self.s.dialogue.claim()
+        self.assertFalse(job['snapshot']['context']['mediaActions']['photo']['enabled'])
+        output=json.dumps({'reply':'Sent it.','photoAction':{'decision':'send','scene':'A selfie','captureType':'front_camera_selfie'}})
+        self.assertFalse(self.s.dialogue.finish(job['id'],job['token'],output))
+        self.assertEqual(self.status(),'failed')
+        self.assertFalse(any(message.get('role')=='assistant' for message in self.state()['communication']['messages']))
+        self.assertEqual([],vh2_workers.status(self.s,self.w))
 
     def test_wrapped_json_with_trailing_text_is_rejected(self):
         self.queue();job=self.s.dialogue.claim()

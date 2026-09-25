@@ -6,6 +6,13 @@ function policy(raw={}){
  return Object.fromEntries(Object.entries(DEFAULTS).map(([k,v])=>[k,Math.max(limits[k][0],Math.min(limits[k][1],Number.isFinite(raw[k])?raw[k]:v))]));
 }
 function random(key){let h=2166136261;for(const c of key)h=Math.imul(h^c.charCodeAt(0),16777619);h^=h>>>16;h=Math.imul(h,0x85ebca6b);h^=h>>>13;h=Math.imul(h,0xc2b2ae35);return ((h^(h>>>16))>>>0)/4294967296;}
+function historyEntry(choice={}){
+ const selected=(choice.candidates||[]).find(candidate=>candidate.id===choice.goalId);
+ return {at:choice.at,nextAt:choice.nextAt,sequence:choice.sequence,goalId:choice.goalId,urgency:choice.urgency||'',draw:choice.draw,temperature:choice.temperature,
+  score:Number.isFinite(choice.score)?choice.score:selected?.score,probability:Number.isFinite(choice.probability)?choice.probability:selected?.probability,
+  components:choice.components||selected?.components||{},candidateCount:Number.isInteger(choice.candidateCount)?choice.candidateCount:(choice.candidates||[]).length,
+  excludedCount:Number.isInteger(choice.excludedCount)?choice.excludedCount:(choice.excluded||[]).length};
+}
 function select(runtime,candidates,now,context,score){
  const p=policy(runtime.policy);runtime.policy=p;
  if(!candidates.length){runtime.choice=null;return null;}
@@ -33,7 +40,10 @@ function select(runtime,candidates,now,context,score){
  runtime.choice={at:now,nextAt:now+p.reconsiderMinutes*60000,sequence,goalId:goal.id,signature,urgency,draw,temperature,
    candidates:scored.map((s,i)=>({...s,probability:probabilities[i]})),
    excluded:[...(context.excluded||[]),...candidates.filter(g=>!feasible.includes(g)).map(g=>({id:g.id,reason:urgency}))]};
- runtime.history=[...(runtime.history||[]),runtime.choice].slice(-50);
+ // History is an audit trail, not fifty copies of every route and candidate.
+ // Compact legacy entries opportunistically so a long-running life shrinks on
+ // its next decision while the current choice still keeps the full rationale.
+ runtime.history=[...(runtime.history||[]).map(historyEntry),historyEntry(runtime.choice)].slice(-50);
  return goal;
 }
 function nextWake(c,now){
@@ -83,4 +93,4 @@ function nextWake(c,now){
  bounded.sort((a,b)=>a.at-b.at||a.reason.localeCompare(b.reason));
  return {at:bounded[0].at,reasons:[...new Set(bounded.filter(x=>x.at===bounded[0].at).map(x=>x.reason))],resolutionMs:minute};
 }
-module.exports={policy,select,nextWake,DEFAULTS,random};
+module.exports={policy,select,nextWake,DEFAULTS,random,historyEntry};

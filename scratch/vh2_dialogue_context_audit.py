@@ -39,8 +39,12 @@ class DialogueContext(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.s.dialogue.list(self.w)[0]['status'], 'delivered')
         with self.s.connect() as db:
-            saved = json.loads(db.execute('SELECT snapshot FROM dialogue_jobs').fetchone()[0])
-        self.assertEqual(saved['context']['identity']['personality'], authored)
+            row = db.execute('SELECT snapshot,fixture,result FROM dialogue_jobs').fetchone()
+            saved = json.loads(row['snapshot'])
+        self.assertEqual(saved['retentionVersion'],1)
+        self.assertGreater(saved['summary']['snapshotBytes'],MAX_MESSAGE_BYTES)
+        self.assertNotIn('identity',saved['context'])
+        self.assertEqual((row['fixture'],row['result']),('',None))
         state = self.s.projection(self.w)['state']
         self.assertEqual(state, self.s.replay(self.w))
 
@@ -217,7 +221,7 @@ class DialogueContext(unittest.TestCase):
         self.assertTrue(self.s.dialogue.run_once(provider_transport=lambda *args: self.response('Legacy plain reply')))
         self.assertEqual(self.s.projection(self.w)['state']['communication']['messages'][-1]['text'], 'Legacy plain reply')
 
-    def test_unstructured_short_lines_deliver_as_bubbles_with_original_output_preserved(self):
+    def test_unstructured_short_lines_deliver_as_bubbles_without_duplicate_job_output(self):
         for index, separator in enumerate(('\n\n', '\n')):
             if index:
                 self.cmd('receive_message', text='Still there?')
@@ -232,7 +236,7 @@ class DialogueContext(unittest.TestCase):
             self.assertEqual([m['text'] for m in delivered],parts)
             self.assertEqual(len({m['id'] for m in delivered}),2)
             with self.s.connect() as db:
-                self.assertEqual(db.execute('SELECT result FROM dialogue_jobs WHERE id=?',(job_id,)).fetchone()[0],output)
+                self.assertIsNone(db.execute('SELECT result FROM dialogue_jobs WHERE id=?',(job_id,)).fetchone()[0])
             self.assertEqual(state,self.s.replay(self.w))
 
     def test_plain_prose_and_formatted_blocks_do_not_become_bursts(self):

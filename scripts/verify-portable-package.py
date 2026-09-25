@@ -32,6 +32,9 @@ def main():
         assert {p.name for p in root.iterdir()} == {
             'app', 'START HERE.txt', 'Start Horde Studio.command',
             'Start Horde Studio.bat', 'start-horde-studio.sh'}
+        self_host = app / 'deploy/vh2-self-host'
+        assert {name for name in ('Dockerfile','compose.yaml','Caddyfile','.env.example','README.md')
+                if not (self_host / name).is_file()} == set(), 'Private VH2 deployment kit is incomplete'
         for html in app.rglob('*.html'):
             for reference in re.findall(r'(?:src|href)=["\']([^"\']+)', html.read_text()):
                 reference = reference.split('?', 1)[0].split('#', 1)[0]

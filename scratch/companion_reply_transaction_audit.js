@@ -13,6 +13,9 @@ function fixture() {
     const other = { id: 'b', messages: [] };
     const store = { activeSessionId: 'a', sessions: [timeline, other] };
     let resolveProvider;
+    let committedSources = [];
+    let observedDetails = null;
+    const requestSnapshots = [];
     const response = new Promise(resolve => { resolveProvider = resolve; });
     const ctx = {
         VHWorldEngine: require('../virtual_humans/engine/vh-world-engine'),
@@ -20,7 +23,7 @@ function fixture() {
         companionCompactPrompt: () => 'Synthetic profile',
         companionRequestContextSize: () => 8192,
         state: { globalSettings: {}, companions: [human] },
-        companionReplyInFlight: new Set(), companionAgencyInFlight: new Set(),
+        companionReplyInFlight: new Set(), companionReplyJobsInFlight: new Map(), companionAgencyInFlight: new Set(),
         getCompanion: () => human,
         getActiveCompanionTimeline: () => store.sessions.find(t => t.id === store.activeSessionId),
         ensureCompanionTimelineStore: () => store,
@@ -36,7 +39,7 @@ function fixture() {
         companionPendingPersonaVision: () => null,
         companionConsumeStartingScenario: () => '',
         companionContinuity: () => ({ revision: 0 }),
-        buildCompanionMessages: () => [],
+        buildCompanionMessages: (c, messages) => { requestSnapshots.push(messages.map(message => message.id)); return []; },
         applyCompanionGenerationConfig: x => x,
         sanitizeMessagesForProvider: x => x,
         companionProviderOutputBudget: () => 100,
@@ -53,17 +56,19 @@ function fixture() {
         companionSexualSystemActive: () => false,
         companionApplyMindCues: () => [],
         companionDecisionPressures: () => [],
-        applyCompanionTurnCommit() {}, applyCompanionSocialPostCommit() {},
+        applyCompanionTurnCommit(c, commit, at, source, sourceIds) { committedSources = [...sourceIds]; },
+        applyCompanionSocialPostCommit() {},
         splitCompanionReplyIntoBubbles: text => [text],
         consolidateCompanionMemory() {}, persistCompanionRuntime() {},
-        scheduleCompanionTurnObservation() {}, showToast() {}
+        scheduleCompanionTurnObservation(c, messages, reply, details) { observedDetails = details; }, showToast() {}
     };
     vm.createContext(ctx);
     for (const name of ['companionTimelineBusy', 'assertCompanionReplyTarget',
         'activateCompanionTimeline', 'sendCompanionMessage']) {
         vm.runInContext(functionSource(name), ctx);
     }
-    return { ctx, human, user, timeline, other, store,
+    return { ctx, human, user, timeline, other, store, requestSnapshots,
+        committedSources: () => committedSources, observedDetails: () => observedDetails,
         finish: () => resolveProvider({ ok: true, json: async () => ({ choices: [{ message: { content: 'Hello back' } }] }) }) };
 }
 
@@ -118,4 +123,19 @@ function fixture() {
     assert.equal(stale.user.awaitingReply, true);
     assert.equal(stale.ctx.companionReplyInFlight.size, 0);
     console.log('PASS: stale provider result changes neither timeline and releases the lock');
+
+    const queued = fixture();
+    const firstReply = queued.ctx.sendCompanionMessage(queued.human, queued.timeline.messages, 'First', 10,
+        { existingUserMessage: queued.user, replyBatch: [queued.user], responseGroupId: 'first-job' });
+    const lateMessage = { id: 'late', role: 'user', type: 'text', text: 'Second', timestamp: 11,
+        readAt: 11, awaitingReply: true, replyDueAt: 11, replyJobId: 'second-job' };
+    queued.timeline.messages.push(lateMessage);
+    queued.finish();
+    await firstReply;
+    assert.deepEqual(queued.requestSnapshots[0], ['u']);
+    assert.deepEqual(queued.committedSources(), ['u']);
+    assert.deepEqual(queued.observedDetails().sourceMessageIds, ['u']);
+    assert(!queued.observedDetails().observationMessageIds.includes('late'));
+    assert.equal(lateMessage.awaitingReply, true);
+    console.log('PASS: a message sent during generation stays queued and is absent from the earlier prompt, commit and observer');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,0 +1,34 @@
+services:
+  vh2:
+    build:
+      context: ../..
+      dockerfile: deploy/vh2-self-host/Dockerfile
+    restart: unless-stopped
+    environment:
+      HORDE_VH2_ACCESS_TOKEN: ${HORDE_VH2_ACCESS_TOKEN:?Set a random access token}
+      HORDE_VH2_ALLOWED_ORIGINS: ${HORDE_VH2_ALLOWED_ORIGINS:?Set the exact Horde Studio browser origin}
+    volumes:
+      - vh2-data:/data
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - vh2
+    environment:
+      VH2_DOMAIN: ${VH2_DOMAIN:?Set a domain whose DNS points to this server}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  vh2-data:
+  caddy-data:
+  caddy-config:

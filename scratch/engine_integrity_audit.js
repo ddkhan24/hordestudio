@@ -184,6 +184,10 @@ record('Online and catch-up dynamics agree across sleep/wake transition', {
         companionAgencyInFlight: new Set(),
         companionReplyInFlight: new Set(),
         companionObserverQueues: new Map(),
+        // The real browser queues an immediate follow-up pass when another
+        // message is already due. This isolated assertion tests the durable
+        // claim only, so retain the scheduling contract without recursing.
+        setTimeout: () => 0,
         advanceCompanionMessageAttention: () => false,
         livingId: (prefix, value) => `${prefix}_${value}`,
         companionRecordContinuityEvent() {},

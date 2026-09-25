@@ -5,8 +5,125 @@ from .vh2_provider import NoRedirect, UnknownOutcome, RejectedOutput
 SCHEMA='''CREATE TABLE IF NOT EXISTS vh2_service_providers(id TEXT PRIMARY KEY,scope TEXT NOT NULL,config TEXT NOT NULL,api_key TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS vh2_provider_jobs(id TEXT PRIMARY KEY,world_id TEXT NOT NULL REFERENCES worlds(id),kind TEXT NOT NULL,status TEXT NOT NULL,snapshot TEXT NOT NULL,result TEXT,error TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL,submitted_at INTEGER,finished_at INTEGER);
 CREATE TABLE IF NOT EXISTS vh2_provider_outputs(job_id TEXT PRIMARY KEY REFERENCES vh2_provider_jobs(id),image TEXT NOT NULL);
-CREATE TRIGGER IF NOT EXISTS vh2_service_provider_immutable BEFORE UPDATE ON vh2_service_providers BEGIN SELECT RAISE(ABORT,'Provider versions are immutable'); END;'''
+CREATE TRIGGER IF NOT EXISTS vh2_service_provider_immutable BEFORE UPDATE ON vh2_service_providers BEGIN SELECT RAISE(ABORT,'Provider versions are immutable'); END;
+DROP TRIGGER IF EXISTS vh2_provider_input_immutable;
+DROP TRIGGER IF EXISTS vh2_provider_terminal_compact;
+DROP TRIGGER IF EXISTS vh2_provider_terminal_insert_compact;
+UPDATE vh2_provider_jobs SET snapshot=json_object(
+ 'retentionVersion',1,
+ 'scope',json_extract(snapshot,'$.scope'),
+ 'providerId',json_extract(snapshot,'$.providerId'),
+ 'photoId',json_extract(snapshot,'$.photoId'),
+ 'personaId',json_extract(snapshot,'$.personaId'),
+ 'automatic',COALESCE(json_extract(snapshot,'$.automatic'),0),
+ 'purpose',json_extract(snapshot,'$.purpose'),
+ 'journeyId',json_extract(snapshot,'$.journeyId'),
+ 'model',json_extract(snapshot,'$.request.model'),
+ 'snapshotBytes',length(CAST(snapshot AS BLOB))),
+ result=CASE WHEN kind='image' THEN json_object(
+  'imported',COALESCE(json_extract(result,'$.imported'),0),
+  'providerAccepted',COALESCE(json_extract(result,'$.providerAccepted'),0),
+  'providerJobIds',json(COALESCE(json_extract(result,'$.providerJobIds'),'[]')),
+  'referenceProgress',CASE WHEN json_type(result,'$.referenceProgress')='object'
+   THEN json(json_extract(result,'$.referenceProgress')) ELSE NULL END)
+  ELSE json_object('imported',status='succeeded') END
+ WHERE status IN ('succeeded','failed','abandoned')
+ AND COALESCE(json_extract(snapshot,'$.retentionVersion'),0)<>1;
+DELETE FROM vh2_provider_outputs WHERE job_id IN (
+ SELECT id FROM vh2_provider_jobs WHERE status IN ('succeeded','failed','abandoned'));
+CREATE TRIGGER vh2_provider_input_immutable BEFORE UPDATE OF snapshot,world_id,kind ON vh2_provider_jobs
+ WHEN NEW.world_id IS NOT OLD.world_id OR NEW.kind IS NOT OLD.kind
+   OR NOT (OLD.status IN ('succeeded','failed','abandoned') AND NEW.status=OLD.status
+           AND COALESCE(json_extract(NEW.snapshot,'$.retentionVersion'),0)=1)
+ BEGIN SELECT RAISE(ABORT,'Provider job input is immutable'); END;
+CREATE TRIGGER vh2_provider_terminal_compact AFTER UPDATE OF status ON vh2_provider_jobs
+ WHEN NEW.status IN ('succeeded','failed','abandoned')
+  AND COALESCE(json_extract(NEW.snapshot,'$.retentionVersion'),0)<>1
+ BEGIN
+  UPDATE vh2_provider_jobs SET snapshot=json_object(
+   'retentionVersion',1,
+   'scope',json_extract(NEW.snapshot,'$.scope'),
+   'providerId',json_extract(NEW.snapshot,'$.providerId'),
+   'photoId',json_extract(NEW.snapshot,'$.photoId'),
+   'personaId',json_extract(NEW.snapshot,'$.personaId'),
+   'automatic',COALESCE(json_extract(NEW.snapshot,'$.automatic'),0),
+   'purpose',json_extract(NEW.snapshot,'$.purpose'),
+   'journeyId',json_extract(NEW.snapshot,'$.journeyId'),
+   'model',json_extract(NEW.snapshot,'$.request.model'),
+   'snapshotBytes',length(CAST(NEW.snapshot AS BLOB))),
+   result=CASE WHEN NEW.kind='image' THEN json_object(
+    'imported',COALESCE(json_extract(NEW.result,'$.imported'),0),
+    'providerAccepted',COALESCE(json_extract(NEW.result,'$.providerAccepted'),0),
+    'providerJobIds',json(COALESCE(json_extract(NEW.result,'$.providerJobIds'),'[]')),
+    'referenceProgress',CASE WHEN json_type(NEW.result,'$.referenceProgress')='object'
+     THEN json(json_extract(NEW.result,'$.referenceProgress')) ELSE NULL END)
+    ELSE json_object('imported',NEW.status='succeeded') END
+   WHERE id=NEW.id;
+  DELETE FROM vh2_provider_outputs WHERE job_id=NEW.id;
+ END;
+CREATE TRIGGER vh2_provider_terminal_insert_compact AFTER INSERT ON vh2_provider_jobs
+ WHEN NEW.status IN ('succeeded','failed','abandoned')
+  AND COALESCE(json_extract(NEW.snapshot,'$.retentionVersion'),0)<>1
+ BEGIN
+  UPDATE vh2_provider_jobs SET snapshot=json_object(
+   'retentionVersion',1,
+   'scope',json_extract(NEW.snapshot,'$.scope'),
+   'providerId',json_extract(NEW.snapshot,'$.providerId'),
+   'photoId',json_extract(NEW.snapshot,'$.photoId'),
+   'personaId',json_extract(NEW.snapshot,'$.personaId'),
+   'automatic',COALESCE(json_extract(NEW.snapshot,'$.automatic'),0),
+   'purpose',json_extract(NEW.snapshot,'$.purpose'),
+   'journeyId',json_extract(NEW.snapshot,'$.journeyId'),
+   'model',json_extract(NEW.snapshot,'$.request.model'),
+   'snapshotBytes',length(CAST(NEW.snapshot AS BLOB))),
+   result=CASE WHEN NEW.kind='image' THEN json_object(
+    'imported',COALESCE(json_extract(NEW.result,'$.imported'),0),
+    'providerAccepted',COALESCE(json_extract(NEW.result,'$.providerAccepted'),0),
+    'providerJobIds',json(COALESCE(json_extract(NEW.result,'$.providerJobIds'),'[]')),
+    'referenceProgress',CASE WHEN json_type(NEW.result,'$.referenceProgress')='object'
+     THEN json(json_extract(NEW.result,'$.referenceProgress')) ELSE NULL END)
+    ELSE json_object('imported',NEW.status='succeeded') END
+   WHERE id=NEW.id;
+  DELETE FROM vh2_provider_outputs WHERE job_id=NEW.id;
+ END;'''
 COMMANDS=('queue_photo_render','dismiss_photo_render','retry_photo_render')
+MAX_TERMINAL_JOBS=200
+TERMINAL_STATUSES=('succeeded','failed','abandoned')
+
+def compact_job_row(row):
+ item=dict(row)
+ if item.get('status') not in TERMINAL_STATUSES:return item
+ raw=item['snapshot'];snapshot=json.loads(raw)
+ if snapshot.get('retentionVersion')!=1:
+  request=snapshot.get('request') if isinstance(snapshot.get('request'),dict) else {}
+  snapshot={'retentionVersion':1,'scope':snapshot.get('scope'),'providerId':snapshot.get('providerId'),
+   'photoId':snapshot.get('photoId'),'personaId':snapshot.get('personaId'),
+   'automatic':bool(snapshot.get('automatic')),'purpose':snapshot.get('purpose'),
+   'journeyId':snapshot.get('journeyId'),'model':request.get('model'),'snapshotBytes':len(raw.encode())}
+ item['snapshot']=json.dumps(snapshot,sort_keys=True,separators=(',',':'),allow_nan=False)
+ result=json.loads(item.get('result') or '{}')
+ if not isinstance(result,dict):result={}
+ if item.get('kind')=='image':
+  item['result']=json.dumps({'imported':bool(result.get('imported')),
+   'providerAccepted':bool(result.get('providerAccepted')),
+   'providerJobIds':result.get('providerJobIds',[]) if isinstance(result.get('providerJobIds',[]),list) else [],
+   'referenceProgress':result.get('referenceProgress') if isinstance(result.get('referenceProgress'),dict) else None},
+   sort_keys=True,separators=(',',':'))
+ else:item['result']=json.dumps({'imported':item.get('status')=='succeeded'},separators=(',',':'))
+ return item
+
+def prune_terminal_jobs(db,world,now):
+ day=int(now)//86400000*86400000
+ protected={row[0] for row in db.execute("SELECT id FROM vh2_provider_jobs WHERE world_id=? AND kind='image' "
+  "AND created_at>=? AND created_at<? AND json_extract(snapshot,'$.automatic')=1",(world,day,day+86400000))}
+ rows=db.execute("SELECT id FROM vh2_provider_jobs WHERE world_id=? AND status IN ('succeeded','failed','abandoned') "
+  'ORDER BY created_at DESC,rowid DESC',(world,)).fetchall()
+ victims=[row[0] for row in rows[MAX_TERMINAL_JOBS:] if row[0] not in protected]
+ for start in range(0,len(victims),500):
+  chunk=victims[start:start+500];marks=','.join('?' for _ in chunk)
+  db.execute('DELETE FROM vh2_provider_outputs WHERE job_id IN ('+marks+')',chunk)
+  db.execute('DELETE FROM vh2_provider_jobs WHERE id IN ('+marks+')',chunk)
+ return len(victims)
 def current(db,scope):
  row=db.execute('SELECT * FROM vh2_service_providers WHERE scope=? ORDER BY rowid DESC LIMIT 1',(scope,)).fetchone()
  return dict(row) if row else None
@@ -153,7 +270,7 @@ def compile_image(db,world,state,snapshot,config,photo=None):
   if selected['imageProviderOptions']:request['provider']['options']={selected['imageProviderSlug']:selected['imageProviderOptions']}
  return request,[hashlib.sha256(r.encode()).hexdigest() for r in refs],ref_ids
 
-def queue_image(service,db,world,revision,state,photo_id,automatic=False):
+def queue_image(service,db,world,revision,state,photo_id,automatic=False,purpose=None):
  from . import vh2_media
  from .vh2_runtime import encode, Conflict
  scope=state.get('integration',{}).get('providerScope');provider=current(db,scope)
@@ -166,11 +283,13 @@ def queue_image(service,db,world,revision,state,photo_id,automatic=False):
  row=db.execute('SELECT snapshot FROM photo_jobs WHERE world_id=? AND id=?',(world,photo_id)).fetchone()
  if not row:raise ValueError('Unknown capture.')
  photo=next((p for p in state.get('photos',[]) if p['id']==photo_id),None) or _vh_import_module('.vh2_library',__package__).get(db,world,'photo',photo_id)
- if automatic and not _vh_import_module('.vh2_social_worker',__package__).image_purpose(state,photo):raise ValueError('This is a saved gallery idea, not a selected social photo. Generate it manually whenever you want; saving it does not use image credits.')
+ purpose=purpose or ('social' if automatic else 'manual')
+ if purpose not in ('manual','social','dialogue'):raise ValueError('Unsupported image job purpose.')
+ if automatic and purpose=='social' and not _vh_import_module('.vh2_social_worker',__package__).image_purpose(state,photo):raise ValueError('This is a saved gallery idea, not a selected social photo. Generate it manually whenever you want; saving it does not use image credits.')
  frozen=json.loads(row['snapshot']);request,hashes,ref_ids=compile_image(db,world,state,frozen,config,photo)
  revision,after,_=vh2_media.command(service,db,world,revision,state,{'type':'submit_photo','photoId':photo_id,'manifest':{'provider':config.get('provider','openrouter')+'-background','model':config['model'],'promptPreview':request['prompt'],'referenceHashes':hashes}})
  request.pop('input_references',None)
- db.execute('INSERT INTO vh2_provider_jobs VALUES (?,?,?,?,?,?,?,?,?,?)',(job_id,world,'image','queued',encode({'scope':scope,'providerId':provider['id'],'photoId':photo_id,'request':request,'referenceAssetIds':ref_ids,'automatic':automatic}),None,'',service.clock(),None,None))
+ db.execute('INSERT INTO vh2_provider_jobs VALUES (?,?,?,?,?,?,?,?,?,?)',(job_id,world,'image','queued',encode({'scope':scope,'providerId':provider['id'],'photoId':photo_id,'personaId':state.get('communication',{}).get('personaId'),'request':request,'referenceAssetIds':ref_ids,'automatic':automatic,'purpose':purpose}),None,'',service.clock(),None,None))
  return revision,after
 
 def command(service,db,world,revision,state,body):
@@ -186,7 +305,9 @@ def command(service,db,world,revision,state,body):
  if not photo or photo['status'] not in ('captured','submitted'):raise ValueError('Choose an unfinished image.')
  if job and job['status'] in ('queued','submitted','rendered'):raise Conflict('This image is still running. Wait for its result.')
  revision,after,_=vh2_media.command(service,db,world,revision,state,{'type':'abandon_photo','photoId':photo_id})
- if job:db.execute("UPDATE vh2_provider_jobs SET status='abandoned' WHERE id=?",(job['id'],))
+ if job:
+  db.execute("UPDATE vh2_provider_jobs SET status='abandoned' WHERE id=?",(job['id'],))
+  prune_terminal_jobs(db,world,service.clock())
  if body['type']=='dismiss_photo_render':return revision,after
  frozen=db.execute('SELECT snapshot FROM photo_jobs WHERE id=? AND world_id=?',(photo_id,world)).fetchone()
  if not frozen:
@@ -197,10 +318,10 @@ def command(service,db,world,revision,state,body):
   for ref in recovered.get('referenceAssets',[]):
    asset=db.execute('SELECT mime,bytes FROM photo_assets WHERE id=? AND world_id=?',(ref['assetId'],source['world_id'])).fetchone()
    if not asset:raise ValueError('An original reference asset is missing from the merged life.')
-   ident=str(uuid.uuid5(uuid.NAMESPACE_URL,'vh2-recovered-reference:'+world+':'+ref['assetId']))
-   db.execute('INSERT OR IGNORE INTO photo_assets VALUES (?,?,?,?)',(ident,world,asset['mime'],asset['bytes']))
+   ident=vh2_media.store_asset(db,world,asset['mime'],asset['bytes'])
    ref['assetId']=ident
-  frozen={'snapshot':encode(recovered)}
+ else:recovered=json.loads(frozen['snapshot'])
+ frozen={'snapshot':encode(vh2_media.compact_capture_snapshot(recovered))}
  new_id=retry_photo_id(body['key'])
  db.execute('INSERT INTO photo_jobs VALUES (?,?,?)',(new_id,world,frozen['snapshot']))
  before=json.loads(encode(after));new_photo={k:v for k,v in photo.items() if k not in ('manifest','assetId','deliveredAt')}
@@ -288,6 +409,7 @@ def _poll(service):
      for post in state.get('social',{}).get('posts',[]):
       if post.get('photoId')==snapshot.get('photoId') and post.get('imagePending'):post['imageError']=str(error)[:300]
      if state!=before:service.commit_event(db,job['world_id'],revision,before,state,'SOCIAL_IMAGE_FAILED')
+   prune_terminal_jobs(db,job['world_id'],service.clock())
  # Import completed outputs independently of generation and of the life being paused.
  with service.connect() as db:
   rendered=db.execute("SELECT j.id,j.world_id,j.snapshot,o.image FROM vh2_provider_jobs j JOIN vh2_provider_outputs o ON o.job_id=j.id WHERE j.status='rendered' ORDER BY j.created_at LIMIT 4").fetchall()
@@ -297,14 +419,15 @@ def _poll(service):
    if state['kernelVersion']!=service.kernel_version:continue
    photo_id=json.loads(output['snapshot'])['photoId'];photo=next((p for p in state.get('photos',[]) if p['id']==photo_id),None)
    if photo and photo.get('assetId'):
-    db.execute("UPDATE vh2_provider_jobs SET status='succeeded',error='' WHERE id=?",(output['id'],));db.execute('DELETE FROM vh2_provider_outputs WHERE job_id=?',(output['id'],));continue
+    db.execute("UPDATE vh2_provider_jobs SET status='succeeded',error='' WHERE id=?",(output['id'],));db.execute('DELETE FROM vh2_provider_outputs WHERE job_id=?',(output['id'],));prune_terminal_jobs(db,output['world_id'],service.clock());continue
    if not photo or photo['status']=='abandoned':
-    db.execute("UPDATE vh2_provider_jobs SET status='abandoned' WHERE id=?",(output['id'],));continue
+    db.execute("UPDATE vh2_provider_jobs SET status='abandoned' WHERE id=?",(output['id'],));prune_terminal_jobs(db,output['world_id'],service.clock());continue
    try:
     vh2_media.command(service,db,output['world_id'],revision,state,{'type':'import_photo','photoId':photo_id,'image':output['image']})
     db.execute("UPDATE vh2_provider_jobs SET status='succeeded',result=json_patch(COALESCE(result,'{}'),?),error='' WHERE id=?",(encode({'imported':True}),output['id']))
     db.execute('DELETE FROM vh2_provider_outputs WHERE job_id=?',(output['id'],))
    except ValueError as error:db.execute("UPDATE vh2_provider_jobs SET status='failed',error=? WHERE id=?",('Image returned but import failed: '+str(error)[:200],output['id']))
+   prune_terminal_jobs(db,output['world_id'],service.clock())
  with service.connect() as db:
   ids=[r[0] for r in db.execute("SELECT id FROM worlds WHERE json_extract(state,'$.running')=1")]
  for world in ids:
@@ -323,7 +446,7 @@ def _poll(service):
    if not c.get('vh2AutonomyPaused') and provider and json.loads(provider['config'])['enabled']:
     for photo in state.get('photos',[]):
      if photo['status']!='captured' or photo.get('origin')!='autonomous' or not _vh_import_module('.vh2_social_worker',__package__).image_purpose(state,photo):continue
-     try:revision,state=queue_image(service,db,world,revision,state,photo['id'],automatic=True)
+     try:revision,state=queue_image(service,db,world,revision,state,photo['id'],automatic=True,purpose='social')
      except ValueError as error:
       before=json.loads(encode(state));post=_vh_import_module('.vh2_social_worker',__package__).image_purpose(state,photo)
       if post:post['imageError']=str(error)[:300]
@@ -347,7 +470,7 @@ def _poll(service):
    db.execute('BEGIN IMMEDIATE');revision,state=service.read(db,job['world_id']);snapshot=json.loads(job['snapshot'])
    if state['kernelVersion']!=service.kernel_version:continue
    if job['kind']=='image':
-    if snapshot.get('automatic') and not _vh_import_module('.vh2_social_worker',__package__).image_purpose(state,next((p for p in state.get('photos',[]) if p['id']==snapshot['photoId']),None)):
+    if snapshot.get('automatic') and snapshot.get('purpose','social')=='social' and not _vh_import_module('.vh2_social_worker',__package__).image_purpose(state,next((p for p in state.get('photos',[]) if p['id']==snapshot['photoId']),None)):
      # Withdraw unsubmitted work when its sharing purpose disappears. No paid retry.
      before=json.loads(encode(state));photo=next((p for p in state.get('photos',[]) if p['id']==snapshot['photoId']),None)
      if photo and photo['status']=='submitted':photo.update(status='captured',deferred=True)
@@ -360,7 +483,7 @@ def _poll(service):
     live=current(db,snapshot['scope'])
     if snapshot.get('automatic') and (not live or not json.loads(live['config'])['enabled']):continue
     provider=db.execute('SELECT * FROM vh2_service_providers WHERE id=?',(snapshot['providerId'],)).fetchone()
-    if not provider:db.execute("UPDATE vh2_provider_jobs SET status='failed',error='Provider configuration missing after restore.' WHERE id=?",(job['id'],));continue
+    if not provider:db.execute("UPDATE vh2_provider_jobs SET status='failed',error='Provider configuration missing after restore.' WHERE id=?",(job['id'],));prune_terminal_jobs(db,job['world_id'],service.clock());continue
     request={**snapshot['request'],'input_references':[{'type':'image_url','image_url':{'url':asset_data(db,job['world_id'],ident)}} for ident in snapshot['referenceAssetIds']]}
     executor_config=json.loads(provider['config'])
     executor_config['_on_provider_accepted']=lambda ids,ident=job['id']:provider_accepted(service,ident,ids)
@@ -369,7 +492,7 @@ def _poll(service):
    else:
     if not service.route_executor:continue
     if not state['truth']['companion']['lifeProfile']['world']['transport'].get('liveRouting'):
-     db.execute("UPDATE vh2_provider_jobs SET status='failed',error='Automatic live routing was disabled before submission.' WHERE id=?",(job['id'],));continue
+     db.execute("UPDATE vh2_provider_jobs SET status='failed',error='Automatic live routing was disabled before submission.' WHERE id=?",(job['id'],));prune_terminal_jobs(db,job['world_id'],service.clock());continue
     call=service.route_executor;args=(snapshot['request'],)
    changed=db.execute("UPDATE vh2_provider_jobs SET status='submitted',submitted_at=? WHERE id=? AND status='queued'",(service.clock(),job['id'])).rowcount
    if not changed:continue

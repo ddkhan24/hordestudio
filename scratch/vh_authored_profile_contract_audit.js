@@ -19,7 +19,8 @@ const ctx={safeJsonClone:plain,VH2_PROFILE_TRANSFER_FIELDS:transfer,state:{perso
  freshCompanionRuntime:()=>({}),applyCompanionRuntime:()=>{},createCompanionTimeline:()=>{throw Error('Unexpected duplicate timeline');},
  vh2SyncProvider:async()=>{},vh2Enqueue:async(t,type,body)=>{commands.push({type,...plain(body)});if(type==='configure_expression_profile')actual={...plain(body.fields),lifeProfile:{world:{voice:plain(body.fields.voice)}}};},
  vh2Poll:async()=>{},vh2Flush:async()=>{},vh2ImportStarterProfile:async()=>{},renderCompanionThread:()=>{},saveState:async()=>{},
- mcpBridgeRequest:async()=>({revision:42,state:{truth:{companion:actual}}})};
+ mcpBridgeRequest:async()=>({revision:42,state:{truth:{companion:actual}}}),
+ vh2Request:async()=>({revision:42,state:{truth:{companion:actual}}})};
 vm.createContext(ctx);
 const integration=fs.readFileSync('virtual_humans/frontend/vh2-horde-integration.js','utf8'),begin=integration.indexOf('async function vh2CreateTimeline('),end=integration.indexOf('\nfunction vh2RenderControls(',begin);
 const declared=plain(vm.runInNewContext(integration.match(/const VH2_PROFILE_TRANSFER_FIELDS=Object\.freeze\((\[[^;]+\])\);/s)[1]));assert.deepEqual(declared,transfer,'Browser transfer contract drifted from the service-owned field list.');

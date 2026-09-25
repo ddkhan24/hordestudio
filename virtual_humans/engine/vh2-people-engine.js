@@ -42,6 +42,15 @@ function meetingConflict(c,id,plan,now,localAt){
  return '';
 }
 function emit(c,a,kind,at,details){const r=ensure(c);r.events.push({id:`person:${c.id}:${++r.sequence}`,kind,at,personId:a.id,...details});r.events=r.events.slice(-200);}
+function recordPresence(a,at,kind){
+ const history=[],same=(left,right)=>left.until===right.from&&left.placeId===right.placeId&&left.available===right.available&&left.peerPlanId===right.peerPlanId&&left.planId===right.planId&&left.actionKind===right.actionKind;
+ for(const raw of [...(a.presenceHistory||[]),{from:a.lastAt,until:at,placeId:a.placeId,available:!a.journey&&!['sleep','obligation','eat','call'].includes(kind),peerPlanId:a.action?.peerPlanId||null,planId:a.action?.planId||null,actionKind:kind||null}]){
+  if(!raw||!Number.isFinite(raw.from)||!Number.isFinite(raw.until)||raw.until<=raw.from)continue;
+  const entry={from:raw.from,until:raw.until,placeId:raw.placeId||'',available:raw.available===true,peerPlanId:raw.peerPlanId||null,planId:raw.planId||null,actionKind:raw.actionKind||null},last=history.at(-1);
+  if(last&&same(last,entry))last.until=entry.until;else history.push(entry);
+ }
+ a.presenceHistory=history.slice(-360);
+}
 function depart(c,a,at){
  const leg=a.remaining.shift();
  if(!leg||leg.from!==a.placeId||Number(leg.cost||0)>a.balance){a.remaining=[];a.pending=null;a.blockedReason='The next route leg is unavailable or unaffordable.';return;}
@@ -134,7 +143,7 @@ function tick(c,a,at,localAt){
   const cents=(a.incomeRemainder||0)+elapsed*a.policy.incomePerHour*100/60,whole=Math.floor(cents+1e-8);a.incomeRemainder=cents-whole;a.balance=Math.round((a.balance+whole/100)*100)/100;a.earnedIncome=Math.round(((a.earnedIncome||0)+whole/100)*100)/100;
  }
 
- if(at>a.lastAt){a.presenceHistory||=[];a.presenceHistory.push({from:a.lastAt,until:at,placeId:a.placeId,available:!a.journey&&!['sleep','obligation','eat','call'].includes(kind),peerPlanId:a.action?.peerPlanId||null,planId:a.action?.planId||null,actionKind:kind||null});a.presenceHistory=a.presenceHistory.slice(-360);}
+ if(at>a.lastAt)recordPresence(a,at,kind);
  a.hunger=clamp(a.hunger+elapsed*(kind==='eat'?-3:.06));
  a.energy=clamp(a.energy+elapsed*(kind==='sleep'?.6:kind==='rest'?.18:a.journey?-.08:['exercise','swimming'].includes(kind)?-.45:-.045));
  a.stress=clamp(a.stress+elapsed*(kind==='sleep'||kind==='rest'?-.12:kind==='obligation'?.035:['exercise','swimming'].includes(kind)?-.35:kind==='leisure'?-.06:0));

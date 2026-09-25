@@ -7,8 +7,8 @@ const STORE_NAME = 'state';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
-const HORDE_STUDIO_VERSION = '18.1.1';
-const HORDE_STUDIO_RELEASED_AT = '2026-09-20T23:10:17+05:00';
+const HORDE_STUDIO_VERSION = '18.2.0';
+const HORDE_STUDIO_RELEASED_AT = '2026-09-25T16:14:08+05:00';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
 let worldMediaDirty = false;
@@ -40,7 +40,11 @@ const HordeDB = {
         });
     },
     async prefetch(keys) {
-        // Read startup records together; never enumerate large immutable media blobs.
+        // Read startup records together, but keep their storage wrappers lazy.
+        // Decoding turns deduplicated media Blobs back into very large base64
+        // strings. Doing that for every domain before the first screen is
+        // interactive made startup scale with old photos and memory caches,
+        // even when the user was only opening the Chat Library.
         const values = new Map();
         await new Promise((resolve, reject) => {
             const tx = this.db.transaction([STORE_NAME], 'readonly'), store = tx.objectStore(STORE_NAME);
@@ -53,11 +57,14 @@ const HordeDB = {
         });
         this.revision = Number.isSafeInteger(values.get('stateRevision')) ? values.get('stateRevision') : 0;
         values.delete('stateRevision');
-        for (const [key, value] of values) values.set(key, await HordeHumanPackage.storageDecode(value));
         this.startupReads = values;
     },
     async get(key) {
-        if (this.startupReads?.has(key)) { const value=this.startupReads.get(key); this.startupReads.delete(key); return value; }
+        if (this.startupReads?.has(key)) {
+            const value = this.startupReads.get(key);
+            this.startupReads.delete(key);
+            return HordeHumanPackage.storageDecode(value);
+        }
         if (!this.db) throw new Error('Database is not initialized');
         return new Promise((resolve, reject) => {
             const transaction = this.db.transaction([STORE_NAME], 'readonly');
@@ -150,6 +157,8 @@ const HordeVectorMemory = {
     fallbackUntil: 0,
     maxCacheEntries: 500,
     saveTimer: null,
+    initPromise: null,
+    discardStoredCache: false,
 
     namespace() {
         const settings = (typeof state !== 'undefined' && state.globalSettings) || {};
@@ -159,19 +168,29 @@ const HordeVectorMemory = {
     },
 
     async init() {
-        try {
-            const cached = await HordeDB.get('embedding_cache');
-            if (cached && typeof cached === 'object') {
-                this.cache = new Map(Object.entries(cached));
+        if (this.initPromise) return this.initPromise;
+        this.initPromise = (async () => {
+            try {
+                const cached = await HordeDB.get('embedding_cache');
+                if (!this.discardStoredCache && cached && typeof cached === 'object') {
+                    // A chat can request an embedding while the idle startup
+                    // read is finishing. Merge rather than replace so that new
+                    // work cannot be discarded by the delayed cache hydrate.
+                    for (const [key, value] of Object.entries(cached)) {
+                        if (!this.cache.has(key)) this.cache.set(key, value);
+                    }
+                }
+                console.log(`HordeVectorMemory: Loaded ${this.cache.size} cached embeddings.`);
+            } catch (e) {
+                console.warn("Failed to load embedding cache from IndexedDB", e);
             }
-            console.log(`HordeVectorMemory: Loaded ${this.cache.size} cached embeddings.`);
-        } catch (e) {
-            console.warn("Failed to load embedding cache from IndexedDB", e);
-        }
+        })();
+        return this.initPromise;
     },
 
     async saveCache() {
         try {
+            await this.init();
             const obj = Object.fromEntries(this.cache.entries());
             await HordeDB.set('embedding_cache', obj);
         } catch (e) {
@@ -199,6 +218,7 @@ const HordeVectorMemory = {
 
     async getCachedEmbedding(text) {
         if (!text) return null;
+        await this.init();
         // Cache entries are provider/model scoped. Text-only keys silently mixed
         // incompatible vector spaces after an embedding model was changed.
         const key = `${this.namespace()}|${this.hashText(text)}`;
@@ -610,9 +630,12 @@ async function mcpBridgeRequest(path, options = {}) {
     else externalSignal?.addEventListener('abort', abortFromCaller, { once: true });
     try {
         const binaryBody=typeof Blob!=='undefined'&&options.body instanceof Blob;
-        const response = await fetch(mcpBridgeBase() + path, {
+        const baseUrl=String(options.baseUrl||mcpBridgeBase()).replace(/\/+$/,'');
+        const headers=options.body === undefined ? {} : { 'Content-Type': binaryBody ? options.body.type||'application/octet-stream' : 'application/json' };
+        if(options.accessToken)headers.Authorization='Bearer '+options.accessToken;
+        const response = await fetch(baseUrl + path, {
             method: options.method || 'GET',
-            headers: options.body === undefined ? {} : { 'Content-Type': binaryBody ? options.body.type||'application/octet-stream' : 'application/json' },
+            headers,
             body: options.body === undefined ? undefined : binaryBody ? options.body : JSON.stringify(options.body),
             signal: controller.signal
         });
@@ -629,7 +652,9 @@ async function mcpBridgeRequest(path, options = {}) {
     } catch (error) {
         if (controller.signal.aborted) throw new Error(externalSignal?.aborted ? 'Request cancelled.' : 'The local MCP bridge timed out.');
         if (/Failed to fetch|NetworkError|Load failed/i.test(String(error.message || error))) {
-            throw new Error('Horde Studio cannot reach its local bridge. Run the launcher for your OS from Settings → Launch Horde Studio.');
+            throw new Error(options.baseUrl
+                ? 'Horde Studio cannot reach this private VH2 host. Check its HTTPS address, access policy and CORS origin.'
+                : 'Horde Studio cannot reach its local bridge. Run the launcher for your OS from Settings → Launch Horde Studio.');
         }
         throw error;
     } finally {
@@ -1187,6 +1212,7 @@ let state = {
         evolinkBaseUrl: 'https://api.evolink.ai/v1',
         wavespeedBaseUrl: 'https://api.wavespeed.ai/api/v3',
         mcpBridgeUrl: HORDE_MCP_BRIDGE_DEFAULT,
+        vh2SelfHosts: {},
         localImageBaseUrl: 'http://127.0.0.1:7860/v1',
         localImagePath: '/images/generations',
         localImageApiKey: '',
@@ -1885,6 +1911,7 @@ function repairLoadedState() {
         falPricingVersion: 2,
         falSafetyChecker: true,
         mcpBridgeUrl: HORDE_MCP_BRIDGE_DEFAULT,
+        vh2SelfHosts: {},
         localImageBaseUrl: 'http://127.0.0.1:7860/v1',
         localImagePath: '/images/generations',
         localImageApiKey: '',
@@ -1939,6 +1966,20 @@ function repairLoadedState() {
     state.globalSettings.companionAlwaysOnClientId = String(state.globalSettings.companionAlwaysOnClientId || '').slice(0, 120);
     state.globalSettings.companionAgencyPaused = state.globalSettings.companionAgencyPaused === true;
     state.globalSettings.mcpBridgeUrl = normalizeMcpBridgeUrl(state.globalSettings.mcpBridgeUrl);
+    state.globalSettings.vh2SelfHosts = Object.fromEntries(Object.entries(
+        isPlainObject(state.globalSettings.vh2SelfHosts) ? state.globalSettings.vh2SelfHosts : {}).slice(0, 20).flatMap(([id, host]) => {
+        if (!/^[A-Za-z0-9_-]{1,100}$/.test(id) || !isPlainObject(host)) return [];
+        let url = '';
+        try {
+            const parsed = new URL(String(host.baseUrl || '').trim());
+            const local = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
+            if (parsed.username || parsed.password || (!local && parsed.protocol !== 'https:') || (local && !['http:', 'https:'].includes(parsed.protocol))) return [];
+            url = parsed.origin + parsed.pathname.replace(/\/+$/, '');
+        } catch (_) { return []; }
+        return [[id, {name:String(host.name||'Private VH2 host').slice(0,100),baseUrl:url,
+            accessToken:String(host.accessToken||'').slice(0,500),createdAt:Number(host.createdAt)||0,
+            detachedAt:Number(host.detachedAt)||0}]];
+    }));
     state.globalSettings.localImageBaseUrl = normalizeLoopbackUrl(
         state.globalSettings.localImageBaseUrl, 'http://127.0.0.1:7860/v1');
     state.globalSettings.localImagePath = '/' + String(
@@ -2062,9 +2103,8 @@ function repairLoadedState() {
 async function loadState() {
     const started=performance.now();
     await HordeDB.init();
-    await HordeDB.prefetch(['activeCompanionId', 'activePersonaId', 'activeSessionId', 'activeVideoWorldId', 'activeWorldId', 'apiKey', 'bedrockApiKey', 'characters', 'chatContinuities', 'chats', 'companionThreads', 'companionTimelines', 'companions', 'customApiKey', 'customHeaders', 'embedding_cache', 'evolinkApiKey', 'falApiKey', 'globalSettings', 'gptprotoApiKey', 'hotapiApiKey', 'labsDiagnostics', 'nanogptApiKey', 'nvidiaApiKey', 'personas', 'regexScripts', 'rooms', 'systemPresets', 'theme', 'videoWorldSessions', 'videoWorlds', 'wavespeedApiKey', 'worldInstances', 'worldMediaAssets', 'worldRecoverySnapshots', 'worlds']);
+    await HordeDB.prefetch(['activeCompanionId', 'activePersonaId', 'activeSessionId', 'activeVideoWorldId', 'activeWorldId', 'apiKey', 'bedrockApiKey', 'characters', 'chatContinuities', 'chats', 'companionThreads', 'companionTimelines', 'companions', 'customApiKey', 'customHeaders', 'evolinkApiKey', 'falApiKey', 'globalSettings', 'gptprotoApiKey', 'hotapiApiKey', 'labsDiagnostics', 'nanogptApiKey', 'nvidiaApiKey', 'personas', 'regexScripts', 'rooms', 'systemPresets', 'theme', 'videoWorldSessions', 'videoWorlds', 'wavespeedApiKey', 'worldInstances', 'worldMediaAssets', 'worldRecoverySnapshots', 'worlds']);
     window.__hordeStartup={storageMs:performance.now()-started};
-    await HordeVectorMemory.init();
     // Shipped worlds are authored against the same schema users migrate to.
     // Do this at startup (after the whole script has initialized) rather than
     // baking a second, divergent compatibility format into starter content.
@@ -2505,6 +2545,8 @@ async function loadState() {
 
 let saveStateInFlight = null;
 let saveStateQueued = false;
+let virtualHumanSaveInFlight = null;
+let virtualHumanSaveScope = 0;
 
 async function persistStateSnapshot() {
     const savingWorldMedia = worldMediaDirty;
@@ -2618,6 +2660,45 @@ async function saveState() {
     } finally {
         saveStateInFlight = null;
     }
+}
+
+/**
+ * Persist only Virtual Human records. Studio edits and VH2 command receipts
+ * should not clone every ordinary chat, world and video project in the app.
+ * Scope 1 saves character templates; scope 2 also saves timelines/messages.
+ * Requests are coalesced, and a broader request always wins.
+ */
+async function saveVirtualHumansState(options = {}) {
+    virtualHumanSaveScope = Math.max(virtualHumanSaveScope, options.templateOnly ? 1 : 2);
+    if (virtualHumanSaveInFlight) return virtualHumanSaveInFlight;
+    virtualHumanSaveInFlight = (async () => {
+        do {
+            const scope = virtualHumanSaveScope;
+            virtualHumanSaveScope = 0;
+            // Avoid making a second large clone while an older full snapshot is
+            // still committing. IndexedDB revision checks remain authoritative.
+            if (saveStateInFlight) await saveStateInFlight;
+            if (scope > 1) (state.companions || []).forEach(companion => persistCompanionRuntime(companion));
+            const records = {
+                companions: state.companions,
+                activeCompanionId: state.activeCompanionId
+            };
+            if (scope > 1) {
+                records.companionThreads = state.companionThreads;
+                records.companionTimelines = state.companionTimelines;
+            }
+            await HordeDB.setMultiple(records);
+        } while (virtualHumanSaveScope);
+    })();
+    try {
+        await virtualHumanSaveInFlight;
+    } finally {
+        virtualHumanSaveInFlight = null;
+    }
+}
+
+function saveCompanionTemplatesState() {
+    return saveVirtualHumansState({ templateOnly: true });
 }
 
 function globalSettingsForDevicePersistence(settings = state.globalSettings) {
@@ -4705,6 +4786,28 @@ function labsSocialContext(result) {
 }
 
 // --- Initialization ---
+function schedulePostStartupWork(name, task, timeout = 1200) {
+    const enqueue = () => {
+        const run = () => {
+            const started = performance.now();
+            Promise.resolve().then(task).catch(error => {
+                console.error(`${name} startup task failed:`, error);
+            }).finally(() => {
+                window.__hordeStartup ||= {};
+                window.__hordeStartup.background ||= {};
+                window.__hordeStartup.background[name] = performance.now() - started;
+            });
+        };
+        if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout });
+        else setTimeout(run, 0);
+    };
+    // Let the initial library paint before parsing caches, installing optional
+    // bundles or waking background simulation. Two frames are intentional:
+    // the first commits visibility, the second gives the compositor a chance
+    // to present it before optional work starts.
+    requestAnimationFrame(() => requestAnimationFrame(enqueue));
+}
+
 async function init() {
     // Ask the browser to protect our IndexedDB from storage-pressure eviction
     if (navigator.storage && navigator.storage.persist) {
@@ -4713,7 +4816,6 @@ async function init() {
 
     const startupAt=performance.now();
     await loadState();
-    await installBundledHumans().catch(error=>{console.error('Included character installation failed:',error);showToast(error.message+' Open Virtual Humans to retry.','error');});
     window.__hordeStartup.loadStateMs=performance.now()-startupAt;
     setupNavigation();
     setupStudioTabs();
@@ -4765,6 +4867,11 @@ async function init() {
     
     switchView('library');
     window.__hordeStartup.readyMs=performance.now()-startupAt;
+    schedulePostStartupWork('vectorMemory', () => HordeVectorMemory.init());
+    schedulePostStartupWork('bundledHumans', () => installBundledHumans().catch(error => {
+        console.error('Included character installation failed:', error);
+        showToast(error.message + ' Open Virtual Humans to retry.', 'error');
+    }));
     const fonts=document.getElementById("horde-fonts");if(fonts)fonts.rel="stylesheet";
     if (!hasApiCredentials() && !state.falApiKey) showGlobalSettings();
     applyGlobalStyles();
@@ -5009,6 +5116,7 @@ function setupNavigation() {
 }
 
 function switchView(viewName) {
+    const previousView = state.view;
     if(viewName!=='companionChat'&&typeof closeCompanionSocialDrawer==='function'&&!document.getElementById('companion-social-panel')?.classList.contains('hidden'))closeCompanionSocialDrawer();
     state.view = viewName;
     
@@ -5084,7 +5192,10 @@ function switchView(viewName) {
             if (state.companions.length > 0) openCompanionStudio(state.companions[0].id);
             else openCompanionStudio(createCompanion().id);
         }
-        renderCompanionStudioForm();
+        // Callers open the selected human before switching views. Rendering the
+        // entire editor again here doubled DOM work and repeated model-catalog
+        // requests on every navigation into Studio.
+        else if (previousView === 'companionStudio') renderCompanionStudioForm();
     }
 
     if (viewName === 'companionChat') {
@@ -6559,6 +6670,7 @@ function invalidateMemoryEmbeddingsForNamespaceChange(previousNamespace) {
     Object.values(state.worldInstances || {}).forEach(instance =>
         (instance.sessions || []).forEach(session => (session.episodicMemories || []).forEach(clearRecord)));
     HordeVectorMemory.cache.clear();
+    HordeVectorMemory.discardStoredCache = true;
     HordeVectorMemory.scheduleCacheSave();
     return cleared;
 }
@@ -8717,6 +8829,7 @@ async function handleChat(isReroll = false, specificCharId = null) {
         const decoder = new TextDecoder();
         let buffer = '';
         let responseCitations = [];
+        let providerFinishReason = '';
         
         aiMsgDiv.classList.add('is-generating');
         aiMsgDiv.textContent = '';
@@ -8754,8 +8867,9 @@ async function handleChat(isReroll = false, specificCharId = null) {
                             ...(Array.isArray(json.choices[0]?.message?.annotations) ? json.choices[0].message.annotations : [])
                         ]);
                         
+                        providerFinishReason = String(json.choices[0]?.finish_reason || providerFinishReason);
                         // Check for content filter
-                        if (json.choices[0]?.finish_reason === 'content_filter') {
+                        if (providerFinishReason === 'content_filter') {
                             fullContent += '\n\n[Response filtered by provider]';
                         }
                         
@@ -8828,7 +8942,7 @@ async function handleChat(isReroll = false, specificCharId = null) {
         aiMsgDiv.classList.remove('is-generating');
 
         if (!fullContent && !requestBody._reasoningContent) {
-            fullContent = '[Model returned an empty response. This may be due to a strict safety filter or an API timeout.]';
+            fullContent = `[Provider completed with no visible text${providerFinishReason ? ` (finish reason: ${providerFinishReason})` : ''}. No HTTP timeout was reported; check the provider log and model output format.]`;
             aiMsgDiv.innerHTML = formatMessageContent(fullContent, 'ai');
         }
 
@@ -11608,7 +11722,33 @@ function redactGlobalSettingsCredentials(settings) {
     delete copy.embeddingApiKey;
     delete copy.localTtsApiKey;
     delete copy.localImageApiKey;
+    if (isPlainObject(copy.vh2SelfHosts)) {
+        copy.vh2SelfHosts = Object.fromEntries(Object.entries(copy.vh2SelfHosts).map(([id, host]) => [id, {...host, accessToken:''}]));
+    }
     if (isPlainObject(copy.labs)) delete copy.labs.apiKey;
+    return copy;
+}
+
+function portableCompanionTimelineState(source) {
+    const copy = safeJsonClone(source || {});
+    const stores = Array.isArray(copy.sessions) ? [copy] : Object.values(copy);
+    for (const store of stores) {
+        for (const timeline of store?.sessions || []) {
+            if (!timeline.vh2) continue;
+            // A backup contains a paused portable life, not a pointer or
+            // credential that silently reconnects to somebody's server.
+            delete timeline.vh2.hostId;
+            delete timeline.vh2.handoffId;
+            delete timeline.vh2.assetUrls;
+            delete timeline.vh2.localMirrorRevision;
+            delete timeline.vh2.localMirrorSavedAt;
+            delete timeline.vh2.localMirrorError;
+            delete timeline.vh2.localMirrorAttemptedAt;
+            timeline.vh2.running = false;
+            timeline.vh2.autoReplies = false;
+            timeline.vh2.outbox = [];
+        }
+    }
     return copy;
 }
 
@@ -11636,7 +11776,10 @@ async function exportFullBackup() {
     const vh2ServiceArchives=[];
     const vh2Worlds=new Set(Object.values(state.companionTimelines||{}).flatMap(store=>(store.sessions||[]).map(t=>t.vh2?.worldId).filter(Boolean)));
     for(const worldId of vh2Worlds){
-        const response=await fetch(mcpBridgeBase()+'/vh2/backup?worldId='+encodeURIComponent(worldId));
+        const timeline=typeof vh2TimelineForWorld==='function'?vh2TimelineForWorld(worldId):null;
+        const response=typeof vh2Fetch==='function'
+            ? await vh2Fetch(timeline,'/vh2/backup?worldId='+encodeURIComponent(worldId))
+            : await fetch(mcpBridgeBase()+'/vh2/backup?worldId='+encodeURIComponent(worldId));
         if(!response.ok)throw Error('Full backup stopped: a VH2 timeline could not be exported.');
         const source=await blobAsDataUrl(await response.blob());vh2ServiceArchives.push(source.slice(source.indexOf(',')+1));
     }
@@ -11666,7 +11809,7 @@ async function exportFullBackup() {
         activeVideoWorldId: state.activeVideoWorldId,
         companions: state.companions,
         companionThreads: state.companionThreads,
-        companionTimelines: state.companionTimelines,
+        companionTimelines: portableCompanionTimelineState(state.companionTimelines),
         activeCompanionId: state.activeCompanionId,
         companionVideoAssets,
         chatAssets
@@ -38398,6 +38541,10 @@ function persistCompanionRuntime(companion) {
 // Foreground replies own the loaded runtime until they settle. Background
 // agency also locks timeline mutation during its pre-request durable claim.
 const companionReplyInFlight = new Set();
+// A foreground request owns an immutable inbox batch. Messages sent while it
+// is running stay queued for the next request and must never be attributed to
+// a prompt the model did not see.
+const companionReplyJobsInFlight = new Map();
 
 function companionTimelineBusy(companion) {
     if (!companion || (!companionReplyInFlight.has(companion.id)
@@ -38711,13 +38858,16 @@ async function buildCompanionArchivePayload(companion, kind = 'character-templat
     if (!companion) throw new Error('No Virtual Human selected');
     const portable = kind === 'portable-human';
     const live=getActiveCompanionTimeline(companion.id);
-    if(live?.vh2?.worldId && typeof vh2Poll==='function')await vh2Poll(companion,live,{force:true,throwOnError:true});
+    // Export is observational: refresh the service projection without sending
+    // an unrelated queued command or changing provider configuration.
+    if(live?.vh2?.worldId && typeof vh2Poll==='function')await vh2Poll(companion,live,{force:true,throwOnError:true,readOnly:true});
     if (portable) persistCompanionRuntime(companion);
     let archivedCompanion = portable
         ? safeJsonClone(normalizeCompanion(companion))
         : buildCompanionShareData(companion, nowMs);
+    const sourceTimelines = portable ? ensureCompanionTimelineStore(companion.id) : { activeSessionId: '', sessions: [] };
     const timelines = portable
-        ? safeJsonClone(ensureCompanionTimelineStore(companion.id))
+        ? portableCompanionTimelineState(sourceTimelines)
         : { activeSessionId: '', sessions: [] };
     if(live?.vh2?.worldId){
         if(live.vh2.setupProfile){archivedCompanion.lifeProfile=safeJsonClone(live.vh2.setupProfile);archivedCompanion.lifeSetupPolicies=companionArchiveLifeSetup(live.vh2);archivedCompanion.lifeStyleProfiles=safeJsonClone(live.vh2.closet?.styles||[]);}
@@ -38725,7 +38875,8 @@ async function buildCompanionArchivePayload(companion, kind = 'character-templat
             archivedCompanion=buildCompanionShareData(archivedCompanion,nowMs);archivedCompanion.startingReferences=[];
             for(const entry of live.vh2.bible?.entries||[]){
                 if(!['approved','pending'].includes(entry.status)||!entry.assetId)continue;
-                const response=await fetch(vh2PhotoAssetUrl(live.vh2.worldId,entry.assetId));
+                if(typeof vh2EnsureAssetUrls==='function')await vh2EnsureAssetUrls(live,[entry.assetId]);
+                const response=await fetch(vh2PhotoAssetUrl(live.vh2.worldId,entry.assetId,live));
                 if(!response.ok)throw Error('Export stopped: missing reference '+entry.label+'.');
                 const image=await blobToDataUrl(await response.blob());
                 archivedCompanion.startingReferences.push({id:entry.id,role:entry.role,entityId:entry.entityId,label:entry.label,tags:entry.tags,status:entry.status,image});
@@ -38733,8 +38884,11 @@ async function buildCompanionArchivePayload(companion, kind = 'character-templat
         }
     }
     const vh2ServiceArchives=[];
-    for(const worldId of new Set((timelines.sessions||[]).flatMap(t=>[t.vh2?.worldId,t.vh2?.archiveWorldId]).filter(Boolean))){
-        const response=await fetch(mcpBridgeBase()+'/vh2/backup?worldId='+encodeURIComponent(worldId));
+    for(const worldId of new Set((sourceTimelines.sessions||[]).flatMap(t=>[t.vh2?.worldId,t.vh2?.archiveWorldId]).filter(Boolean))){
+        const owner=(sourceTimelines.sessions||[]).find(t=>t.vh2?.worldId===worldId||t.vh2?.archiveWorldId===worldId)||live;
+        const response=typeof vh2Fetch==='function'
+            ? await vh2Fetch(owner,'/vh2/backup?worldId='+encodeURIComponent(worldId))
+            : await fetch(mcpBridgeBase()+'/vh2/backup?worldId='+encodeURIComponent(worldId));
         if(!response.ok){let detail;try{detail=(await response.json()).error;}catch(_){}throw Error('Life backup failed: '+(detail||'HTTP '+response.status)+'. No incomplete package was downloaded.');}
         const blob=await response.blob();if(binary)vh2ServiceArchives.push({worldId,data:blob});else{const source=await blobToDataUrl(blob);vh2ServiceArchives.push({worldId,data:source.slice(source.indexOf(',')+1)});}
         HordeHumanPackage.validateLifeArchives(vh2ServiceArchives);
@@ -39061,7 +39215,22 @@ function repairCompanionProtocolLeaks(messages, companionName = '') {
     return source.flatMap((message, index) => replacements.has(index) ? replacements.get(index) : [message]);
 }
 
+async function companionCompletionFailure(response, stage = 'request') {
+    const status = Number(response?.status) || 0;
+    const statusLabel = status ? `HTTP ${status}` : 'network failure';
+    let detail = '';
+    try { detail = String(await response.text()).trim(); } catch (error) { /* response body unavailable */ }
+    if (detail) {
+        try {
+            const parsed = JSON.parse(detail);
+            detail = String(parsed?.error?.message || parsed?.message || detail);
+        } catch (error) { /* retain the provider's plain-text diagnostic */ }
+    }
+    return `${stage}: ${statusLabel}${detail ? ` — ${detail.slice(0, 500)}` : ''}`;
+}
+
 async function repairCompanionTurnCommit(companion, promptMessages, visibleReply, options = {}) {
+    const failures = [];
     try {
         const textProvider = companionTextProviderId(companion);
         const recoverVisibleOnly = options.recoverVisible === true && options.preserveCommit === true;
@@ -39086,7 +39255,10 @@ Call commit_human_turn once for the response immediately above. Preserve what it
             messages: sanitizeMessagesForProvider(repairMessages, textProvider),
             ...(recoverVisibleOnly ? {} : {
                 tools: [commitTool],
-                tool_choice: { type: 'function', function: { name: 'commit_human_turn' } }
+                // With one private tool, `required` is both unambiguous and
+                // accepted by LM Studio's OpenAI-compatible endpoint. Its
+                // explicit-function object form is not supported uniformly.
+                tool_choice: 'required'
             })
         }, companion, { maxTokens: Math.min(2400, companionProviderOutputBudget(companion)) });
         body = VHConversationEngine.fitRequest(body, { contextSize: companionRequestContextSize(companion, body.model), tailMessages: 3 }).body;
@@ -39099,14 +39271,21 @@ Call commit_human_turn once for the response immediately above. Preserve what it
         // OpenAI tool_choice. Retry the private observer as schema-guided JSON;
         // this never changes or delays the already-visible human reply.
         if (!response.ok && options.observer && !recoverVisibleOnly) {
+            failures.push(await companionCompletionFailure(response, 'forced-tool request'));
             const jsonMessages = [...repairMessages, {
                 role: 'user',
-                content: `Your server does not support forced tool calls. Return only one JSON object matching this schema:\n${JSON.stringify(commitTool.function.parameters)}`
+                content: `Return only one JSON object matching this schema:\n${JSON.stringify(commitTool.function.parameters)}`
             }];
             let jsonBody = applyCompanionGenerationConfig({
                 model: options.model || companion.observerModel || companion.model || state.globalSettings.defaultModel,
                 messages: sanitizeMessagesForProvider(jsonMessages, textProvider),
-                response_format: { type: 'json_object' }
+                response_format: {
+                    type: 'json_schema',
+                    json_schema: {
+                        name: 'commit_human_turn',
+                        schema: commitTool.function.parameters
+                    }
+                }
             }, companion, { maxTokens: Math.min(2400, companionProviderOutputBudget(companion)) });
             jsonBody = VHConversationEngine.fitRequest(jsonBody, { contextSize: companionRequestContextSize(companion, jsonBody.model), tailMessages: 4 }).body;
             response = await fetchCompanionCompletion(providerApiBase(textProvider) + '/chat/completions', {
@@ -39115,7 +39294,13 @@ Call commit_human_turn once for the response immediately above. Preserve what it
                 body: JSON.stringify(jsonBody)
             }, companion, true);
         }
-        if (!response.ok) return null;
+        if (!response.ok) {
+            failures.push(await companionCompletionFailure(response,
+                options.observer ? 'structured-output request' : 'receipt-repair request'));
+            const error = new Error(`${options.observer ? 'State Observer' : 'Turn receipt repair'} request failed. ${failures.join(' | ')}`);
+            error.code = 'COMPANION_OBSERVER_HTTP_ERROR';
+            throw error;
+        }
         const message = (await response.json())?.choices?.[0]?.message || {};
         const embedded = extractCompanionEmbeddedToolCalls(message.content);
         const repaired = extractCompanionToolCalls([
@@ -39132,6 +39317,7 @@ Call commit_human_turn once for the response immediately above. Preserve what it
         }]), visibleReply: recoveredVisible } : null;
     } catch (error) {
         console.warn('Virtual Human receipt repair failed:', error);
+        if (options.observer) throw error;
         return null;
     }
 }
@@ -39196,6 +39382,7 @@ function scheduleCompanionTurnObservation(companion, messages, visibleReply, det
     const companionId = companion.id;
     const responseGroupId = String(details.responseGroupId || '');
     const sourceMessageIds = (details.sourceMessageIds || []).map(String).slice(-20);
+    const observationMessageIds = new Set((details.observationMessageIds || []).map(String));
     const prior = companionObserverQueues.get(companionId) || Promise.resolve();
     const task = prior.catch(() => null).then(async () => {
         const liveCompanion = getCompanion(companionId);
@@ -39208,13 +39395,19 @@ function scheduleCompanionTurnObservation(companion, messages, visibleReply, det
         if (first?.turnAudit) first.turnAudit.observerAttempts = (Number(first.turnAudit.observerAttempts) || 0) + 1;
         const ownerRuntime = liveCompanion.continuityRuntime;
         const baseRevision = companionContinuity(liveCompanion).revision || 0;
-        const transcript = JSON.stringify(liveMessages.map(message => [message.id, message.text, message.invalidated, message.responseGroupId]));
+        // Ownership is scoped to this exchange. A new player message may be
+        // queued while observation runs; that must neither contaminate this
+        // turn nor invalidate an otherwise sound state transaction.
+        const ownedTranscript = () => JSON.stringify(liveMessages
+            .filter(message => sourceMessageIds.includes(message.id) || message.responseGroupId === responseGroupId)
+            .map(message => [message.id, message.text, message.invalidated, message.responseGroupId]));
+        const transcript = ownedTranscript();
         const stillOwned = () => getCompanion(companionId) === liveCompanion
             && getActiveCompanionTimeline(companionId) === timeline
             && timeline.messages === liveMessages
             && liveCompanion.continuityRuntime === ownerRuntime
             && (companionContinuity(liveCompanion).revision || 0) === baseRevision
-            && JSON.stringify(liveMessages.map(message => [message.id, message.text, message.invalidated, message.responseGroupId])) === transcript;
+            && ownedTranscript() === transcript;
         const rejectStale = async () => {
             if (first?.turnAudit) {
                 first.turnAudit.observerStatus = 'rejected_stale';
@@ -39227,12 +39420,18 @@ function scheduleCompanionTurnObservation(companion, messages, visibleReply, det
         };
         await refreshCompanionObserverCapabilities(liveCompanion);
         if (!stillOwned()) return rejectStale();
-        const prompt = companionObserverPrompt(liveCompanion, liveMessages, details.nowMs || Date.now(),
+        const observerMessages = observationMessageIds.size
+            ? liveMessages.filter(message => observationMessageIds.has(String(message.id)))
+            : liveMessages.filter(message => sourceMessageIds.includes(message.id)
+                || message.responseGroupId === responseGroupId);
+        const prompt = companionObserverPrompt(liveCompanion, observerMessages, details.nowMs || Date.now(),
             sourceMessageIds, responseGroupId, details.relevantMemoryIds);
         if (first?.turnAudit?.affectStatus === 'committed') prompt.push({ role: 'system',
             content: 'Immediate emotional state was already committed with this reply. Return zero state deltas; enrich only evidence-backed memory and conversational understanding.' });
         const observed = await repairCompanionTurnCommit(liveCompanion, prompt, visibleReply, {
-            model: liveCompanion.observerModel || liveCompanion.lifeBuilderModel || liveCompanion.model,
+            // An unset observer follows the proven conversation model. The
+            // life-builder is a separate workload and may point elsewhere.
+            model: liveCompanion.observerModel || liveCompanion.model || liveCompanion.lifeBuilderModel,
             observer: true
         });
         if (!observed?.commit) throw new Error('State Observer returned no valid transaction.');
@@ -39263,7 +39462,7 @@ function scheduleCompanionTurnObservation(companion, messages, visibleReply, det
             else if (first.turnAudit.affectStatus !== 'committed') first.turnAudit.affectStatus = 'unavailable';
             first.turnAudit.observerStatus = 'committed';
             first.turnAudit.observerRetryAt = 0;
-            first.turnAudit.observerModel = liveCompanion.observerModel || liveCompanion.lifeBuilderModel || liveCompanion.model || '';
+            first.turnAudit.observerModel = liveCompanion.observerModel || liveCompanion.model || liveCompanion.lifeBuilderModel || '';
             first.turnAudit.observerBaseRevision = baseRevision;
             first.turnAudit.observerCommittedRevision = continuity.revision;
         }
@@ -39669,7 +39868,9 @@ async function companionVideoInputs(companion,job) {
     if(plan.references.length > limit) throw Error(`${job.model} accepts ${limit} reference image${limit===1?'':'s'} through this connection; this scene needs ${plan.references.length}. Choose a multi-reference model or simplify the scene. No images were dropped.`);
     const link = typeof vh2Linked === 'function' ? vh2Linked(companion) : null;
     if(!multi && plan.references.some(r => (r.tags || []).includes('turnaround'))) throw Error('This model animates a starting frame. Choose a multi-reference model for the character sheet, or provide a composed scene image.');
-    const images = await Promise.all(plan.references.map(r => vh2PhotoData(r.assetId ? vh2PhotoAssetUrl(link.worldId,r.assetId) : typeof r.source==='string' ? r.source : null)));
+    const timeline=getActiveCompanionTimeline(companion.id);
+    if(link?.worldId&&typeof vh2EnsureAssetUrls==='function')await vh2EnsureAssetUrls(timeline,plan.references.map(r=>r.assetId));
+    const images = await Promise.all(plan.references.map(r => vh2PhotoData(r.assetId ? vh2PhotoAssetUrl(link.worldId,r.assetId,timeline) : typeof r.source==='string' ? r.source : null)));
     return {plan,images,multi,prompt:companionVideoPrompt(companion,job,plan)};
 }
 
@@ -39987,13 +40188,30 @@ async function sendCompanionMessage(companion, messages, userText, nowMs = Date.
         }));
     if (userMessage && !messages.includes(userMessage)) messages.push(userMessage);
     if (userMessage) companionApplyMindCues(companion, userMessage, nowMs);
+    // Freeze the exact transcript and inbox batch before any classifier or
+    // provider await. A later send belongs to the next turn even when it is
+    // appended to the same live timeline while this request is running.
+    const requestMessages = messages.slice();
+    const requestedBatch = Array.isArray(options.replyBatch) && options.replyBatch.length
+        ? options.replyBatch.filter(message => requestMessages.includes(message))
+        : (userMessage ? [userMessage] : []);
+    const requestLastCompanionAt = requestMessages.reduce((latest, message) =>
+        message.role === 'companion' && !message.invalidated
+            ? Math.max(latest, Number(message.timestamp) || 0) : latest, 0);
+    const sourceMessageIds = options.initiative ? [] : (requestedBatch.length
+        ? requestedBatch
+        : requestMessages.filter(message => message.role === 'user' && !message.invalidated
+            && Number(message.timestamp) >= requestLastCompanionAt
+            && (!experience.realTimeLife || (Number(message.readAt || 0) > 0 && Number(message.readAt) <= nowMs))))
+        .map(message => String(message.id)).filter(Boolean).slice(-20);
     const turnSnapshot = isPlainObject(options.turnSnapshot) ? safeJsonClone(options.turnSnapshot) : {
         runtime: captureCompanionRuntime(companion),
-        messageCount: messages.length,
+        messageCount: requestMessages.length,
         initiative: options.initiative === true
     };
     const responseGroupId = String(options.responseGroupId
-        || livingId('vh_response', `${companion.id}|${nowMs}|${messages.length}|${Math.random()}`));
+        || livingId('vh_response', `${companion.id}|${nowMs}|${requestMessages.length}|${Math.random()}`));
+    companionReplyJobsInFlight.set(companion.id, { responseGroupId, sourceMessageIds: [...sourceMessageIds] });
     // OpenRouter's native web-search tool is not part of the OpenAI-compatible
     // contract used by GPTProto or local servers. All ordinary function tools
     // remain available everywhere.
@@ -40037,7 +40255,7 @@ async function sendCompanionMessage(companion, messages, userText, nowMs = Date.
             }
         }
     }
-    const promptMessages = buildCompanionMessages(companion, messages, nowMs, {
+    const promptMessages = buildCompanionMessages(companion, requestMessages, nowMs, {
         experience,
         initiative: options.initiative === true,
         localCognition: labsSocial,
@@ -40062,7 +40280,7 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
         tool_choice: 'auto'
     }, companion, { maxTokens: companionProviderOutputBudget(companion) });
     const fitted = VHConversationEngine.fitRequest(body, { contextSize: companionRequestContextSize(companion),
-        compactSystem: companionCompactPrompt(companion, messages, nowMs, { ...options, experience, startingScenarioThisTurn }) });
+        compactSystem: companionCompactPrompt(companion, requestMessages, nowMs, { ...options, experience, startingScenarioThisTurn }) });
     body = fitted.body;
     if (companion.webAccess && textProvider === 'openrouter') body.max_tool_calls = 4;
     const response = await fetchCompanionCompletion(providerApiBase(textProvider) + '/chat/completions', {
@@ -40211,18 +40429,12 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
     if (options.validUntil && Date.now() >= options.validUntil) {
         throw new Error('This departure message is no longer timely; the activity has already changed.');
     }
-    const lastCompanionAt = messages.reduce((latest, message) =>
-        message.role === 'companion' && !message.invalidated ? Math.max(latest, Number(message.timestamp) || 0) : latest, 0);
-    const sourceMessageIds = messages.filter(message => message.role === 'user' && !message.invalidated
-        && Number(message.timestamp) >= lastCompanionAt
-        && (!experience.realTimeLife || (Number(message.readAt || 0) > 0 && Number(message.readAt) <= nowMs)))
-        .map(message => message.id).slice(-20);
     if (actions.state?.conversation_goal) actions.commit.agency = {
         conversation_goal: actions.state.conversation_goal, decision: 'Continue the conversation', confidence: 100
     };
     if (Array.isArray(actions.state?.commitments)) actions.commit.commitments = actions.state.commitments;
     if (!isPlainObject(actions.commit.agency)) {
-        const perceivedMessages = messages.filter(message => sourceMessageIds.includes(message.id));
+        const perceivedMessages = requestMessages.filter(message => sourceMessageIds.includes(String(message.id)));
         actions.commit.agency = {
             perceived_event: options.initiative
                 ? String(options.initiativeReason || 'A private reason prompted independent contact.').slice(0, 700)
@@ -40281,7 +40493,7 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
         contextBudget: fitted.audit,
         finishReason: String(choice.finish_reason || 'unknown'),
         outputTruncated: choice.finish_reason === 'length',
-        dialogueQuality: VHConversationEngine.assessDialogue(replyText, messages, nowMs),
+        dialogueQuality: VHConversationEngine.assessDialogue(replyText, requestMessages, nowMs),
         source: commitSource,
         protocolLeakBlocked,
         photoDecision: actions.commit?.photo?.decision || (actions.photo ? 'send' : 'none'),
@@ -40365,12 +40577,15 @@ You have independently decided to reach out right now.${initiativeReason ? ` The
     const observation = separatedCognition
         ? scheduleCompanionTurnObservation(companion, messages, replyText, {
             timelineId: timeline?.id || '', responseGroupId, sourceMessageIds,
+            observationMessageIds: [...requestMessages.map(message => String(message.id)),
+                ...newMessages.map(message => String(message.id))],
             relevantMemoryIds, nowMs, initiative: options.initiative === true,
             baseRevision: companionContinuity(companion).revision || 0
         })
         : applyCompanionLabsMemoryGate(companion, userMessage, newMessages, nowMs);
     return { userMessage, replyMessages: newMessages, mood: companion.mood, pendingPhoto, pendingSocialPhoto, observation };
     } finally {
+        companionReplyJobsInFlight.delete(companion.id);
         companionReplyInFlight.delete(companion.id);
     }
 }
@@ -43541,7 +43756,7 @@ function renderCompanionsGrid() {
                 return;
             }
             state.activeCompanionId = companion.id;
-            saveState();
+            void saveVirtualHumansState();
             switchView('companionChat');
         };
         card.querySelector('[data-vh-edit]')?.addEventListener('click', () => {
@@ -43570,7 +43785,7 @@ function renderCompanionsGrid() {
 
 function openCompanionStudio(id) {
     state.editingCompanionId = id;
-    renderCompanionStudioForm();
+    renderCompanionStudioForm({ deferTabRender: true });
     activateCompanionStudioTab('cs-identity');
     if(typeof vhStudioScope==='function')vhStudioScope(getCompanion(id));
 }
@@ -43662,13 +43877,38 @@ function activateCompanionStudioTab(tabName) {
     });
     document.querySelectorAll('#companion-studio-view .studio-panel').forEach(panel => panel.classList.add('hidden'));
     document.getElementById(`tab-${tabName}`)?.classList.remove('hidden');
-    if (tabName === 'cs-life') {
-        updateCompanionLifeBuilderModelStatus(getCompanion(state.editingCompanionId));
-    }
-    if (tabName === 'cs-social') renderCompanionSocialStudio(getCompanion(state.editingCompanionId));
-    if (tabName === 'cs-video') renderCompanionVideoStudio(getCompanion(state.editingCompanionId), true);
+    renderActiveCompanionStudioTab(tabName, getCompanion(state.editingCompanionId));
     const content = document.querySelector('#companion-studio-view .studio-content-wrap');
     if (content) content.scrollTop = 0;
+}
+
+function renderActiveCompanionStudioTab(tabName, companion) {
+    if (!companion) return;
+    if (tabName === 'cs-identity') renderCompanionEmbodimentStudio(companion);
+    if (tabName === 'cs-mind') {
+        renderCompanionCognitionStudio(companion);
+        renderCompanionMindStudio(companion);
+        updateCompanionLibidoControls(companion);
+    }
+    if (tabName === 'cs-life') {
+        updateCompanionLifeBuilderModelStatus(companion);
+        renderCompanionPhotoLocations(companion);
+        renderCompanionWorldSystems(companion);
+        renderCompanionLifeOverview(companion);
+        if (typeof vhStudioLifeHome === 'function') vhStudioLifeHome(companion);
+    }
+    if (tabName === 'cs-social') renderCompanionSocialStudio(companion);
+    if (tabName === 'cs-video') renderCompanionVideoStudio(companion, true);
+    if (tabName === 'cs-models') {
+        renderCompanionModelConfiguration(companion);
+        void populateCompanionTextModelPicker(companion);
+    }
+    if (tabName === 'cs-voice') {
+        updateCompanionImageSourceUI(companion);
+        if (!['higgsfield', 'magnific', 'comfyui', 'gemini'].includes(companion.imageSource)) void populateCompanionImageModelPicker(companion);
+        else void populateCompanionMcpTools(companion);
+        void populateCompanionTTSModelPicker(companion);
+    }
 }
 
 async function renderCompanionVideoStudio(companion, refreshModels = false) {
@@ -44132,7 +44372,7 @@ function commitCompanionStudioForm() {
     return companion;
 }
 
-function renderCompanionStudioForm() {
+function renderCompanionStudioForm(options = {}) {
     const companion = getCompanion(state.editingCompanionId);
     if (!companion) return;
     const studioHumanLabel = document.getElementById('cs-studio-human-label');
@@ -44201,12 +44441,6 @@ function renderCompanionStudioForm() {
     document.querySelectorAll('[data-social-content-type]').forEach(input => {
         input.checked = companion.socialContentTypes.includes(input.value);
     });
-    renderCompanionSocialStudio(companion);
-    renderCompanionPhotoLocations(companion);
-    renderCompanionWorldSystems(companion);
-    renderCompanionVideoStudio(companion);
-    renderCompanionLifeOverview(companion);
-    if(typeof vhStudioLifeHome==='function')vhStudioLifeHome(companion);
     document.getElementById('cs-private-life').value = companion.privateLife;
     document.getElementById('cs-intimacy-boundaries').value = companion.intimacyBoundaries;
     document.getElementById('cs-relationship-context').value = companion.relationshipContext;
@@ -44234,8 +44468,6 @@ function renderCompanionStudioForm() {
     document.getElementById('cs-rumination-style').value = companion.ruminationStyle;
     document.getElementById('cs-reaction-timing').value = companion.reactionTiming;
     document.getElementById('cs-emotional-granularity').value = companion.emotionalGranularity;
-    renderCompanionEmbodimentStudio(companion);
-    renderCompanionCognitionStudio(companion);
     document.getElementById('cs-libido-enabled').checked = companionSexualSystemActive(companion);
     document.getElementById('cs-libido-baseline').value = companion.libidoBaseline;
     document.getElementById('cs-desire-pattern').value = companion.desirePattern;
@@ -44243,7 +44475,6 @@ function renderCompanionStudioForm() {
     document.getElementById('cs-sexual-risk').value = companion.sexualRiskAppetite;
     document.getElementById('cs-sexual-initiative').checked = companion.sexualInitiative;
     updateCompanionLibidoControls(companion);
-    renderCompanionMindStudio(companion);
     document.getElementById('cs-initiative-mode').value = companion.initiativeMode;
     document.getElementById('cs-always-on-enabled').checked = companion.alwaysOnEnabled;
     document.getElementById('cs-web-access').checked = companion.webAccess;
@@ -44331,15 +44562,14 @@ function renderCompanionStudioForm() {
     }
 
     renderCompanionMemoriesList(companion);
-    renderCompanionModelConfiguration(companion);
     const textProviderSelect = document.getElementById('cs-text-provider');
     if (textProviderSelect) textProviderSelect.value = companion.textProvider || 'provider';
-    populateCompanionTextModelPicker(companion);
-    if (!['higgsfield', 'magnific', 'comfyui', 'gemini'].includes(companion.imageSource)) populateCompanionImageModelPicker(companion);
-    else populateCompanionMcpTools(companion);
-    populateCompanionTTSModelPicker(companion);
     if (typeof vhMountPageBuilders === 'function') vhMountPageBuilders();
     if (typeof vhPolishAuthoringPages === 'function') vhPolishAuthoringPages();
+    if (!options.deferTabRender && !document.getElementById('companion-studio-view')?.classList.contains('hidden')) {
+        const activeTab = document.querySelector('.companion-studio-tab.active')?.dataset.tab || 'cs-identity';
+        renderActiveCompanionStudioTab(activeTab, companion);
+    }
 }
 
 function updateTTSControlsVisibility(mode) {
@@ -44954,7 +45184,7 @@ function updateCompanionImageSourceUI(companion) {
         google.innerHTML='<label>Google image model<input class="form-input" data-model placeholder="gemini-2.5-flash-image"></label><label>Google AI Studio API key<input class="form-input" data-key type="password" autocomplete="off" placeholder="Blank keeps the saved key"></label><button type="button" class="tool-btn">Save Google image connection</button><p role="status"></p>';
         const model=google.querySelector('[data-model]'),key=google.querySelector('[data-key]'),button=google.querySelector('button'),status=google.querySelector('[role=status]');
         model.value=companion.imageModel||'gemini-2.5-flash-image';model.oninput=()=>{companion.imageModel=model.value.trim();};
-        button.onclick=async()=>{button.disabled=true;status.textContent='Saving…';try{const saved=await mcpBridgeRequest('/vh2/image-provider?scope='+encodeURIComponent('horde:'+companion.id));await mcpBridgeRequest('/vh2/image-provider',{method:'POST',body:{scope:'horde:'+companion.id,provider:'gemini',model:model.value.trim(),apiKey:key.value,enabled:saved.provider==='gemini'&&saved.enabled===true,dailyLimit:saved.dailyLimit||4,maxReferences:/gemini-2\.5/.test(model.value)?3:14}});companion.imageModel=model.value.trim();key.value='';await saveState();status.textContent='Google image connection saved.';}catch(error){status.textContent=error.message;}finally{button.disabled=false;}};
+        button.onclick=async()=>{button.disabled=true;status.textContent='Saving…';try{const timeline=getActiveCompanionTimeline(companion.id),call=(path,options)=>timeline?.vh2&&typeof vh2Request==='function'?vh2Request(timeline,path,options):mcpBridgeRequest(path,options);const saved=await call('/vh2/image-provider?scope='+encodeURIComponent('horde:'+companion.id));await call('/vh2/image-provider',{method:'POST',body:{scope:'horde:'+companion.id,provider:'gemini',model:model.value.trim(),apiKey:key.value,enabled:saved.provider==='gemini'&&saved.enabled===true,dailyLimit:saved.dailyLimit||4,maxReferences:/gemini-2\.5/.test(model.value)?3:14}});companion.imageModel=model.value.trim();key.value='';await saveState();status.textContent=timeline?.vh2?.hostId?'Google image connection saved on the private host.':'Google image connection saved.';}catch(error){status.textContent=error.message;}finally{button.disabled=false;}};
     }
     mcpControls?.classList.toggle('hidden', !isMcp);
     const textProvider = providerDisplayName(companionTextProviderId(companion));
@@ -46850,12 +47080,7 @@ function setupCompanionsLogic() {
     };
 
     const runCompanionStudioSave = async () => {
-        const companion = commitCompanionStudioForm();
         const status = document.getElementById('vh-save-status');
-        if (!companion) {
-            if (status) status.textContent = 'No Virtual Human selected to save.';
-            return false;
-        }
         if (typeof vhSaveStudio === 'function') {
             try {
                 return await vhSaveStudio();
@@ -46867,6 +47092,11 @@ function setupCompanionsLogic() {
                 }
                 return false;
             }
+        }
+        const companion = commitCompanionStudioForm();
+        if (!companion) {
+            if (status) status.textContent = 'No Virtual Human selected to save.';
+            return false;
         }
         try {
             await saveState();
@@ -48329,6 +48559,67 @@ function renderCompanionPersonaSelector(companion) {
     };
 }
 
+function companionThreadRenderHash(value) {
+    let hash = 2166136261;
+    const text = String(value || '');
+    for (let index = 0; index < text.length; index += 1) {
+        hash ^= text.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+}
+
+function reconcileCompanionThreadEntries(container, entries, timelineKey) {
+    const entryBox = node => node?.firstElementChild || node;
+    const timelineChanged = container.dataset.companionTimelineKey !== timelineKey;
+    const wasNearBottom = timelineChanged
+        || container.scrollHeight - container.scrollTop - container.clientHeight < 96;
+    const previousScrollTop = container.scrollTop;
+    const previousScrollHeight = container.scrollHeight;
+    const anchor = !wasNearBottom
+        ? [...container.children].find(node => node.classList.contains('companion-message-entry')
+            && entryBox(node).offsetTop + entryBox(node).offsetHeight >= container.scrollTop)
+        : null;
+    const anchorId = anchor?.dataset.messageId || '';
+    const anchorOffset = anchor ? entryBox(anchor).offsetTop - container.scrollTop : 0;
+
+    if (container.dataset.companionThreadMode !== 'messages' || timelineChanged) {
+        container.replaceChildren();
+    }
+    container.dataset.companionThreadMode = 'messages';
+    container.dataset.companionTimelineKey = timelineKey;
+    const existing = new Map([...container.children]
+        .filter(node => node.classList.contains('companion-message-entry'))
+        .map(node => [node.dataset.messageId, node]));
+    let cursor = container.firstElementChild;
+    entries.forEach(entry => {
+        let node = existing.get(entry.id);
+        if (!node) {
+            node = document.createElement('div');
+            node.className = 'companion-message-entry';
+            node.dataset.messageId = entry.id;
+        }
+        if (node.dataset.renderSignature !== entry.signature) {
+            node.innerHTML = entry.html;
+            node.dataset.renderSignature = entry.signature;
+        }
+        if (node !== cursor) container.insertBefore(node, cursor || null);
+        cursor = node.nextElementSibling;
+        existing.delete(entry.id);
+    });
+    existing.forEach(node => node.remove());
+
+    if (wasNearBottom) {
+        container.scrollTop = container.scrollHeight;
+    } else {
+        const restoredAnchor = [...container.children]
+            .find(node => node.dataset.messageId === anchorId);
+        container.scrollTop = restoredAnchor
+            ? entryBox(restoredAnchor).offsetTop - anchorOffset
+            : previousScrollTop + (container.scrollHeight - previousScrollHeight);
+    }
+}
+
 function renderCompanionThread() {
     const companion = getCompanion(state.activeCompanionId);
     const container = document.getElementById('companion-messages');
@@ -48435,12 +48726,37 @@ function renderCompanionThread() {
         agencyStatus.textContent = [initiative, responseMode, silenceStatus, companion.webAccess ? 'shares links' : '']
             .filter(Boolean).join(' · ');
     }
+    const replyJob = companionReplyJobsInFlight.get(companion.id);
+    if (replyJob) {
+        const claimed = new Set(replyJob.sourceMessageIds || []);
+        const queuedCount = thread.filter(message => message.role === 'user' && message.awaitingReply
+            && !message.invalidated && !claimed.has(String(message.id))).length;
+        statusEl.textContent = queuedCount
+            ? `replying · ${queuedCount} message${queuedCount === 1 ? '' : 's'} queued`
+            : 'replying…';
+        statusEl.className = 'companion-chat-status available';
+    }
+    const vh2ReplyJob=activeTimeline?.vh2?.replyJob;
+    if(activeTimeline?.vh2&&['queued','leased','submitted'].includes(vh2ReplyJob?.status)){
+        statusEl.textContent=vh2ReplyJob.status==='submitted'?'replying with the selected model…':'preparing a reply…';
+        statusEl.className='companion-chat-status available';
+    }else if(activeTimeline?.vh2&&vh2ReplyJob?.reason&&['failed','unknown','abandoned'].includes(vh2ReplyJob.status)){
+        statusEl.textContent='reply needs attention · open Human Workspace → Recovery';
+        statusEl.className='companion-chat-status busy';
+    }else if(activeTimeline?.vh2&&nextPending?.attention?.stage==='ready'){
+        statusEl.textContent=activeTimeline.vh2.autoReplies===false
+            ? 'ready to reply · automatic replies are off'
+            : 'ready to reply · waiting for the local reply worker';
+        statusEl.className='companion-chat-status available';
+    }
 
     const messages = thread;
     const emptyAvatar = document.getElementById('cc-empty-avatar');
     if (emptyAvatar) emptyAvatar.textContent = companionInitials(companion.name);
     if(activeTimeline?.vh2?.conversationDeleted){
         container.innerHTML='<div class="companion-thread-empty"><strong>No open chat</strong><span>Their life continues. Choose a persona to start a conversation.</span><button type="button" class="btn btn-primary" data-new-persona-chat>New chat</button></div>';
+        container.dataset.companionThreadMode = 'deleted';
+        container.dataset.companionTimelineKey = `${companion.id}|${activeTimeline?.id || ''}`;
         container.querySelector('[data-new-persona-chat]').onclick=()=>vh2NewConversationDialog(companion);
     } else if (!messages.length) {
         container.innerHTML = `<div class="companion-thread-empty">
@@ -48450,25 +48766,33 @@ function renderCompanionThread() {
                 ? `Messages use real local time.${experience.replyDelays ? ' Replies can arrive later.' : ' Replies are immediate.'}${experience.allowNoReply ? ' They may sometimes leave a message on read.' : ' They will always answer.'}`
                 : `Real-time life is paused for this timeline.${experience.replyDelays ? ' Natural typing delays remain.' : ' Replies are immediate.'}${experience.allowNoReply ? ' They can still choose not to answer.' : ' They will always answer.'}`}</span>
         </div>`;
+        container.dataset.companionThreadMode = 'empty';
+        container.dataset.companionTimelineKey = `${companion.id}|${activeTimeline?.id || ''}`;
     } else {
         let previousDateKey = '';
-        container.innerHTML = messages.map(message => {
+        const entries = messages.map((message, index) => {
             const parts = companionClockParts(message.timestamp, companion);
             const separator = parts.dateKey !== previousDateKey
                 ? `<div class="companion-date-separator">${escapeHTML(parts.day)}</div>` : '';
             previousDateKey = parts.dateKey;
             const returnSeparator = message.role === 'user' && message.returnGapMs >= 6 * 60 * 60 * 1000
                 ? `<div class="companion-date-separator companion-gap-separator">${escapeHTML(companionElapsedLabel(message.returnGapMs))} later</div>` : '';
+            let html = '';
             if (message.role === 'system') {
-                return `${separator}<div class="companion-date-separator">${escapeHTML(message.text)}</div>`;
+                html = `${separator}<div class="companion-date-separator">${escapeHTML(message.text)}</div>`;
+            } else {
+                html = `${separator}${returnSeparator}<div class="companion-msg-row ${message.role === 'user' ? 'mine' : 'theirs'}">
+                    <div class="companion-msg-stack">
+                        ${companionBubbleHTML(companion, message)}
+                        <div class="companion-msg-time">${message.channel === 'call' ? '☎ ' : ''}${escapeHTML(parts.time)} ${companionDeliveryHTML(message, companion)}</div>
+                    </div>
+                </div>`;
             }
-            return `${separator}${returnSeparator}<div class="companion-msg-row ${message.role === 'user' ? 'mine' : 'theirs'}">
-                <div class="companion-msg-stack">
-                    ${companionBubbleHTML(companion, message)}
-                    <div class="companion-msg-time">${message.channel === 'call' ? '☎ ' : ''}${escapeHTML(parts.time)} ${companionDeliveryHTML(message, companion)}</div>
-                </div>
-            </div>`;
-        }).join('');
+            const id = String(message.id || `message-${index}`);
+            return { id, html, signature: companionThreadRenderHash(html) };
+        });
+        reconcileCompanionThreadEntries(container, entries,
+            `${companion.id}|${activeTimeline?.id || ''}`);
     }
     container.querySelectorAll('[data-play-voice]').forEach(button => {
         button.onclick = () => {
@@ -48504,7 +48828,6 @@ function renderCompanionThread() {
     if (lastMessage?.role === 'user' && lastMessage.deferredReason === 'mood' && lastMessage.deliveryState === 'read') {
         statusEl.textContent = `${life.label} · not in the mood to answer`;
     }
-    container.scrollTop = container.scrollHeight;
 }
 
 function setCompanionTyping(visible, label = 'typing…') {
@@ -48845,9 +49168,23 @@ async function planCompanionSupportingPeople(companion,nowMs){
 async function processCompanionAgency(nowMs = Date.now()) {
     if (typeof HordeDB !== 'undefined' && HordeDB.conflicted) return;
     let stateChanged = false;
+    let immediateFollowupDue = false;
     const agencyPaused = state.globalSettings.companionAgencyPaused === true;
     for (const companion of state.companions) {
-        if(getActiveCompanionTimeline(companion.id)?.vh2){await vh2Poll(companion);continue;}
+        if(getActiveCompanionTimeline(companion.id)?.vh2){
+            const timeline=getActiveCompanionTimeline(companion.id),link=timeline.vh2;
+            const hasImageWork=Boolean(link.photos?.some(photo=>['captured','submitted'].includes(photo.status))
+                ||link.providerJobs?.some(job=>['queued','submitted','rendered'].includes(job.status)));
+            const active=Boolean(link.outbox?.length||timeline.messages?.some(message=>message.role==='user'&&message.awaitingReply)
+                ||['queued','leased','submitted'].includes(link.replyJob?.status)
+                ||hasImageWork);
+            const interval=active?4000:30000;
+            if(nowMs-(link.lastSyncedAt||0)>=interval){
+                const full=nowMs-(link.lastFullSyncedAt||0)>=30000;
+                await vh2Poll(companion,timeline,full?{}:{lightweight:hasImageWork?'jobs':true});
+            }
+            continue;
+        }
         const environmentBefore = companion.lifeRuntime?.environment?.fetchedAt || 0;
         refreshCompanionEnvironment(companion, nowMs).then(async () => {
             if ((companion.lifeRuntime?.environment?.fetchedAt || 0) === environmentBefore) return;
@@ -49035,6 +49372,9 @@ async function processCompanionAgency(nowMs = Date.now()) {
             } finally {
                 companionAgencyInFlight.delete(companion.id);
                 if (state.activeCompanionId === companion.id) setCompanionTyping(false);
+                immediateFollowupDue = immediateFollowupDue || messages.some(message =>
+                    message.role === 'user' && !message.invalidated && message.awaitingReply
+                    && Number(message.replyDueAt) > 0 && Number(message.replyDueAt) <= Date.now());
                 stateChanged = true;
             }
             continue;
@@ -49197,6 +49537,8 @@ async function processCompanionAgency(nowMs = Date.now()) {
         if (stateChanged) renderCompanionThread();
         else updateCompanionClock();
     }
+    if (immediateFollowupDue) setTimeout(() => processCompanionAgency().catch(error =>
+        console.error('Queued Virtual Human reply failed:', error)), 0);
 }
 
 let companionAlwaysOnTimer = null;
@@ -49458,12 +49800,24 @@ function setupCompanionAlwaysOnRuntime() {
             ? 'Resume proactive messages, social posting and background generation.'
             : 'Pause new proactive actions and automatic image submissions. Direct replies, existing journeys and submitted jobs may continue.';
     };
+    const setVh2AgencyPauseEverywhere = async paused => {
+        const targets=[{}],seen=new Set();
+        for(const store of Object.values(state.companionTimelines||{}))for(const timeline of store.sessions||[]){
+            const hostId=timeline.vh2?.hostId;if(!hostId||seen.has(hostId))continue;seen.add(hostId);
+            const host=state.globalSettings?.vh2SelfHosts?.[hostId];
+            if(!host?.baseUrl||!host.accessToken)throw Error('A privately hosted life is disconnected. Reconnect it before changing agency everywhere.');
+            targets.push({baseUrl:host.baseUrl,accessToken:host.accessToken});
+        }
+        const results=await Promise.allSettled(targets.map(options=>mcpBridgeRequest('/vh2/agency-pause',{method:'POST',body:{paused},timeoutMs:15000,...options})));
+        const failures=results.filter(result=>result.status==='rejected');
+        if(failures.length)throw Error(`Agency changed on ${targets.length-failures.length} of ${targets.length} life services. Reconnect the unavailable host and apply the setting again. ${failures[0].reason?.message||''}`.trim());
+        if(results.some(result=>result.value?.paused!==paused))throw Error('A life service did not confirm the agency setting.');
+    };
     if (panicButton) panicButton.onclick = async () => {
         const paused = !(state.globalSettings.companionAgencyPaused === true);
         panicButton.disabled=true;
         try {
-            const receipt=await mcpBridgeRequest('/vh2/agency-pause',{method:'POST',body:{paused},timeoutMs:15000});
-            if(receipt.paused!==paused)throw Error('The service did not confirm the pause setting.');
+            await setVh2AgencyPauseEverywhere(paused);
             state.globalSettings.companionAgencyPaused=paused;await persistGlobalSettingsOnly();renderPanic();
             let legacyError='';
             try{if(paused)await mcpBridgeRequest('/always-on/pause',{method:'POST',body:{reason:'paused by user'}});else await syncCompanionAlwaysOnRuntime({announce:false});}catch(error){legacyError=' Legacy host did not confirm: '+error.message;}
@@ -49488,7 +49842,8 @@ function setupCompanionAlwaysOnRuntime() {
     document.getElementById('global-companion-always-on').onchange = event => {
         document.getElementById('always-on-controls')?.classList.toggle('disabled', !event.target.checked);
     };
-    importCompanionAlwaysOnEvents().catch(() => []).finally(() => syncCompanionAlwaysOnRuntime());
+    schedulePostStartupWork('alwaysOn', () => importCompanionAlwaysOnEvents()
+        .catch(() => []).finally(() => syncCompanionAlwaysOnRuntime()), 1800);
     if (companionAlwaysOnTimer) clearInterval(companionAlwaysOnTimer);
     companionAlwaysOnTimer = setInterval(async () => {
         await importCompanionAlwaysOnEvents().catch(() => []);
@@ -49500,7 +49855,8 @@ function startCompanionAgencyEngine() {
     if (companionAgencyTimer) clearInterval(companionAgencyTimer);
     companionAgencyTimer = setInterval(() => processCompanionAgency().catch(error =>
         console.error('Virtual Human agency tick failed:', error)), 5000);
-    processCompanionAgency().catch(error => console.error('Virtual Human agency startup tick failed:', error));
+    schedulePostStartupWork('companionAgency', () => processCompanionAgency().catch(error =>
+        console.error('Virtual Human agency startup tick failed:', error)), 1600);
 }
 
 const companionPhotoInFlight = new Set();
@@ -49658,7 +50014,10 @@ async function queueCompanionUserMessage(payload) {
     if(getActiveCompanionTimeline(companion.id)?.vh2?.conversationDeleted)return vh2NewConversationDialog(companion);
     if(getActiveCompanionTimeline(companion.id)?.vh2){
         const timeline=getActiveCompanionTimeline(companion.id);await vh2Enqueue(timeline,'receive_message',{text:text||(type==='photo'?'[Photo attached]':type==='voice'?'[Voice note attached]':'[Clip request]'),messageType:type,...(type==='photo'?{attachment:payload.photo}:type==='voice'?{attachment:payload.audio}:{})});
-        await vh2Poll(companion,timeline);return;
+        // The durable outbox owns retry. Let command delivery and generation
+        // continue without keeping the composer handler open for a full status
+        // sweep and whole-state reconciliation.
+        vh2Poll(companion,timeline,{lightweight:true}).catch(error=>console.error('VH2 message delivery:',error));return;
     }
     if (!VHWorldEngine.connected(companion)) return showToast('Send a connection request and wait for acceptance before messaging.','info');
     if (!providerHasCredentials(companionTextProviderId(companion))) {
@@ -49690,8 +50049,11 @@ async function queueCompanionUserMessage(payload) {
     messages.push(optimisticUser);
     companionRecordResponsePlan(companion, optimisticUser, plan, optimisticUser.timestamp);
     persistCompanionRuntime(companion);
-    await saveState();
+    // The sent bubble is immediate UI state. Durability still completes before
+    // a reply job can claim it, but a large persisted transcript cannot make
+    // the composer look frozen.
     renderCompanionThread();
+    await saveState();
 
     if (experience.replyDelays && plan.life.availability === 'asleep') {
         showToast(`${companion.name || 'They'} is asleep. The message will be seen after they wake.`, 'info');

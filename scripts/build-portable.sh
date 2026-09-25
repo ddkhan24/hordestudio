@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-VERSION="${1:-18.1.1}"
+VERSION="${1:-18.2.0}"
 ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 BUILD_DIR=$(mktemp -d)
 PACKAGE_DIR="$BUILD_DIR/Horde Studio"
@@ -84,6 +84,8 @@ mkdir -p "$APP_DIR/docs"
 cp "$ROOT_DIR/docs/multiplayer.md" "$APP_DIR/docs/"
 mkdir -p "$APP_DIR/docs/vh2"
 cp "$ROOT_DIR/docs/vh2/START-HERE.md" "$APP_DIR/docs/vh2/"
+mkdir -p "$APP_DIR/deploy"
+cp -R "$ROOT_DIR/deploy/vh2-self-host" "$APP_DIR/deploy/"
 cp -R "$ROOT_DIR/multiplayer-relay" "$APP_DIR/"
 
 chmod +x "$APP_DIR/Start Horde Studio.command" "$APP_DIR/start-horde-studio.sh"

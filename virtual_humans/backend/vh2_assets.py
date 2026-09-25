@@ -1,6 +1,6 @@
 """Reviewed, versioned references stored in the existing backed-up asset store."""
 from importlib import import_module as _vh_import_module
-import base64,hashlib,json,uuid
+import base64,json,uuid
 COMMANDS=('add_bible_asset','review_bible_asset','archive_bible_asset')
 REFERENCE_VIEWS={
  'identity':('turnaround','front_face','three_quarter','profile','full_body'),
@@ -119,7 +119,8 @@ def command(service,db,world_id,revision,state,body):
     valid=header==f'data:{mime};base64' and ((mime=='image/png' and raw.startswith(b'\x89PNG\r\n\x1a\n')) or (mime=='image/jpeg' and raw.startswith(b'\xff\xd8\xff')) or (mime=='image/webp' and raw.startswith(b'RIFF') and raw[8:12]==b'WEBP'))
     if not valid or len(raw)<24:raise ValueError()
    except (ValueError,TypeError):raise ValueError('Upload a PNG, JPEG or WebP image.')
-   asset=hashlib.sha256(world_id.encode()+raw).hexdigest();db.execute('INSERT OR IGNORE INTO photo_assets VALUES (?,?,?,?)',(asset,world_id,mime,raw));source={'kind':'upload'}
+   from .vh2_media import optimize_image_bytes,store_asset
+   mime,raw=optimize_image_bytes(mime,raw);asset=store_asset(db,world_id,mime,raw);source={'kind':'upload'}
   if len(entries)>=300:raise ValueError('The current bible supports 300 references.')
   entry=generated_reference(world_id,photo,role,owner,label.strip(),tags,after['simAt']) if photo_id else {'id':str(uuid.uuid4()),'assetId':asset,'role':role,'entityId':owner,'label':label.strip(),'tags':tags,'status':'pending','version':1,'createdAt':after['simAt'],'parents':parents,'source':source}
   entries.append(entry)

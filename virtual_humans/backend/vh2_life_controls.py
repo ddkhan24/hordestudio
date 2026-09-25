@@ -3,11 +3,12 @@ import hashlib,json
 COMMANDS=('reboot_life','catch_up_life')
 
 def faulty_sleep_seed(db,world_id,state):
+ from .vh2_runtime import decode_event_payload
  current=state['truth']['companion'].get('humanDynamics',{}).get('sleep') or {}
  if current.get('initializationVersion')==2:return False
  # Inspect persisted initialization evidence, not a guess from current tiredness.
  for row in db.execute('SELECT payload FROM events WHERE world_id=? ORDER BY seq',(world_id,)):
-  for change in json.loads(row[0]).get('changes',[]):
+  for change in decode_event_payload(row[0]).get('changes',[]):
    if change.get('path')!=['truth','companion','humanDynamics','sleep']:continue
    seed=change.get('value')
    if not isinstance(seed,dict):continue

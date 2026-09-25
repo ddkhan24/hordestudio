@@ -1,7 +1,8 @@
 const assert=require('node:assert/strict'),fs=require('node:fs');
 const app=fs.readFileSync('app.js','utf8'),html=fs.readFileSync('index.html','utf8');
 assert.doesNotMatch(app,/function (?:buildBundledAslynJonasCompanion|ensureBundledCompanionSeed)\(/);
-assert.match(app,/await installBundledHumans\(/);
+assert.match(app,/schedulePostStartupWork\('bundledHumans',[\s\S]*?installBundledHumans\(\)/);
+assert.match(app,/renderCompanionsGrid\(\)[\s\S]*?if\(!bundledHumanInstallTask\)void installBundledHumans\(\)/);
 assert.match(html,/bundled-humans\.js/);assert.match(html,/<strong>Virtual Humans 2\.0<\/strong>/);
 assert.doesNotMatch(html,/ashlyn-reynolds-human\.js|jane-harlow-human\.js/);
 const catalog=JSON.parse(fs.readFileSync('assets/bundled/humans.json'));

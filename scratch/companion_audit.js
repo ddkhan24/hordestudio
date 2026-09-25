@@ -978,7 +978,7 @@ test('Virtual Human archive filenames are portable and use the dedicated extensi
 test('full backups include Virtual Humans and their timeline stores', () => {
     const source = functionSource('exportFullBackup');
     assert(source.includes('companions: state.companions'));
-    assert(source.includes('companionTimelines: state.companionTimelines'));
+    assert(source.includes('companionTimelines: portableCompanionTimelineState(state.companionTimelines)'));
     assert(source.includes('companionThreads: state.companionThreads'));
 });
 
