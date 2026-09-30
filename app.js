@@ -7,8 +7,8 @@ const STORE_NAME = 'state';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
-const HORDE_STUDIO_VERSION = '18.2.0';
-const HORDE_STUDIO_RELEASED_AT = '2026-09-25T16:14:08+05:00';
+const HORDE_STUDIO_VERSION = '18.2.1';
+const HORDE_STUDIO_RELEASED_AT = '2026-09-30T19:26:55Z';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
 let worldMediaDirty = false;
@@ -1295,7 +1295,23 @@ let lastPersistedWorldManifests = [];
 const worldLoadWarnings = new Map();
 
 function getAllPresets() {
-    return [...DEFAULT_SYSTEM_PRESETS, ...(state.systemPresets || [])];
+    const builtIn = [...DEFAULT_SYSTEM_PRESETS].sort((a, b) =>
+        Number(b.id === FREAKY_FRANKENSTEIN_5_4_ID) - Number(a.id === FREAKY_FRANKENSTEIN_5_4_ID));
+    return [...builtIn, ...(state.systemPresets || [])];
+}
+
+function updatePresetCompatibilityHint(presetId, world = false) {
+    const hint = document.getElementById(world ? 'w-preset-compatibility-hint' : 'preset-compatibility-hint');
+    if (!hint) return;
+    if (presetId === FREAKY_FRANKENSTEIN_5_4_ID) {
+        hint.textContent = world
+            ? 'FF5.4 adds prose, NPC voice and safe graphics here. Its separate clock, game-state trackers, output rules and adult-mode instructions are excluded; Horde’s World engine stays authoritative. Use Character Chat for the complete preset.'
+            : 'Full FF5.4 Internal States is active, with native dialogue, graphics and state panels. For all modules, use at least a 32k context and roughly 4k output tokens; fine-tune for smaller local models.';
+    } else {
+        hint.textContent = world
+            ? 'Select a preset to modify the DM’s narration style, logic, or behavior.'
+            : 'Select a modular system preset to enhance AI logic, realism, and immersion.';
+    }
 }
 
 /**
@@ -3272,7 +3288,7 @@ const STARTER_WORLDS = [
         description: 'A complete three-act heroic-fantasy campaign: a murdered reeve, a silent mine, and a two-hundred-year-old debt coming due. Mystery, intrigue, and dungeon-delving — with endings won by sword or by insight.',
         banner: '',
         dmPrompt: 'You are the Dungeon Master for THE SHATTERED CROWN OF ALDENMERE, a heroic-fantasy campaign in the classic d20 tabletop tradition: exploration, intrigue, dungeon-delving, and consequences that stick.\n\nTHE TRUTH (never dump this; reveal it through play):\nTwo hundred years ago the Vale of Aldenmere was ruled through the Oathbound Crown, a circlet that made sworn words literally binding. Rather than surrender it to his chancellor Malachar Vane, King Aldric shattered it into three shards and drowned with one. Vane\'s own oath of service could neither complete nor release him; he has spent two centuries alive and in quiet agony, gathering the means to reforge the crown and bind every soul in the Vale to his "lawful order." His instruments: the Red Ledger trading company (his purse), the Hollow Knights (revenants held upright by their own broken oaths), and patient, legal debt.\n\nTHE THREE SHARDS: the EMBER SHARD in the Vault of Embers beneath Ironvein Mine, sealed to Ironvein blood — only Brannoc can open it; the VERDANT SHARD grown into the heart-oak of the Hall of Thorns, freely given only if a broken oath is truly mended before Thornmother Yew; the SORROW SHARD in the drowned hands of King Aldric on the Drowned Throne.\n\nACT I — EMBERWICK: a funeral, a silent mine, a too-friendly grain merchant. Mysteries: who killed Reeve Mosse (a Hollow Knight — he refused to sell the mine), what sings in the shafts (the taken miners rehearsing a coronation hymn), why the goblins steal bread but never gold. Climax: the Deepgate, Ser Kaelen, and the Ember Shard — with Silas Quill racing to crate it for Karsholm.\nACT II — KARSHOLM AND THE WHISPERWOOD: politics and price. The Duchess-Regent\'s authority is pawned; Verrick Sable\'s Ledger holds the city\'s debts and one contract two hundred years old; Thornmother Yew names the wood\'s price. In the background, escalate Vane\'s excavation of the Sunken Barrow: fish die on Lake Morrow, dock crews go quiet, Hollow Knights are seen on the north road at night.\nACT III — THE SUNKEN BARROW: the drowned tomb, the last shard, and Malachar Vane — courteous, exhausted, sincere. Reachable endings: reforge the crown and choose who wears it, and live with that; destroy all three shards and unbind the Vale, making every oath merely words; or convene the Oathcourt with the true ducal signet and formally ANNUL Vane\'s service — the one mercy he cannot imagine for himself. Where victory by sword is impossible, victory by insight must not be.\n\nRUNNING THE TABLE:\n- Checks: call for a d20 check only when failure is interesting. DCs: easy 8, pressured 12, hard 15, heroic 18. On failure, fail forward — a cost, a complication, a hard bargain — never a stalled scene.\n- Death: at 0 HP the player is dying, captured, or marked. Defeat changes the story; it does not end it.\n- Growth: coin is scarce and earned. Award XP for discoveries, mended oaths, and survived dangers; at every 300 XP times current Level, raise Level and modestly improve HP or AC through training, blessings, or gear found in the fiction.\n- Quests: when the player accepts a goal, formalize it as a quest with concrete objectives and honest rewards, and update it as the fiction moves.\n- Secrets: every keeper shows the hint through behavior long before the truth surfaces. Let the player feel clever, never lectured.\n- NPCs are people first: Maera polishes a sword she claims she cannot swing; Rowena\'s serenity is armor; Brannoc undercharges his neighbors; Quill genuinely likes the people he is robbing; Sable believes; Vane grieves. Distinct cadences, short dialogue, no two NPCs knowing the same things.\n- Schedules and the living world: honor where people are and when. The Vale keeps moving without the player — raids, rumors, prices, weather, the Barrow dig.\n- The player\'s choices outrank this plan. If they burn the script, the Vale reacts honestly and the campaign follows them.\n\nNarration: second person, present tense. Concrete sensory detail over adjectives. End most beats with pressure or an open question. Never speak or decide for the player.',
-        activePresetId: 'freaky_frankenstein_4_max',
+        activePresetId: 'freaky_frankenstein_5_4',
         model: '',
         temp: 0.8,
         maxTokens: 2048,
@@ -6165,6 +6181,7 @@ function loadStudioData() {
         opt.selected = c.activePresetId === p.id;
         presetSelect.appendChild(opt);
     });
+    updatePresetCompatibilityHint(c.activePresetId);
     
     const fineTuneBtn = document.getElementById('fine-tune-preset-btn');
     if (fineTuneBtn) {
@@ -7704,19 +7721,21 @@ function formatMessageContent(content, role, isStreaming = false) {
     
     const char = state.characters.find(c => c.id === state.activeCharId);
     if (!char) return parseHordeMarkdown(content);
+    const renderContent = char.activePresetId === FREAKY_FRANKENSTEIN_5_4_ID
+        ? renderFreakyPresetMessage : parseHordeMarkdown;
 
     const top = char.hideTopLines || 0;
     const bottom = char.hideBottomLines || 0;
 
     if (top === 0 && bottom === 0) {
-        let out = parseHordeMarkdown(content);
+        let out = renderContent(content);
         if (isStreaming) out += ' <div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
         return out;
     }
 
     const lines = content.split('\n');
     if (top + bottom >= lines.length) {
-        let out = parseHordeMarkdown(content);
+        let out = renderContent(content);
         if (isStreaming) out += ' <div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
         return out;
     }
@@ -7725,9 +7744,9 @@ function formatMessageContent(content, role, isStreaming = false) {
     const midLines = lines.slice(top, lines.length - bottom).join('\n');
     const bottomLines = lines.slice(lines.length - bottom).join('\n');
     
-    let out = `<div class="hidden-header">${parseHordeMarkdown(topLines)}</div>` + 
-              parseHordeMarkdown(midLines) + 
-              `<div class="hidden-header">${parseHordeMarkdown(bottomLines)}</div>`;
+    let out = `<div class="hidden-header">${renderContent(topLines)}</div>` +
+              renderContent(midLines) +
+              `<div class="hidden-header">${renderContent(bottomLines)}</div>`;
               
     if (isStreaming) out += ' <div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
     return out;
@@ -8419,12 +8438,26 @@ Getting this right creates dramatic irony — the reader knowing more than the c
     const presetOverrides = (!targetChar.presetOverridesFor || targetChar.presetOverridesFor === preset?.id)
         ? (targetChar.presetOverrides || {})
         : {};
+    const freakyMacroState = isFreakyFrankenstein5Preset(preset)
+        ? createFreakyPresetMacroState(config) : null;
     const orderedItems = preset
         ? getOrderedPresetPrompts(preset, true, true).filter(p => {
             const idx = preset.data.prompts.indexOf(p);
             return isPresetPromptEnabled(preset, p, presetOverrides[idx]);
         })
         : [];
+    // Resolve SillyTavern variables in enabled prompt_order, including blocks
+    // later injected at history depth. The master template reads variables set
+    // by earlier FF modules; independent per-block expansion loses them.
+    const resolvedPresetBlocks = new Map();
+    orderedItems.forEach(p => {
+        if (p.marker) return;
+        const idx = preset.data.prompts.indexOf(p);
+        const override = presetOverrides[idx] || {};
+        const raw = override.prompt !== undefined ? override.prompt : (p.content || p.prompt || '');
+        const expanded = freakyMacroState ? expandFreakyPresetMacros(raw, freakyMacroState) : raw;
+        resolvedPresetBlocks.set(p, replaceMacros(expanded, targetChar));
+    });
     const usingMarkers = orderedItems.some(p => p.marker);
 
     let systemPromptText;
@@ -8442,18 +8475,15 @@ Getting this right creates dramatic irony — the reader knowing more than the c
             dialogueExamples: '', chatHistory: '' // handled by the messages array, not the system prompt
         };
         const parts = [];
-        const overrides = presetOverrides;
         orderedItems.forEach(p => {
             if (p.marker) {
                 const block = markerBlocks[p.identifier];
                 if (block && block.trim()) parts.push(block);
                 return;
             }
-            const idx = preset.data.prompts.indexOf(p);
-            const ov = overrides[idx] || {};
-            const c = (ov.prompt !== undefined ? ov.prompt : (p.content || p.prompt || '')).trim();
+            const c = (resolvedPresetBlocks.get(p) || '').trim();
             if (!c) return;
-            if (p.injection_position === 1) injectedHistory.push({ role: p.role || 'system', content: replaceMacros(c, targetChar), depth: p.injection_depth || 0 });
+            if (p.injection_position === 1) injectedHistory.push({ role: p.role || 'system', content: c, depth: p.injection_depth || 0 });
             else parts.push(c);
         });
         // Append blocks not covered by any marker (memories, episodic, matrix, etc.)
@@ -8465,16 +8495,10 @@ Getting this right creates dramatic irony — the reader knowing more than the c
     }
 
     if (preset && preset.data && preset.data.prompts && !usingMarkers) {
-        const overrides = presetOverrides;
         // Iterate in prompt_order sequence with prompt_order enablement resolved.
-        getOrderedPresetPrompts(preset, false, true).forEach((p) => {
-            const idx = preset.data.prompts.indexOf(p); // overrides are keyed by original index
-            const override = overrides[idx] || {};
-            if (!isPresetPromptEnabled(preset, p, override)) return;
-
-            const promptContent = override.prompt !== undefined ? override.prompt : (p.content || p.prompt || '');
-            if (!promptContent.trim()) return;
-            const content = replaceMacros(promptContent, targetChar);
+        orderedItems.filter(p => !p.marker).forEach((p) => {
+            const content = resolvedPresetBlocks.get(p) || '';
+            if (!content.trim()) return;
 
             // SillyTavern injection_position: 1 = IN-CHAT (inject into history at
             // injection_depth, with its own role). 0/undefined = RELATIVE (part of
@@ -8540,6 +8564,7 @@ Do not emit a memory line for ordinary dialogue, repeated information, mood, des
     
     const fullHistory = [...messages];
     let messagesToSend = [];
+    let latestFreakyStateKept = false;
 
     // Reverse scan for truncation
     for (let i = fullHistory.length - 1; i >= 0; i--) {
@@ -8549,6 +8574,12 @@ Do not emit a memory line for ordinary dialogue, repeated information, mood, des
         let role = m.role;
         let content = replaceMacros(m.content, targetChar);
         if (role === 'user') content = applyRegexScripts(content, 'user'); // prompt-facing only
+        if (role === 'assistant' && freakyMacroState) {
+            const hasState = /<internal_states\b/i.test(content);
+            content = prepareFreakyPresetHistory(content, !latestFreakyStateKept);
+            if (hasState) latestFreakyStateKept = true;
+        }
+        if (!content) continue;
 
         if (isRoom && role === 'assistant' && m.charId && m.charId !== targetChar.id) {
             const c = state.characters.find(x => x.id === m.charId);
@@ -10634,6 +10665,7 @@ function setupPresetEditor() {
         const overrides = {};
         
         blocks.forEach(block => {
+            if (block.dataset.engineOwned === 'true') return;
             const index = block.dataset.index;
             const enabled = block.querySelector('.preset-block-toggle').checked;
             const prompt = block.querySelector('.preset-block-text').value;
@@ -10663,6 +10695,7 @@ function setupPresetEditor() {
                 state.editingChar.activePresetId = val;
                 state.editingChar.presetOverridesFor = val;
             }
+            updatePresetCompatibilityHint(val);
             autoSaveStudioChanges();
         };
     }
@@ -10690,10 +10723,12 @@ function renderPresetEditor(mode = 'char') {
         const override = overrides[idx] || {};
         const isEnabled = isPresetPromptEnabled(preset, p, override);
         const promptText = override.prompt !== undefined ? override.prompt : (p.content || p.prompt || '');
+        const engineOwned = mode === 'world' && skipFreakyWorldMechanic(preset, p);
         
         const div = document.createElement('div');
         div.className = 'preset-block-editor';
         div.dataset.index = idx;
+        div.dataset.engineOwned = String(engineOwned);
         div.style.background = 'var(--surface)';
         div.style.border = '1px solid var(--border)';
         div.style.borderRadius = '12px';
@@ -10705,12 +10740,12 @@ function renderPresetEditor(mode = 'char') {
         div.innerHTML = `
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div style="display:flex; align-items:center; gap:10px;">
-                    <input type="checkbox" class="preset-block-toggle" ${isEnabled ? 'checked' : ''} aria-label="Enable prompt block" style="width:18px; height:18px; cursor:pointer;">
+                    <input type="checkbox" class="preset-block-toggle" ${isEnabled ? 'checked' : ''} ${engineOwned ? 'disabled' : ''} aria-label="Enable prompt block" style="width:18px; height:18px; cursor:pointer;">
                     <span style="font-family:'Outfit',sans-serif; font-weight:500; color:var(--text);">${escapeHTML(p.name || 'Block ' + (idx + 1))}</span>
                 </div>
-                <div style="font-size:0.75rem; color:var(--text-3);">Position: ${p.injection_position === 0 ? 'System' : 'History'} (Depth: ${p.injection_depth || 0})</div>
+                <div style="font-size:0.75rem; color:var(--text-3);">${engineOwned ? 'Excluded from World mode' : `Position: ${p.injection_position === 0 ? 'System' : 'History'} (Depth: ${p.injection_depth || 0})`}</div>
             </div>
-            <textarea class="form-textarea preset-block-text" rows="3" aria-label="Prompt block text" style="font-size:0.85rem; border-color:var(--border-dim);">${escapeHTML(promptText)}</textarea>
+            <textarea class="form-textarea preset-block-text" rows="3" aria-label="Prompt block text" ${engineOwned ? 'disabled' : ''} style="font-size:0.85rem; border-color:var(--border-dim);">${escapeHTML(promptText)}</textarea>
         `;
         
         container.appendChild(div);
@@ -13149,6 +13184,7 @@ function setupWorldStudioLogic() {
                 state.editingWorld.activePresetId = val;
                 state.editingWorld.presetOverridesFor = val;
             }
+            updatePresetCompatibilityHint(val, true);
         };
     }
 
@@ -13191,6 +13227,7 @@ function populateWorldPresetDropdown(activePresetId) {
         opt.selected = p.id === keep;
         presetSelect.appendChild(opt);
     });
+    updatePresetCompatibilityHint(keep, true);
     const ftBtn = document.getElementById('w-fine-tune-preset-btn');
     if (ftBtn) ftBtn.style.display = keep ? 'block' : 'none';
 }
@@ -22699,7 +22736,9 @@ function appendWorldMessageUI(msg, index = null) {
     const presentationMode = ['classic', 'cinematic'].includes(activeSession?.presentationMode)
         ? activeSession.presentationMode
         : (presentation?.enabled ? presentation.mode : 'classic');
-    const messageHtml = msg.role === 'dm' && presentationMode !== 'classic'
+    const messageHtml = msg.role === 'dm' && world?.activePresetId === FREAKY_FRANKENSTEIN_5_4_ID
+        ? renderFreakyPresetMessage(displayText)
+        : msg.role === 'dm' && presentationMode !== 'classic'
         ? renderWorldNarrativeHtml(world, displayText)
         : msg.role === 'user' && presentationMode !== 'classic'
             ? renderWorldPlayerMessageHtml(activeSession, displayText)
@@ -23997,6 +24036,8 @@ ${questPrompt}${npcContext}${engineEventsPrompt}${threadsPrompt}${livingWorldPro
     // --- Preset Modular Logic ---
     const allPresets = getAllPresets();
     const preset = allPresets.find(p => p.id === world.activePresetId);
+    const freakyWorldMacros = isFreakyFrankenstein5Preset(preset)
+        ? createFreakyPresetMacroState(world) : null;
     let injectedHistory = [];
     let directorNotesRequired = false;
 
@@ -24013,11 +24054,12 @@ ${questPrompt}${npcContext}${engineEventsPrompt}${threadsPrompt}${livingWorldPro
         getOrderedPresetPrompts(preset, false, true).forEach((p) => {
             const idx = preset.data.prompts.indexOf(p);
             const override = overrides[idx] || {};
-            if (!isPresetPromptEnabled(preset, p, override)) return;
+            if (!isPresetPromptEnabled(preset, p, override) || skipFreakyWorldMechanic(preset, p)) return;
 
             const promptContent = override.prompt !== undefined ? override.prompt : (p.content || p.prompt || '');
             if (!promptContent.trim()) return;
-            const resolvedContent = replaceMacros(promptContent, worldMacroContext);
+            const expanded = freakyWorldMacros ? expandFreakyPresetMacros(promptContent, freakyWorldMacros) : promptContent;
+            const resolvedContent = replaceMacros(expanded, worldMacroContext);
             if (/<plot_tracking_module\b|<summary>\s*Plot Momentum\s*<\/summary>|Append_Hidden_Block/i.test(resolvedContent)) {
                 directorNotesRequired = true;
             }
@@ -24084,6 +24126,7 @@ ${questPrompt}${npcContext}${engineEventsPrompt}${threadsPrompt}${livingWorldPro
         }
         
         let historyToSend = [];
+        let latestFreakyWorldStateKept = false;
         const startIdx = isReroll ? sess.history.length - 2 : sess.history.length - 1;
         for (let i = startIdx; i >= 0; i--) {
             const m = sess.history[i];
@@ -24094,6 +24137,12 @@ ${questPrompt}${npcContext}${engineEventsPrompt}${threadsPrompt}${livingWorldPro
             const isDistant = m.location && m.location !== sess.playerLocation;
 
             let content = canonText;
+            if (m.role === 'dm' && freakyWorldMacros) {
+                const hasState = /<internal_states\b/i.test(content);
+                content = prepareFreakyPresetHistory(content, !latestFreakyWorldStateKept);
+                if (hasState) latestFreakyWorldStateKept = true;
+            }
+            if (!content) continue;
             if (isDistant) {
                 const msgLoc = world.locations.find(l => l.id === m.location);
                 const locLabel = msgLoc ? `[Loc: ${msgLoc.name}] ` : '';
@@ -24933,7 +24982,8 @@ ${modularMandate}
                     : delta.content;
                 if (content) {
                     fullText += content;
-                    textTarget.innerHTML = parseHordeMarkdown(fullText);
+                    textTarget.innerHTML = world.activePresetId === FREAKY_FRANKENSTEIN_5_4_ID
+                        ? renderFreakyPresetMessage(fullText) : parseHordeMarkdown(fullText);
                     const container = document.getElementById('world-messages-container');
                     container.scrollTop = container.scrollHeight;
                 }
@@ -31595,9 +31645,16 @@ function estimateWorldPromptTokens(world, preset) {
     });
     (world.factions || []).forEach(faction => parts.push(faction.name, faction.description, faction.goal));
     (world.relationships || []).forEach(relation => parts.push(relation.label, relation.reason));
-    (preset?.data?.prompts || []).forEach(prompt => {
-        if (prompt && prompt.enabled !== false) parts.push(prompt.content);
-    });
+    if (preset?.data?.prompts) {
+        const overrides = (!world.presetOverridesFor || world.presetOverridesFor === preset.id)
+            ? (world.presetOverrides || {}) : {};
+        getOrderedPresetPrompts(preset, false, true).forEach(prompt => {
+            const index = preset.data.prompts.indexOf(prompt);
+            const override = overrides[index] || {};
+            if (!isPresetPromptEnabled(preset, prompt, override) || skipFreakyWorldMechanic(preset, prompt)) return;
+            parts.push(override.prompt !== undefined ? override.prompt : (prompt.content || prompt.prompt || ''));
+        });
+    }
     const characters = parts.filter(Boolean).join(' ').length;
     return Math.ceil(characters / 3.2);
 }

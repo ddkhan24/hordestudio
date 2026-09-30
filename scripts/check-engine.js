@@ -3,7 +3,7 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const suites = [
-    'browser_runtime_audit',
+    'browser_runtime_audit', 'freaky_preset_integration_audit',
     'vh2_age_engine_audit',
     'human_package_audit', 'included_human_audit', 'bundled_humans_audit',
     'vh_character_export_audit', 'vh2_environment_population_audit', 'vh_export_participants_audit',

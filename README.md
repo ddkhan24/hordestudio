@@ -8,7 +8,7 @@
 
 Character cards & group rooms · Living Worlds · Virtual Humans 2.0 · Optional RPG rules · Multiplayer · Video Adventures
 
-[**Download v18.2.0**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.2.0) · [Release notes](docs/releases/v18.2.0.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
+[**Download v18.2.1**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.2.1) · [Release notes](docs/releases/v18.2.1.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
 
 Horde Studio brings your characters, stories and simulations into one local application. Import a character card and start a conversation, build a world with places and consequences, host a campaign with friends, or create a virtual human whose conversations draw on an ongoing life. Connect your own local models or cloud providers; the application does not include paid inference.
 
@@ -128,7 +128,7 @@ Horde Studio is free to run and its source is available in this repository. The 
 
 ## Quick start
 
-Download the [v18.2.0 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.2.0), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
+Download the [v18.2.1 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.2.1), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
 
 ### Requirements
 
@@ -246,6 +246,8 @@ Horde Studio supports portable project data and common roleplay formats.
 - SillyTavern PNG character cards
 - SillyTavern-style chat-completion preset JSON
 - Full Horde Studio backups
+
+The built-in preset list includes Freaky Frankenstein 5.4 Internal States. Select it in Character Studio for its full modular prompt, styled dialogue, graphics and collapsible state panels. Fine-Tune can turn individual modules on or off. A 32k context and roughly 4k output tokens are a practical starting point for the full default configuration; smaller local models may need fewer modules. It is optional in World Play, where only compatible prose, NPC-voice and presentation modules run; Horde's canonical clock, dice, inventory, quests and NPC state remain authoritative. Virtual Humans do not use this preset. Existing saves using 4 MAX keep that version until you choose 5.4; no preset is silently rewritten.
 
 ### World formats
 

@@ -2253,6 +2253,87 @@ input[type=number].form-input::-webkit-inner-spin-button {
   border-top: 1px dashed var(--border);
 }
 
+/* FF5.4's markup is rendered by Horde, not injected as model-authored HTML. */
+.ff-gfx {
+  margin: 12px 0;
+  max-width: min(100%, 580px);
+}
+.ff-gfx-sheet {
+  padding: 12px 14px;
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  background: var(--surface2);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.ff-gfx-terminal {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #101b16;
+  border-color: #3d815c;
+  color: #b5f0c3;
+}
+.ff-gfx-paper {
+  background: #f4e4d4;
+  border-color: #cfbba6;
+  color: #31251e;
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.16);
+}
+.ff-gfx-phone {
+  max-width: 350px;
+  border-radius: 20px;
+  background: #121212;
+  border-color: #414141;
+  color: #f6f6f6;
+}
+.ff-internal-states {
+  font-size: 0.82rem;
+  color: var(--text-2);
+}
+.ff-internal-states .rp-scaffold {
+  margin: 5px 0;
+  border-style: solid;
+}
+.ff-internal-states .rp-scaffold > summary {
+  color: var(--text-2);
+}
+.message-content .ff-internal-states br,
+.ff-internal-states br { margin-top: 2px; }
+.ff-theme-master > summary { color: #b8cafa !important; background: rgba(109, 142, 224, 0.13); }
+.ff-theme-purple { border-left: 3px solid #c4a7f4 !important; }
+.ff-theme-purple > summary { color: #c4a7f4 !important; }
+.ff-theme-teal { border-left: 3px solid #95e0d3 !important; }
+.ff-theme-teal > summary { color: #95e0d3 !important; }
+.ff-theme-orange { border-left: 3px solid #f9b884 !important; }
+.ff-theme-orange > summary { color: #f9b884 !important; }
+.ff-relationship-card {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  background: var(--surface2);
+}
+.ff-relationship-card > strong { display: block; margin-bottom: 8px; }
+.ff-relationship-meter { display: grid; grid-template-columns: 90px minmax(0, 1fr); align-items: center; gap: 8px; margin-top: 5px; font-variant-numeric: tabular-nums; }
+.ff-meter-track { display: block; height: 8px; border-radius: 8px; background: rgba(0, 0, 0, 0.3); overflow: hidden; }
+.ff-meter-track > span { display: block; height: 100%; border-radius: inherit; background: #95e0d3; }
+.ff-meter-sparks .ff-meter-track > span { background: #f3a6c8; }
+.ff-meter-grudge .ff-meter-track > span { background: #f08fa2; }
+.ff-dialogue { color: var(--ff-dialogue-color); }
+.ff-color-cyan { --ff-dialogue-color: #91d7e3; }
+.ff-color-pink { --ff-dialogue-color: #f3a6c8; }
+.ff-color-teal { --ff-dialogue-color: #95e0d3; }
+.ff-color-orange { --ff-dialogue-color: #f9b884; }
+.ff-color-gold { --ff-dialogue-color: #e9d190; }
+.ff-color-violet { --ff-dialogue-color: #c4a7f4; }
+.ff-color-salmon { --ff-dialogue-color: #f0a48f; }
+.ff-color-orchid { --ff-dialogue-color: #dfa3db; }
+.ff-color-yellow { --ff-dialogue-color: #eee18e; }
+.ff-color-plum { --ff-dialogue-color: #c397d1; }
+.ff-tone-shout { font-weight: 800; font-size: 1.08em; }
+.ff-tone-whisper { font-style: italic; font-size: 0.92em; opacity: 0.85; }
+.ff-tone-measured { font-weight: 650; letter-spacing: 0.015em; }
+.ff-tone-tremble { font-style: italic; letter-spacing: 0.055em; }
+
 /* Interactive inventory chips (world HUD) */
 .inv-chip {
   display: inline-flex;
