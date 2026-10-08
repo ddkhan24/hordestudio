@@ -163,11 +163,16 @@ def command(service,db,world_id,revision,state,body):
         if kind=='submit_photo':
             if item['status']!='captured':raise Conflict('Photo already submitted or finished; no automatic resubmission.')
             manifest=body.get('manifest',{})
-            if not isinstance(manifest,dict) or set(manifest)-{'promptPreview','referenceHashes','provider','model','style','direction'}:raise ValueError('Invalid photo manifest.')
+            if not isinstance(manifest,dict) or set(manifest)-{'promptPreview','referenceHashes','provider','model','style','direction','usedReferenceAssetIds'}:raise ValueError('Invalid photo manifest.')
             for k,limit in (('promptPreview',20000),('provider',100),('model',200),('style',100),('direction',4000)):
                 if k in manifest and (not isinstance(manifest[k],str) or len(manifest[k])>limit):raise ValueError('Invalid photo manifest field.')
             hashes=manifest.get('referenceHashes',[])
             if not isinstance(hashes,list) or len(hashes)>20 or any(not isinstance(h,str) or len(h)!=64 or any(ch not in '0123456789abcdef' for ch in h) for h in hashes):raise ValueError('Invalid photo reference hashes.')
+            used=manifest.get('usedReferenceAssetIds')
+            if used is not None:
+                available=item['photoContext'].get('referenceAssetIds',[])
+                if not isinstance(used,list) or len(used)>20 or any(not isinstance(ref,str) or ref not in available for ref in used) or len(set(used))!=len(used):raise ValueError('Invalid used photo references.')
+                item['photoContext']['referenceAssetIds']=used
             item['manifest']=manifest
             for k in ('style','direction'):
                 if k in manifest:item['photoContext'][k]=manifest[k]

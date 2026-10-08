@@ -47,6 +47,8 @@ const worldId = 'fantasy_life_seed_fallback_fixture';
         }, fixture);
         assert.equal(await page.locator('#world-session-zero-overlay').isVisible(), true);
         assert.equal(await page.locator('.session-origin-card.selected strong').textContent(), 'The Ranger');
+        assert.equal(await page.locator('#sz-life-seed-enabled').isChecked(),false,'paid enrichment must be opt-in');
+        await page.locator('#sz-life-seed-enabled').check();
         assert.match(await page.locator('#sz-life-seed-status').textContent(), /no model request or provider credits/i);
         await page.locator('#sz-begin-btn').click();
         await page.waitForFunction(() => getCurrentWorldSession()?.lifeSeed?.initialized === true, { timeout: 30000 });
@@ -113,6 +115,7 @@ const worldId = 'fantasy_life_seed_fallback_fixture';
             window.executeWorldTurn = async () => {};
             await createNewWorldSession();
         }, worldId);
+        await page.locator('#sz-life-seed-enabled').check();
         await page.locator('#sz-begin-btn').click();
         await page.waitForFunction(() => getCurrentWorldSession()?.lifeSeed?.initialized === true, { timeout: 30000 });
         const authored = await page.evaluate(async () => {
@@ -136,6 +139,21 @@ const worldId = 'fantasy_life_seed_fallback_fixture';
         { id: authored.id, worldId });
         assert.equal(authoredReload?.length, 1);
         assert.equal(authoredReload[0].relationship, 'former guide');
+        await page.evaluate(async id=>{
+            clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);
+            state.activeWorldId=id;window.__lifeSeedModelCalls=0;
+            window.requestTimelineLifePlan=async()=>{window.__lifeSeedModelCalls++;throw Error('Unexpected paid enrichment');};
+            window.executeWorldTurn=async()=>{};
+            await createNewWorldSession();
+        },worldId);
+        assert.equal(await page.locator('#sz-life-seed-enabled').isChecked(),false);
+        await page.locator('#sz-begin-btn').click();
+        await page.waitForFunction(()=>getCurrentWorldSession()?.setupComplete===true);
+        const standard=await page.evaluate(()=>({calls:window.__lifeSeedModelCalls,
+            bond:getCurrentWorldSession().playerIdentity.authoredRelationships[0],
+            seeded:!!getCurrentWorldSession().lifeSeed?.initialized}));
+        assert.equal(standard.calls,0);assert.equal(standard.seeded,false);
+        assert.equal(standard.bond.npcId,'mara','authored relationships remain available without enrichment');
         assert.deepEqual(errors, []);
         console.log('PASS fantasy outsider fallback and authored bond survive first-run setup, storage and reload');
     } finally {

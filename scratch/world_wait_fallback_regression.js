@@ -202,13 +202,13 @@ assert.match(freeze, /pendingWorldActionFeedback = waited\.actionResult/);
 assert.match(turn, /reason: 'explicit_wait_time_uncommitted'/);
 assert.match(turn, /routeAssertions\.forEach\(assertion => worldNarratedUncommittedRouteClosures\(world, sess, assertion\)/);
 assert.match(turn, /reason: 'narrated_route_closure_uncommitted'/);
-assert.match(turn, /receiptContext\.narrativeText = stripWorldLedgerDirective\(scrubNarrativeArtifacts\(fullText\)\);\s*\/\/ When the first response was completely empty/,
+assert.match(turn, /receiptContext\.narrativeText = stripWorldLedgerDirective\(scrubNarrativeArtifacts\(fullText\)\);[\s\S]{0,5000}\/\/ Legacy narrative-first turns may need a receipt after prose rescue/,
     'Narrative rescue must update receipt validation with its final prose.');
 assert.match(freeze, /else \{[\s\S]*?source: 'frozen_no_receipt'|else \{[\s\S]*?'frozen_no_receipt'/);
 assert.match(turn, /if \(frozenReceiptApplied\) \{\s*fullText = fallbackWaitApplied\s*\? worldUnverifiedWaitNotice\(world, sess, fallbackWaitApplied\)/);
 assert.match(turn, /const completedExplicitWait = explicitWait && !frozenReceiptApplied/);
 assert.match(turn, /Number\(sess\.bonusTimeMinutes\)[\s\S]*?- \(Number\(turnSnapshot\?\.session\?\.bonusTimeMinutes\) \|\| 0\) >= explicitWait/);
-assert.match(turn, /if \(fallbackWaitApplied \|\| completedExplicitWait\) \{[\s\S]*?sess\.bonusTimeMinutes = Math\.max\(0, \(sess\.bonusTimeMinutes \|\| 0\) - step\)/);
+assert.match(turn, /if \(fallbackWaitApplied \|\| completedExplicitWait \|\| completedSceneTime\) \{[\s\S]*?sess\.bonusTimeMinutes = Math\.max\(0, \(sess\.bonusTimeMinutes \|\| 0\) - step\)/);
 
 const waitAt = turn.indexOf('let waitPreserved = false;');
 const outfitAt = turn.indexOf('if (sess && committedOutfit', waitAt);

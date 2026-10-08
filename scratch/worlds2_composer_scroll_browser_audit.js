@@ -86,10 +86,9 @@ const root = path.resolve(__dirname, '..');
                 if (!String(url).includes('/chat/completions')) return nativeFetch(url, options);
                 modelCalls++;
                 await new Promise(resolve => setTimeout(resolve, 20));
-                const receipt = { summary: 'No lasting change.',
-                    scene: { player_location_id: 'room', player_location_changed: false,
-                        present_character_ids: [] },
-                    events: [], entity_updates: [], state_updates: {} };
+                const receipt = {protocol:'scene_draft_v2',narrative:[{id:'p1',text:'The room stays quiet.'}],
+                    actions:[{request:session.history.at(-1).text,kind:'observation',status:'answered',response_id:'p1'}],
+                    events:[],effects:{},speech:[],commitments:[]};
                 if (!JSON.parse(options.body || '{}').stream) return new Response(JSON.stringify({
                     choices: [{ message: { content: JSON.stringify(receipt) } }]
                 }), { status: 200, headers: { 'Content-Type': 'application/json' } });

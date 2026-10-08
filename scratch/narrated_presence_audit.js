@@ -107,6 +107,12 @@ test('an elsewhere marker vetoes the match', () => {
     });
 });
 
+test('a remote room prefix does not imply arrival in the player scene', () => {
+    assert.deepEqual(detect('In her office, Emily Carter freezes at the news.'), []);
+    assert.deepEqual(detect('In his room, Greg’s voice falters over the phone.'), []);
+    assert(detect('Emily Carter steps into the hallway.').includes('Emily Carter'));
+});
+
 test('a bare mention places nobody', () => {
     assert.deepEqual(detect('The window overlooks Harrington House across the road.'), [],
         'a place named after a character was read as that character');

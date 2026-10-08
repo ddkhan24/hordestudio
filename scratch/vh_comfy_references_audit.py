@@ -17,10 +17,18 @@ class References(unittest.TestCase):
   return env,calls,dict(workflow=workflow,prompt='test',references=['data:image/png;base64,aGVsbG8=']*2)
  def test_two_references(self):
   e,c,b=self.setup();self.assertEqual(e['comfy_generate'](b),'result');self.assertEqual(c[0]['prompt']['2']['inputs']['image'],'refs/a.png');self.assertEqual(c[0]['prompt']['3']['inputs']['image'],'b.png')
+ def test_one_input_faceid_request(self):
+  e,c,b=self.setup();b['mapping']={'referenceNode':'2'};b['references']=b['references'][:1];b['referenceSources']=['Character portrait / FaceID']
+  self.assertEqual(e['comfy_generate'](b),'result');self.assertEqual(e['http_request'].call_count,1);self.assertEqual(c[0]['prompt']['2']['inputs']['image'],'refs/a.png')
  def test_capacity_before_upload(self):
   e,c,b=self.setup();b['mapping']={'referenceNode':'2'}
-  with self.assertRaisesRegex(ValueError,'needs 2'):e['comfy_generate'](b)
+  b['referenceSources']=['Character portrait / FaceID','Previous generated photo from this conversation']
+  with self.assertRaisesRegex(ValueError,'1. Character portrait / FaceID; 2. Previous generated photo from this conversation'):e['comfy_generate'](b)
   e['http_request'].assert_not_called();self.assertEqual(c,[])
+ def test_untrusted_reference_label_is_not_echoed_as_an_image(self):
+  e,c,b=self.setup();b['mapping']={'referenceNode':'2'};b['referenceSources']=['data:image/png;base64,SECRET','Saved place: Bedroom']
+  with self.assertRaisesRegex(ValueError,'1. source not recorded; 2. Saved place: Bedroom') as caught:e['comfy_generate'](b)
+  self.assertNotIn('SECRET',str(caught.exception))
  def test_invalid_data_before_upload(self):
   e,c,b=self.setup();b['references'][1]='assets/photo.png'
   with self.assertRaisesRegex(ValueError,'base64'):e['comfy_generate'](b)

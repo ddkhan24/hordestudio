@@ -77,6 +77,8 @@ const output = { generatedAt: new Date().toISOString(), timing: results, labelEf
 (async () => {
     const ledger = [];
     const beatContext = { window: { HordeLabs: { taskCapabilities: () => [{ id: 'life_beat', available: true }] } },
+        getActiveCompanionTimeline: () => ({ id: 'probe-timeline' }),
+        getCompanion: () => c,
         companionSituationAt: () => ({ label: 'at home', availability: 'available' }),
         labsProposal: async () => ({ candidate: { beats: [{ anchorId: 'nonexistent', summary: 'Completed a trip to an unauthored place.' }] } }),
         livingId: (prefix, value) => `${prefix}:${value}`, normalizeCompanionLifeEvent: raw => raw,
@@ -84,10 +86,11 @@ const output = { generatedAt: new Date().toISOString(), timing: results, labelEf
     vm.createContext(beatContext);
     vm.runInContext(functionSource('processCompanionLabsLifeBeat'), beatContext);
     const c = { id: 'probe', lifeProfile: { initializedAt: start - 1, weeklySchedule: [], places: [], socialCircle: [] },
-        lifeRuntime: { lastLabsBeatAt: 0 }, lifeEvents: [] };
+        lifeRuntime: { lastLabsBeatAt: 0, simulationLedger: [] }, lifeEvents: [] };
     await beatContext.processCompanionLabsLifeBeat(c, start);
-    output.ungroundedLifeBeat = { acceptedLifeEvents: c.lifeEvents.length,
-        acceptedAsCertain: ledger[0]?.certainty, summary: ledger[0]?.summary };
+    output.ungroundedLifeBeat = { committedLifeEvents: c.lifeEvents.length,
+        proposalLedgerEntries: c.lifeRuntime.simulationLedger.length,
+        summary: c.lifeRuntime.simulationLedger[0]?.summary };
     fs.writeFileSync('docs/vh-life-sim-audit-results-2026-09-07.json', JSON.stringify(output, null, 2) + '\n');
     console.log(JSON.stringify(output, null, 2));
 })().catch(error => { console.error(error); process.exitCode = 1; });

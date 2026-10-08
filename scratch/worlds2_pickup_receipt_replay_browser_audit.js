@@ -33,7 +33,7 @@ const root = path.resolve(__dirname, '..');
                 model: 'offline/model', contextSize: 32768, maxTokens: 2048,
                 dmPrompt: 'A flooded marsh causeway.', intro: '', startLocationId: 'causeway',
                 locations: [{ id: 'causeway', name: 'Marsh Causeway', description: 'Wet shale.', exits: [] }],
-                entities: [], kernel: { enabled: true, memoryMode: 'ledger', repairMode: 'adaptive' },
+                entities: [], kernel: { enabled: true, memoryMode: 'ledger', repairMode: 'adaptive', sceneDrafts: false }, // Recorded legacy receipt.
                 hudConfig: { showClock: false, showQuests: false, showLedger: true, stats: [] },
                 gameRules: { profileId: 'adventure', modules: {
                     stats: false, health: false, conditions: false, inventory: true,
@@ -94,10 +94,14 @@ const root = path.resolve(__dirname, '..');
             window.fetch = async (url, options = {}) => {
                 if (!String(url).includes('/chat/completions')) return realFetch(url, options);
                 const body = JSON.parse(options.body || '{}');
+                if (body.messages?.some(message => String(message.content).includes('[AUTHORITATIVE COMMITTED TURN]')))
+                    return new Response(JSON.stringify({ choices: [{ message: { content: narrative } }] }),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } });
                 if (body.stream) {
                     const chunk = { choices: [{ delta: { content: narrative, tool_calls: [{ index: 0,
                         id: 'live-replay-tool', type: 'function', function: {
-                            name: 'commit_world_turn', arguments: JSON.stringify(main)
+                            name: 'commit_world_turn', arguments: JSON.stringify({ ...main,
+                                action_resolution: { kind: 'physical', status: 'resolved', outcome: narrative } })
                         } }] }, finish_reason: 'tool_calls' }] };
                     return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`,
                         { status: 200, headers: { 'Content-Type': 'text/event-stream' } });

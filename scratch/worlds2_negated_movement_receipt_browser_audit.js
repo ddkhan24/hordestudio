@@ -45,6 +45,7 @@ const host = 'world-negated-movement-receipt.test';
             };
             const world = { ...rawWorld, id: 'world_negated_movement_receipt',
                 model: 'offline/model', contextSize: 32768, maxTokens: 2048 };
+            world.kernel={...world.kernel,sceneDrafts:false}; // Replay the captured legacy provider contract.
             state.worlds = [world];
             state.worldInstances = { [world.id]: { sessions: [], activeSessionId: null } };
             state.activeWorldId = world.id;

@@ -476,6 +476,11 @@ class McpBridgeAudit(unittest.TestCase):
             self.assertEqual(content_type, "text/javascript")
             self.assertTrue((bridge.APP_DIR / filename).is_file())
 
+    def test_world_model_transport_is_served_by_local_bridge(self):
+        filename, content_type = bridge.STATIC_FILES["/worlds/model-client.js"]
+        self.assertEqual(content_type, "text/javascript")
+        self.assertTrue((bridge.APP_DIR / filename).is_file())
+
     @mock.patch.object(bridge, "http_request")
     @mock.patch.object(bridge, "ThreadingHTTPServer")
     def test_relaunch_reuses_an_existing_horde_bridge(self, server, request):

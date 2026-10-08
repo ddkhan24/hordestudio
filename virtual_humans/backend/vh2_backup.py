@@ -5,6 +5,7 @@ TABLES=('events','event_landmarks','photo_jobs','photo_assets','transcript_messa
 MAX_RAW=2*1024*1024*1024
 MAX_COMPRESSED=256*1024*1024
 MAX_TRANSFER_ARCHIVE=2*1024*1024*1024
+MAX_WORKSPACE_CHECKPOINT_UPLOAD=0xffffffff
 MAX_TRANSFER_MANIFEST=256*1024*1024
 MAX_TRANSFER_ASSETS=10000
 MAX_CHARACTER_UPLOAD=MAX_COMPRESSED+64*1024
@@ -396,6 +397,97 @@ def restore_workspace(service,archives):
    def connect(self):yield db
   proxy=TransactionService()
   return {'worlds':[restore(proxy,data) for data in decoded]}
+
+def restore_checkpoint_workspace(service,source):
+ """Restore a verified batch of compact life checkpoints in one transaction.
+
+ The outer ZIP is STORE-only and bounded by the browser's standard ZIP limit.
+ Each inner checkpoint is independently authenticated before any database
+ mutation; one failed or conflicting life rolls back the entire batch.
+ """
+ import tempfile
+ from contextlib import ExitStack,contextmanager
+ from .vh2_runtime import Conflict
+ try:
+  # A browser IndexedDB commit may fail after the service transaction commits.
+  # Hash the exact package so a retry can recover its original receipt, but
+  # never mistake a different backup for the one already imported.
+  opened=_archive_source(source);package_digest=hashlib.sha256();package_bytes=0
+  def hash_stream(stream):
+   nonlocal package_bytes
+   while True:
+    chunk=stream.read(1024*1024)
+    if not chunk:break
+    package_bytes+=len(chunk)
+    if package_bytes>MAX_WORKSPACE_CHECKPOINT_UPLOAD:raise ValueError()
+    package_digest.update(chunk)
+  if hasattr(opened,'read'):
+   hash_stream(opened);opened.seek(0)
+  else:
+   with open(opened,'rb') as stream:hash_stream(stream)
+  fingerprint=package_digest.hexdigest()
+  with ExitStack() as stack:
+   package=stack.enter_context(zipfile.ZipFile(_archive_source(source)))
+   infos=package.infolist();names=[info.filename for info in infos]
+   if not 2<=len(infos)<=101 or len(names)!=len(set(names)):raise ValueError()
+   if any(info.compress_type!=zipfile.ZIP_STORED or info.flag_bits&1 or info.file_size!=info.compress_size for info in infos):raise ValueError()
+   manifest=package.getinfo('manifest.json')
+   if manifest.file_size>64*1024:raise ValueError()
+   body=json.loads(package.read(manifest))
+   if not isinstance(body,dict) or set(body)!={'format','version','archives'} or body['format']!='horde-vh2-workspace-checkpoints' or body['version']!=1:raise ValueError()
+   archives=body['archives']
+   if not isinstance(archives,list) or not 1<=len(archives)<=100 or len(archives)!=len(infos)-1:raise ValueError()
+   expected={'manifest.json'};world_ids=set();ordered_world_ids=[];total=manifest.file_size;prepared=[]
+   for index,entry in enumerate(archives):
+    path='lives/'+str(index).zfill(4)+'.zip'
+    if not isinstance(entry,dict) or set(entry)!={'worldId','path'} or entry['path']!=path:raise ValueError()
+    world_id=entry['worldId']
+    if not isinstance(world_id,str) or not 1<=len(world_id)<=100 or world_id in world_ids:raise ValueError()
+    world_ids.add(world_id);ordered_world_ids.append(world_id);expected.add(path);info=package.getinfo(path)
+    if not 0<info.file_size<=MAX_TRANSFER_ARCHIVE:raise ValueError()
+    total+=info.file_size
+    if total>MAX_WORKSPACE_CHECKPOINT_UPLOAD:raise ValueError()
+    target=stack.enter_context(tempfile.TemporaryFile())
+    with package.open(info) as stream:
+     remaining=info.file_size
+     while remaining:
+      chunk=stream.read(min(1024*1024,remaining))
+      if not chunk:raise ValueError()
+      target.write(chunk);remaining-=len(chunk)
+    target.seek(0)
+    metadata=inspect_world_archive(target)
+    if metadata['archiveMode']!='checkpoint' or metadata['worldId']!=world_id:raise ValueError()
+    prepared.append(target)
+   if set(names)!=expected:raise ValueError()
+   with service.connect() as db:
+    db.execute('BEGIN IMMEDIATE')
+    db.execute('''CREATE TABLE IF NOT EXISTS vh2_workspace_restore_receipts (
+     archive_sha256 TEXT PRIMARY KEY, receipt TEXT NOT NULL, state_hashes TEXT NOT NULL, created_at INTEGER NOT NULL)''')
+    previous=db.execute('SELECT receipt,state_hashes FROM vh2_workspace_restore_receipts WHERE archive_sha256=?',(fingerprint,)).fetchone()
+    if previous:
+     saved=json.loads(previous['receipt']);state_hashes=json.loads(previous['state_hashes'])
+     saved_worlds=saved.get('worlds') if isinstance(saved,dict) else None
+     if (not isinstance(saved_worlds,list) or any(not isinstance(item,dict) or type(item.get('revision')) is not int for item in saved_worlds)
+         or [item.get('worldId') for item in saved_worlds]!=ordered_world_ids or not isinstance(state_hashes,dict)):
+      raise Conflict('This backup receipt is damaged. No existing Virtual Human life was changed.')
+     for item in saved_worlds:
+      world_id=item['worldId'];row=db.execute('SELECT revision,state FROM worlds WHERE id=?',(world_id,)).fetchone()
+      if not row or row['revision']!=item['revision'] or hashlib.sha256(row['state'].encode()).hexdigest()!=state_hashes.get(world_id):
+       raise Conflict('A Virtual Human life has changed since this backup was restored. No existing life was overwritten.')
+     return {**saved,'alreadyRestored':True}
+    class TransactionService:
+     def __getattr__(self,name):return getattr(service,name)
+     @contextmanager
+     def connect(self):yield db
+    proxy=TransactionService()
+    restored={'worlds':[restore(proxy,archive) for archive in prepared]}
+    state_hashes={item['worldId']:hashlib.sha256(db.execute('SELECT state FROM worlds WHERE id=?',(item['worldId'],)).fetchone()['state'].encode()).hexdigest() for item in restored['worlds']}
+    db.execute('INSERT INTO vh2_workspace_restore_receipts VALUES (?,?,?,?)',
+     (fingerprint,json.dumps(restored,separators=(',',':')),json.dumps(state_hashes,separators=(',',':')),service.clock()))
+    return {**restored,'alreadyRestored':False}
+ except Conflict:raise
+ except (ValueError,TypeError,KeyError,EOFError,OSError,json.JSONDecodeError,zipfile.BadZipFile,RuntimeError):
+  raise ValueError('Invalid, damaged or oversized VH2 workspace checkpoint package.') from None
 
 def read_character_package(source):
  """Read a bounded binary ZIP upload; never extract paths or inflate ZIP media."""

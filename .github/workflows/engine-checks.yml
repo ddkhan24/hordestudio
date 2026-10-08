@@ -31,6 +31,7 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Verify browser transactions and gameplay wiring
         run: |
+          node scripts/check-worlds-browser.js
           node scratch/browser_storage_transaction_audit.js
           node scratch/browser_engine_smoke_audit.js
           node scratch/world_insights_browser_audit.js

@@ -155,12 +155,27 @@ The gate remains shut, the heavy bars immovable as you search for the internal t
                     const imperative = phase.startsWith('imperative_');
                     const exactProbe4 = phase === 'probe4';
                     const exactProbe5 = phase === 'probe5';
+                    const toolOnlyRejectedCheck = phase === 'tool_only_rejected_check';
                     const delta = {
-                        content: phase === 'late' ? '' : statFirst ? statFirstNarrative
+                        content: phase === 'late' || toolOnlyRejectedCheck ? '' : statFirst ? statFirstNarrative
                             : imperative ? imperativeNarrative
                                 : exactProbe4 ? probe4Narrative
                                     : exactProbe5 ? probe5Narrative : narrative,
-                        tool_calls: statFirst || imperative ? [] : [{ index: 0, id: `${phase}-receipt`, type: 'function',
+                        tool_calls: statFirst || imperative ? [] : toolOnlyRejectedCheck ? [
+                            { index: 0, id: 'bad-move', type: 'function', function: {
+                                name: 'commit_world_turn', arguments: JSON.stringify({
+                                    scene: null,
+                                    events: [{ type: 'movement', actor_id: 'player', status: 'completed',
+                                        to_location_id: 'gate' }], entity_updates: []
+                                }) } },
+                            { index: 1, id: 'bad-check', type: 'function', function: {
+                                name: 'commit_world_turn', arguments: JSON.stringify({
+                                    scene: { player_location_id: 'gate', player_location_changed: false,
+                                        present_character_ids: [] }, events: [], entity_updates: [],
+                                    checks: [{ label: 'Pick the gate lock', difficulty: 11,
+                                        stat_id_modifier: 'wits', on_successy: {} }]
+                                }) } }
+                        ] : [{ index: 0, id: `${phase}-receipt`, type: 'function',
                             function: { name: 'commit_world_turn',
                                 arguments: JSON.stringify(exactProbe4 ? probe4MainReceipt
                                     : exactProbe5 ? probe5MainReceipt : noCheckReceipt) } }]
@@ -201,6 +216,7 @@ The gate remains shut, the heavy bars immovable as you search for the internal t
                 const world = structuredClone(source);
                 world.id = `world_check_${name}_fixture`;
                 world.model = 'offline/fixture';
+                world.kernel = { ...world.kernel, resolveFirst: false, sceneDrafts: false }; // legacy provider-repair fixture
                 world.contextSize = 32768;
                 world.maxTokens = 2048;
                 world.startLocationId = 'gate';
@@ -252,10 +268,12 @@ The gate remains shut, the heavy bars immovable as you search for the internal t
             const imperativeDisabled = await play('imperative_disabled', 'automatic');
             const probe4 = await play('probe4', 'player');
             const probe5 = await play('probe5', 'player');
+            const toolOnlyRejectedCheck = await play('tool_only_rejected_check', 'player');
             window.fetch = realFetch;
             return { player, automatic, failed, late, disabled,
                 statValid, statFailed, statDisabled,
-                imperativeValid, imperativeFailed, imperativeDisabled, probe4, probe5, calls,
+                imperativeValid, imperativeFailed, imperativeDisabled, probe4, probe5,
+                toolOnlyRejectedCheck, calls,
                 promptContracts,
                 parserMatchesLiveText: worldNarrativeRequestsCheck(narrative),
                 stripped: stripWorldCheckScaffolding(narrative),
@@ -333,16 +351,22 @@ The gate remains shut, the heavy bars immovable as you search for the internal t
         assert.deepEqual(result.probe4.saved?.sessions?.[0]?.pendingChecks?.[0]?.on_success,
             { exit_unlocks: [{ from_location_id: 'gate', to_location_id: 'cellar' }] });
         assert.doesNotMatch(result.probe4.text, /Check Required|improvised wire.*item/i);
-        assert.equal(result.probe5.source, 'tool_call',
-            'a valid pending check must survive a malformed, noncommitting attempt event');
-        assert.equal(result.probe5.pending, 1);
+        assert.equal(result.probe5.source, 'frozen_no_receipt',
+            'unsupported check outcome keys must not be silently discarded from a pending roll');
+        assert.equal(result.probe5.pending, 0);
         assert.equal(result.probe5.unlocked, false);
-        assert.deepEqual(result.probe5.audit, [],
-            'the accepted pending check must not leave a rejected mutation');
+        assert(result.probe5.audit.includes('missing_mandatory_receipt'));
         assert(result.probe5.inventory.includes('torn courier strap'));
         assert(!result.probe5.inventory.includes('improvised wire'));
-        assert(!result.calls.includes('probe5:repair'),
-            'the valid root check should not require an extra model repair');
+        assert(result.calls.includes('probe5:repair'),
+            'a malformed check branch needs a repair attempt before it can become canon');
+        assert.equal(result.toolOnlyRejectedCheck.source, 'receipt_repair',
+            `Rejected multi-tool check proposals must repair before any prose is requested: ${JSON.stringify({ turn: result.toolOnlyRejectedCheck, calls: result.calls.filter(call => call.startsWith('tool_only_rejected_check:')) })}`);
+        assert.equal(result.toolOnlyRejectedCheck.pending, 1);
+        assert.equal(result.toolOnlyRejectedCheck.unlocked, false);
+        assert.deepEqual(result.calls.filter(call => call.startsWith('tool_only_rejected_check:')),
+            ['tool_only_rejected_check:main', 'tool_only_rejected_check:repair',
+                'tool_only_rejected_check:follow-up']);
         assert(result.calls.includes('player:repair'));
         assert(result.calls.includes('automatic:repair'));
         assert(result.calls.includes('automatic:follow-up'));

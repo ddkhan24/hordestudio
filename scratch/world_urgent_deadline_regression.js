@@ -261,6 +261,93 @@ assert.equal(final4Recovered.reportedWarning, true);
 assert.equal(context.recoverNarratedUrgentDeadline(hostedWorld,
     final4Clock, final4Promise, final4Request)?.id, final4Recovered.id,
     'Replaying the assent must not duplicate the deadline.');
+const liveCoalesceClock = session('live_same_turn_turn_clock');
+liveCoalesceClock.turnCount = 3;
+liveCoalesceClock.entityStates.iven = { location: 'home', status: 'active' };
+liveCoalesceClock.worldClock = { absoluteMinutes: 1080, turnCount: 3, bonusTimeMinutes: 0 };
+const turnClockUpdate = { id: 'dawn_search_party', title: "Captain Iven's Search Party",
+    status: 'scheduled', urgent: true, due_in_turns: 10 };
+context.processStructuredActions({ world_events: [turnClockUpdate] }, hostedWorld,
+    liveCoalesceClock, { deferFeedback: true });
+liveCoalesceClock.worldTurnReceipts = [{ turn: 3,
+    receipt: { state_updates: { world_events: [turnClockUpdate] } } }];
+const livePlayerRequest = 'I ask him to organize a search at first light if I am not back.';
+const liveNpcPromise = `Captain Iven: "Fair enough. If you aren't back by the first light of tomorrow's sun, I'll gather the watch and we'll scour the causeway."`;
+const coalesced = context.recoverNarratedUrgentDeadline(hostedWorld, liveCoalesceClock,
+    liveNpcPromise, livePlayerRequest);
+assert.equal(coalesced?.id, 'dawn_search_party',
+    'The accepted turn-count event and its spoken first-light promise must become one deadline.');
+assert.equal(liveCoalesceClock.scheduledEvents.length, 1);
+assert.equal(coalesced.dueTurn, null);
+assert.equal(coalesced.dueMinute, 1800);
+assert.equal(coalesced.reportedWarning, true);
+assert.equal(coalesced.playerAbsentCondition?.promisorId, 'iven');
+assert.equal(context.recoverNarratedUrgentDeadline(hostedWorld, liveCoalesceClock,
+    liveNpcPromise, livePlayerRequest)?.id, coalesced.id);
+assert.equal(liveCoalesceClock.scheduledEvents.length, 1);
+const sunriseReply = `Captain Iven: "If the sun rises tomorrow and you haven't returned to this spot, I'll take four of my best and ride for the tower."`;
+const sunriseRequest = 'I ask Captain Iven to send a search party at first light if I am not back.';
+const sunriseClock = session('requested_sunrise_synonym');
+sunriseClock.entityStates.iven = { location: 'home', status: 'active' };
+sunriseClock.worldClock = { absoluteMinutes: 1080, turnCount: 1, bonusTimeMinutes: 0 };
+const sunrisePromise = context.recoverNarratedUrgentDeadline(hostedWorld, sunriseClock,
+    sunriseReply, sunriseRequest);
+assert.equal(sunrisePromise?.dueMinute, 1800,
+    'A named NPC accepting the requested first-light search as sunrise tomorrow must create the deadline.');
+assert.equal(sunrisePromise.playerAbsentCondition?.promisorId, 'iven');
+const hereReply = `Captain Iven: "First light. Fair. If the sun hits the well and you aren't standing here, I'll pull every able body from the inn and push into that mire."`;
+const hereClock = session('request_if_not_standing_here');
+hereClock.entityStates.iven = { location: 'home', status: 'active' };
+hereClock.worldClock = { absoluteMinutes: 1080, turnCount: 1, bonusTimeMinutes: 0 };
+assert.equal(context.recoverNarratedUrgentDeadline(hostedWorld, hereClock,
+    hereReply, sunriseRequest)?.dueMinute, 1800,
+    'A speaker may express the same requested absence as not standing at the meeting place.');
+const pushClock = session('requested_search_as_push');
+pushClock.entityStates.iven = { location: 'home', status: 'active' };
+pushClock.worldClock = { absoluteMinutes: 1080, turnCount: 1, bonusTimeMinutes: 0 };
+const pushUpdate = { id: 'first_light_search', title: 'First Light Search Party',
+    status: 'scheduled', urgent: true, due_in_turns: 10 };
+context.processStructuredActions({ world_events: [pushUpdate] }, hostedWorld,
+    pushClock, { deferFeedback: true });
+pushClock.worldTurnReceipts = [{ turn: 1,
+    receipt: { state_updates: { world_events: [pushUpdate] } } }];
+const pushReply = `Captain Iven: "I told you, Ranger. First light. I'll be the one waking them up. If you aren't back to tell me why the well tastes like salt, I'll lead the push myself. You have my word on it."`;
+const pushRecovered = context.recoverNarratedUrgentDeadline(hostedWorld, pushClock,
+    pushReply, sunriseRequest);
+assert.equal(pushRecovered?.id, 'first_light_search');
+assert.equal(pushClock.scheduledEvents.length, 1);
+assert.equal(pushRecovered.dueTurn, null);
+assert.equal(pushRecovered.dueMinute, 1800);
+assert.equal(pushRecovered.playerAbsentCondition?.promisorId, 'iven',
+    'An accepted model event must inherit the witnessed conditional promise, even when called a push.');
+const confirmationRequest = 'Please send your people at first light if I am not back. Does he agree?';
+const confirmationReply = `Captain Iven: "Fine. The agreement stands. First light, I send the party."`;
+const confirmationClock = session('conditional_request_confirmed_next_turn');
+confirmationClock.entityStates.iven = { location: 'home', status: 'active' };
+confirmationClock.worldClock = { absoluteMinutes: 1080, turnCount: 1, bonusTimeMinutes: 0 };
+assert.equal(context.recoverNarratedUrgentDeadline(hostedWorld, confirmationClock,
+    confirmationReply, confirmationRequest)?.dueMinute, 1800,
+    'An NPC can confirm the player\'s conditional first-light request without repeating the condition.');
+const refusedConfirmation = session('conditional_request_refused_next_turn');
+refusedConfirmation.entityStates.iven = { location: 'home', status: 'active' };
+refusedConfirmation.worldClock = { absoluteMinutes: 1080, turnCount: 1, bonusTimeMinutes: 0 };
+assert.equal(context.recoverNarratedUrgentDeadline(hostedWorld, refusedConfirmation,
+    `Captain Iven: "No. First light, I won't send the party."`, confirmationRequest), null);
+for (const [index, reply] of [
+    `Captain Iven: "If the sun rises tomorrow and you haven't returned, I won't take my men into the marsh."`,
+    `Captain Iven: "If the sun rises tomorrow and you haven't returned, I might take four of my best."`
+].entries()) {
+    const control = session(`sunrise_false_promise_${index}`);
+    control.entityStates.iven = { location: 'home', status: 'active' };
+    control.worldClock = { absoluteMinutes: 1080, turnCount: 1, bonusTimeMinutes: 0 };
+    assert.equal(context.recoverNarratedUrgentDeadline(hostedWorld, control,
+        reply, sunriseRequest), null, 'Refusal or speculation may not become a search-party commitment.');
+}
+const sunriseNoRequest = session('sunrise_without_player_request');
+sunriseNoRequest.entityStates.iven = { location: 'home', status: 'active' };
+sunriseNoRequest.worldClock = { absoluteMinutes: 1080, turnCount: 1, bonusTimeMinutes: 0 };
+assert.equal(context.recoverNarratedUrgentDeadline(hostedWorld, sunriseNoRequest,
+    sunriseReply), null, 'A poetic sunrise line without the player request is not a clock authority.');
 const falseAssents = [
     `Captain Iven: "First light? No. If you aren't back, I won't pull men into the marsh."`,
     `Captain Iven: "First light, perhaps. If you aren't back, I could pull men into the marsh."`,

@@ -31,7 +31,7 @@ const root = path.resolve(__dirname, '..');
                 dmPrompt: 'Narrate the scene.', intro: '', startLocationId: 'room',
                 locations: [{ id: 'room', name: 'Room', description: 'A quiet room.', exits: [] }],
                 entities: [], hudConfig: { showClock: true, showQuests: false, showLedger: true, stats: [] },
-                kernel: { enabled: true, memoryMode: 'ledger' } };
+                kernel: { enabled: true, memoryMode: 'ledger', resolveFirst: false, sceneDrafts: false } };
             state.worlds = [world];
             state.worldInstances = { telemetry_fixture: { sessions: [], activeSessionId: null } };
             state.activeWorldId = world.id;

@@ -35,6 +35,7 @@ const host = 'world-introduced-arrival.test';
             await Promise.all([saveStateInFlight, worldSaveInFlight].filter(Boolean));
             const world = { ...rawWorld, id: 'introduced_arrival_replay', model: 'offline/model',
                 contextSize: 32768, maxTokens: 2048 };
+            world.kernel={...world.kernel,sceneDrafts:false}; // Recorded legacy repair protocol.
             state.worlds = [world];
             state.worldInstances = { [world.id]: { sessions: [], activeSessionId: null } };
             state.activeWorldId = world.id;
@@ -64,6 +65,7 @@ const host = 'world-introduced-arrival.test';
             // Captured repair includes a movement from the causeway even though
             // npc_introduced places the new actor directly in the current scene.
             const repair = {
+                action_resolution: { kind: 'observation', status: 'resolved', outcome: 'Six regulars arrive, and their leader questions Captain Iven.' },
                 scene: { player_location_id: 'square', player_location_changed: false,
                     present_character_ids: ['iven', 'lead_rider'] },
                 events: [{ type: 'movement', status: 'completed', actor_id: 'lead_rider',
@@ -84,6 +86,9 @@ const host = 'world-introduced-arrival.test';
             window.fetch = async (url, options = {}) => {
                 if (!String(url).includes('/chat/completions')) return realFetch(url, options);
                 const body = JSON.parse(options.body || '{}');
+                if (body.messages?.some(message => String(message.content).includes('[AUTHORITATIVE COMMITTED TURN]')))
+                    return new Response(JSON.stringify({ choices: [{ message: { content: repair.action_resolution.outcome + '\n' + narrative } }] }),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } });
                 if (body.stream) {
                     mainCalls++;
                     const chunk = { choices: [{ delta: { content: narrative, tool_calls: [{ index: 0,
@@ -117,7 +122,7 @@ const host = 'world-introduced-arrival.test';
                 savedLeaderState: savedInstance?.sessions?.find(item => item.id === sess.id)?.entityStates?.lead_rider || null };
         }, fixture);
         assert.equal(beforeReload.mainCalls, 1);
-        assert.equal(beforeReload.repairCalls, 1);
+        assert.equal(beforeReload.repairCalls, 1, JSON.stringify(beforeReload));
         assert.equal(beforeReload.source, 'receipt_repair', JSON.stringify(beforeReload));
         assert.equal(beforeReload.playerLocation, beforeReload.startLocation);
         assert.equal(beforeReload.turnCount, beforeReload.startTurn + 1);

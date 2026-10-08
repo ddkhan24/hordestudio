@@ -2,6 +2,9 @@ async function revealSummary(locator){const title=await locator.textContent();aw
 'use strict';
 const {spawn}=require('node:child_process'),assert=require('node:assert/strict');
 const { chromium, launchOptions } = require('./browser_runtime').browserRuntime();
+globalThis.HordeHumanPackage=require('../human-package.js');
+const Archive=require('../large-archive.js');
+globalThis.FileReader=class{readAsDataURL(blob){blob.arrayBuffer().then(bytes=>{this.result=`data:${blob.type};base64,${Buffer.from(bytes).toString('base64')}`;this.onload?.();},error=>{this.error=error;this.onerror?.();});}};
 (async()=>{
  const server=spawn('python3',['scratch/vh2_browser_server.py'],{stdio:['ignore','pipe','pipe']});let browser,recoveryServer;
  try{
@@ -25,8 +28,9 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.locator('[data-start-persistent]').click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex')?.vh2?.running===true);
   const w=await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.worldId);
-  assert(await page.locator('#companion-reset-timeline-btn').isDisabled());
-  assert(await page.locator('#companion-fork-timeline-btn').isDisabled());
+  assert(await page.locator('#companion-reset-timeline-btn').isEnabled());
+  assert.equal(await page.locator('#companion-reset-timeline-btn').textContent(),'Reset chat & relationship');
+  assert(await page.locator('#companion-fork-timeline-btn').isHidden());
   const baseline=await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').runtime.humanDynamics.lastUpdated);
   await page.evaluate(()=>{renderCompanionThread();persistCompanionRuntime(getCompanion('integrated-alex'));});
   assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').runtime.humanDynamics.lastUpdated),baseline,'rendering never advances service-owned needs');
@@ -81,7 +85,8 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.evaluate(()=>vh2Poll(getCompanion('integrated-alex')));
   await page.evaluate(()=>vhOpenWorkspace('recovery'));await page.getByRole('button',{name:'Upgrade timeline engine (creates backup)',exact:true}).click();
   await page.waitForFunction(()=>!!getActiveCompanionTimeline('integrated-alex').vh2.checkpointId&&!getActiveCompanionTimeline('integrated-alex').vh2.requiresMigration);
-  assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.running),false);
+  assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.running),true,'kernel upgrade preserves the running state');
+  await page.evaluate(async()=>{const t=getActiveCompanionTimeline('integrated-alex');await vhUiCommand(t,'set_running',{running:false});});
   assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.psychology.learningRate),.35);
   const longRoundTrip=await page.evaluate(()=>{const c=getCompanion('integrated-alex'),t=getActiveCompanionTimeline(c.id);const copy=JSON.parse(JSON.stringify(t));copy.messages=[{id:'long-reply',role:'companion',text:'a'.repeat(7000),timestamp:Date.now()}];return normalizeCompanionTimeline(copy,c).messages[0].text.length;});
   assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.conversationAppraisal.maxEmotionChange),2);
@@ -97,6 +102,7 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.evaluate(()=>vhOpenPanel('Photo capture preview'));
   await page.locator('[data-vh2-photo-scene]').fill('A relaxed close-up');
   await page.getByRole('button',{name:'Review current moment',exact:true}).click();
+  await page.locator('[data-submit-render]').waitFor({timeout:5000}).catch(async()=>{throw Error('Photo review did not open: '+JSON.stringify(await page.evaluate(()=>({review:document.getElementById('vh-photo-review')?.textContent,toasts:[...document.querySelectorAll('.toast')].map(t=>t.textContent),photos:getActiveCompanionTimeline('integrated-alex').vh2.photos,error:getActiveCompanionTimeline('integrated-alex').vh2.error}))));});
   await page.locator('[data-submit-render]').click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.photos?.[0]?.status==='delivered');await page.locator('#vh-photo-review [data-close]').click();await page.evaluate(()=>switchView('companionChat'));
   assert.equal(await page.evaluate(()=>window.photoRequests.length),1);
@@ -137,18 +143,20 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await publishing.getByLabel('Post caption',{exact:true}).fill('A saved moment');
   await publishing.getByRole('button',{name:'Publish to simulated profile',exact:true}).click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.socialPosts?.length===1);
-  await page.evaluate(()=>{switchView('companionChat');renderCompanionSocialPanel(getCompanion('integrated-alex'));});
-  await social.getByRole('button',{name:'♡ Like',exact:true}).click();
+  await page.evaluate(()=>{switchView('companionChat');const c=getCompanion('integrated-alex');companionSocialTab='feed';companionSocialPanelVisibility.set(companionSocialPanelKey(c),true);renderCompanionSocialPanel(c);});
+  await social.getByRole('button',{name:'Like post',exact:true}).click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.socialPosts[0].likedByPlayer);
-  await social.getByLabel('Comment on post',{exact:true}).fill('Nice photo');
-  await social.getByRole('button',{name:'Comment',exact:true}).click();
+  await social.getByRole('button',{name:'Comment on post',exact:true}).click();
+  await social.locator('.vh-feed-comments[open] input').fill('Nice photo');
+  await social.locator('.vh-feed-comments[open] form button').click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.socialPosts[0].comments.length===1);
   await page.reload();await page.waitForFunction(()=>typeof companionAgencyTimer!=='undefined'&&!!companionAgencyTimer);
   await page.evaluate(base=>{clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);mcpBridgeBase=()=>base;switchView('companionChat');const c=getCompanion('integrated-alex');companionSocialPanelVisibility.set(companionSocialPanelKey(c),true);renderCompanionSocialPanel(c);},base);
   assert.equal(await social.locator('article').count(),1);
-  assert.equal(await social.getByText('You: Nice photo',{exact:true}).count(),1);
-  await page.evaluate(()=>vhOpenWorkspace('media'));await publishing.getByRole('button',{name:'Withdraw post',exact:true}).click();
+  assert.match(await social.locator('.vh-feed-comments p').first().textContent(),/Nice photo/);
+  await page.evaluate(()=>vhOpenWorkspace('media'));await publishing.locator('.vh-feed-post-info > summary').click();await publishing.getByRole('button',{name:'Withdraw post',exact:true}).click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.socialPosts[0].status==='withdrawn');
+  await page.evaluate(()=>{switchView('companionChat');const c=getCompanion('integrated-alex');companionSocialTab='feed';companionSocialPanelVisibility.set(companionSocialPanelKey(c),true);renderCompanionSocialPanel(c);});
   await page.waitForFunction(()=>document.querySelectorAll('#companion-social-content article').length===0);
   await page.evaluate(()=>vhOpenWorkspace('overview'));
   await revealSummary(page.locator('summary').filter({hasText:'Shared plans'}));
@@ -160,6 +168,7 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   if(!await planPanel.evaluate(el=>el.open))await revealSummary(page.locator('summary').filter({hasText:'Shared plans'}));
   await page.getByRole('button',{name:'Cancel plan',exact:true}).click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.plans[0].status==='cancelled');
+  await page.waitForFunction(()=>!vh2PollLocks.has(getActiveCompanionTimeline('integrated-alex').id));
   await revealSummary(page.locator('summary').filter({hasText:'Local people & introductions'}));
   await page.getByLabel('Enable introductions',{exact:true}).check();
   await page.getByLabel('Character willingness to approach (0–100)',{exact:true}).fill('65');
@@ -177,9 +186,16 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.population?.residents.length===0);
   await page.waitForFunction(()=>!vh2PollLocks.has(getActiveCompanionTimeline('integrated-alex').id));
   await revealSummary(page.locator('summary').filter({hasText:'Independent people & transport'}));
-  await page.getByLabel('Starting simulated budget',{exact:true}).fill('75');
-  await page.getByRole('button',{name:'Enable independent life',exact:true}).click();
-  await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.people?.actors.jo?.balance===75);
+  await page.getByLabel('Person for independent life',{exact:true}).selectOption('jo');
+  if(await page.evaluate(()=>!!getActiveCompanionTimeline('integrated-alex').vh2.people?.actors?.jo)){
+   await page.getByLabel('Curiosity',{exact:true}).fill('73');
+   await page.getByRole('button',{name:'Save independent life',exact:true}).click();
+   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.people?.actors.jo?.policy.curiosity===73);
+  }else{
+   await page.getByLabel('Starting simulated budget',{exact:true}).fill('75');
+   await page.getByRole('button',{name:'Enable independent life',exact:true}).click();
+   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.people?.actors.jo?.balance===75);
+  }
   await page.waitForFunction(()=>!vh2PollLocks.has(getActiveCompanionTimeline('integrated-alex').id));
   await revealSummary(page.locator('summary').filter({hasText:'Friendships, contact & romantic progression'}));
   await page.getByLabel('Days before friendship',{exact:true}).fill('40');
@@ -225,10 +241,8 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.photos?.filter(p=>['stored','delivered'].includes(p.status)).length===4);
   await page.locator('#vh-photo-review [data-close]').click();await page.evaluate(()=>vhOpenWorkspace('media'));await publishing.getByRole('button',{name:'Load earlier gallery photos',exact:true}).click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.libraryPhotos?.length>=3);
-  await revealSummary(page.locator('summary').filter({hasText:'Autonomous exploration'}));
-  await page.getByLabel('Custom Interest tags',{exact:true}).fill('art, parks');await page.getByLabel('Custom Interest tags',{exact:true}).press('Enter');
-  await page.getByRole('button',{name:'Save exploration',exact:true}).click();
-  await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.exploration.policy.interests.includes('art'));
+  await revealSummary(page.locator('summary').filter({hasText:'Independent life & nearby choices'}));
+  assert(await page.getByRole('button',{name:'Open life settings',exact:true}).isVisible());
   await revealSummary(page.locator('summary').filter({hasText:'World feeds & awareness'}));
   await page.getByLabel('World feed format',{exact:true}).selectOption('gtfs_rt');
   assert(await page.getByLabel('Realtime schedule source',{exact:true}).isVisible());
@@ -258,10 +272,10 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.bible.entries[0].status==='approved');
   await revealSummary(page.locator('summary').filter({hasText:'Asset bible',exact:true}));
   await page.evaluate(()=>{window.__bibleViews=[];const original=generateCompanionPhoto;generateCompanionPhoto=async(c,scene,options)=>{if(options.photoContext?.referenceStudy){if(!options.bibleReferences?.length)throw Error('Missing approved seed reference');window.__bibleViews.push(options.photoContext.referenceStudy);}return original(c,scene,options);};});
-  await page.getByRole('button',{name:'Generate missing identity views',exact:true}).click();
-  await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.bible.entries.length===5);
-  assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.bible.entries.filter(e=>e.status==='pending').length),4);
-  assert.deepEqual(await page.evaluate(()=>window.__bibleViews),['front_face','three_quarter','profile','full_body']);
+  await page.getByRole('button',{name:'Generate character sheet',exact:true}).click();
+  await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.bible.entries.length===2);
+  assert.equal(await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.bible.entries.filter(e=>e.status==='pending').length),1);
+  assert.deepEqual(await page.evaluate(()=>window.__bibleViews),['turnaround']);
   await revealSummary(page.locator('summary').filter({hasText:'Finances & recurring costs',exact:true}));
   await page.getByLabel('Recurring daily expenses',{exact:true}).fill('15');
   await page.getByRole('button',{name:'Save finances',exact:true}).click();
@@ -280,13 +294,20 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.visual.zones.length===1);
   await page.getByRole('button',{name:'Enter Reading corner',exact:true}).click();
   await page.waitForFunction(()=>!!getActiveCompanionTimeline('integrated-alex').vh2.visual.zoneId);
+  await page.waitForFunction(()=>!vh2PollLocks.has(getActiveCompanionTimeline('integrated-alex').id));
   assert.match(await page.evaluate(()=>buildCompanionPhotoPrompt(getCompanion('integrated-alex'),'A room',{photoContext:{zoneId:'test-zone',zoneDescription:'Blue sofa beside a tall lamp.'}})),/Current room zone: Blue sofa beside a tall lamp/);
-  await revealSummary(page.locator('summary').filter({hasText:'Background images & routes',exact:true}));
+  const imageSummary=page.locator('summary').filter({hasText:'Background images & routes',exact:true});
+  const imagePanel=page.locator('details').filter({has:imageSummary}).last();
+  const renderSocialPhotos=imagePanel.getByLabel('Render photos selected for social posts',{exact:true});
+  for(let attempt=0;attempt<5&&!await renderSocialPhotos.isVisible();attempt++){
+   await revealSummary(imageSummary);
+   if(!await renderSocialPhotos.isVisible())await page.waitForTimeout(100);
+  }
   await page.evaluate(()=>{providerAuthHeaders=()=>({Authorization:'Bearer OFFLINE_IMAGE_KEY'});});
-  await page.getByLabel('Enable background image generation (provider credits)',{exact:true}).check();
-  await page.getByLabel('Background image model',{exact:true}).fill('fixture/image');
-  assert.deepEqual(await page.getByLabel('Background image provider',{exact:true}).locator('option').evaluateAll(options=>options.map(o=>o.value)),['openrouter','gemini','magnific','higgsfield']);
-  await page.getByRole('button',{name:'Save background rendering',exact:true}).click();
+  await renderSocialPhotos.check();
+  await imagePanel.getByLabel('Image model',{exact:true}).fill('fixture/image');
+  assert.deepEqual(await imagePanel.getByLabel('Background image provider',{exact:true}).locator('option').evaluateAll(options=>options.map(o=>o.value)),['openrouter','gemini','magnific','higgsfield']);
+  await imagePanel.getByRole('button',{name:'Save image settings',exact:true}).click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.imageProvider?.enabled);
   await page.evaluate(async()=>{const c=getCompanion('integrated-alex'),t=getActiveCompanionTimeline(c.id);await vh2Enqueue(t,'capture_photo',{scene:'An offline background fixture',destination:'gallery'});await vh2Poll(c,t);});
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.photos.some(p=>p.scene==='An offline background fixture'&&p.status==='captured'));
@@ -303,6 +324,7 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   }
   assert(await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.providerJobs?.some(j=>j.status==='succeeded')),'background image imported without browser rendering');
   await page.evaluate(()=>switchView('companionChat'));
+  await page.locator('#vh-chat-more > summary').click();
   const profileDetails=page.locator('#cc-profile-details');
   if(!await profileDetails.evaluate(el=>el.open))await profileDetails.locator('summary').click();
   await page.locator('[data-vh2-profile-name]').fill('Sam');
@@ -326,6 +348,7 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.getByLabel('Service destination',{exact:true}).selectOption('cafe');
   await page.getByRole('button',{name:'Save scheduled service',exact:true}).click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.transportServices.length===1);
+  await page.waitForFunction(()=>!vh2PollLocks.has(getActiveCompanionTimeline('integrated-alex').id));
   await revealSummary(page.locator('summary').filter({hasText:'Travel disruption recovery',exact:true}));
   await page.getByLabel('Find replacement routes automatically',{exact:true}).check();
   await page.getByLabel('Maximum replacement transport spending',{exact:true}).fill('35');
@@ -356,7 +379,7 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.evaluate(()=>{generateCompanionPhoto=async(c,scene,options)=>{if(options.photoContext?.assetStudy?.role!=='place')throw Error('Expected linked room study');if(options.bibleReferences?.length)throw Error('A new room must not receive unrelated identity refs');return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';};});
   await page.getByRole('button',{name:'Generate reference for review',exact:true}).click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.bible.entries.some(e=>e.role==='place'&&e.status==='pending'));
-  await revealSummary(page.locator('summary').filter({hasText:'Timeline backup & recovery'}));
+  await revealSummary(page.locator('summary').filter({hasText:'Private server & recovery'}));
   if(await page.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.running))await page.locator('[data-vh2-pause]').click();
   await page.waitForFunction(()=>!getActiveCompanionTimeline('integrated-alex').vh2.running);
   await revealSummary(page.locator('summary').filter({hasText:'Bring prior conversation into VH2',exact:true}));
@@ -365,9 +388,9 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await page.getByLabel('Confirm historical player mapping',{exact:true}).check();
   await page.getByRole('button',{name:'Import reviewed conversation',exact:true}).click();
   await page.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2.legacyHistory?.count===1);
-  const backupPanel=page.locator('details').filter({has:page.locator('summary').filter({hasText:'Timeline backup & recovery',exact:true})}).last();
+  const backupPanel=page.locator('details').filter({has:page.locator('summary').filter({hasText:'Private server & recovery',exact:true})}).last();
   if(!await backupPanel.evaluate(el=>el.open))await backupPanel.locator('summary').first().click();
-  const [backup]=await Promise.all([page.waitForEvent('download'),page.getByRole('button',{name:'Download VH2 timeline backup',exact:true}).click()]);await backup.saveAs('/tmp/vh2-browser-backup.vh2.gz');
+  const [backup]=await Promise.all([page.waitForEvent('download'),page.getByRole('button',{name:'Download timeline backup',exact:true}).click()]);await backup.saveAs('/tmp/vh2-browser-backup.vh2.gz');
   recoveryServer=spawn('python3',['scratch/vh2_browser_server.py'],{stdio:['ignore','pipe','pipe']});
   const recoveryPort=await new Promise((resolve,reject)=>{recoveryServer.stdout.once('data',d=>resolve(Number(String(d).trim())));recoveryServer.once('exit',c=>reject(Error('Recovery server exit '+c)));});
   const recoveryBase=`http://127.0.0.1:${recoveryPort}`,recovery=await browser.newPage();recovery.on('pageerror',e=>errors.push(e.message));
@@ -375,12 +398,12 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   await recovery.goto(recoveryBase+'/index.html');await recovery.waitForFunction(()=>typeof companionAgencyTimer!=='undefined'&&!!companionAgencyTimer);
   await recovery.evaluate(base=>{clearInterval(companionAgencyTimer);clearInterval(companionAlwaysOnTimer);mcpBridgeBase=()=>base;const c=normalizeCompanion({id:'recovery-placeholder',name:'Recovery'});state.companions=[c];state.activeCompanionId=c.id;ensureCompanionTimelineStore(c.id);hideGlobalSettings();switchView('companionChat');renderCompanionThread();},recoveryBase);
   await recovery.evaluate(()=>vhOpenWorkspace('recovery'));
-  await revealSummary(recovery.locator('summary').filter({hasText:'Timeline backup & recovery'}));
-  await recovery.getByLabel('Restore a VH2 timeline archive',{exact:true}).setInputFiles('/tmp/vh2-browser-backup.vh2.gz');
+  await revealSummary(recovery.locator('summary').filter({hasText:'Private server & recovery'}));
+  await recovery.getByLabel('Restore a timeline archive on this device',{exact:true}).setInputFiles('/tmp/vh2-browser-backup.vh2.gz');
   await recovery.waitForFunction(id=>getActiveCompanionTimeline('integrated-alex')?.vh2?.worldId===id,w);
   await recovery.waitForFunction(()=>getActiveCompanionTimeline('integrated-alex').vh2?.photos?.length>=3);
   assert.equal(await recovery.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.running),false);
-  assert.equal(await recovery.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.bible.entries.length),6);
+  assert.equal(await recovery.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.bible.entries.length),3);
   assert.equal(await recovery.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.signals.sources.length),1);
   assert.equal(await recovery.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.autoReplies),false);
   assert.equal(await recovery.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.finance.policy.dailyExpense),15);
@@ -397,18 +420,21 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   assert.equal(await recovery.evaluate(()=>getActiveCompanionTimeline('integrated-alex').vh2.imageProvider.enabled===true),false);
   await recovery.evaluate(()=>switchView('companions'));
   const recoveredCard=recovery.locator('.vh-card').filter({hasText:'Alex'});
-  assert.match(await recoveredCard.innerText(),/Life paused/);
-  await recoveredCard.getByRole('button',{name:'Review VH2 setup',exact:true}).click();
-  assert.equal(await recovery.locator('#vh-workspace-view').isVisible(),true);assert.equal(await recovery.locator('#vh-workspace-title').innerText(),'Providers & feeds');
+  assert.equal(await recoveredCard.locator('[data-vh-life]').textContent(),'Life paused');
+  await recoveredCard.getByRole('button',{name:'Open life status for Alex; currently Life paused',exact:true}).click();
+  const lifeStatus=recovery.getByRole('dialog',{name:'Life status'});await lifeStatus.waitFor();assert.match(await lifeStatus.textContent(),/Life is paused/);await lifeStatus.getByRole('button',{name:'Close',exact:true}).click();
+  await recoveredCard.getByRole('button',{name:'Open human',exact:true}).click();
+  assert.equal(await recovery.locator('#companion-chat-view').isVisible(),true);
   assert.deepEqual(errors,[]);
   const [workspace]=await Promise.all([page.waitForEvent('download'),page.evaluate(()=>exportFullBackup())]);
-  await workspace.saveAs('/tmp/vh2-studio-workspace.json');
-  const workspaceData=JSON.parse(require('node:fs').readFileSync('/tmp/vh2-studio-workspace.json','utf8'));
-  assert.equal(workspaceData.vh2ServiceArchives.length,1,'Studio backup includes the linked service timeline');
-  assert(workspaceData.companions[0].basePhoto.startsWith('data:image/'),'browser reference source included');
+  await workspace.saveAs('/tmp/vh2-studio-workspace.hordebackup');
+  const workspaceData=await Archive.unpack(new Blob([require('node:fs').readFileSync('/tmp/vh2-studio-workspace.hordebackup')]),'full-backup');
+  assert.equal(workspaceData.vh2Checkpoints.length,1,'Studio backup includes the linked service timeline');
+  assert(workspaceData.companions.find(c=>c.id==='integrated-alex')?.basePhoto.startsWith('data:image/'),'browser reference source included');
   assert(!JSON.stringify(workspaceData.globalSettings).includes('LOCAL_TEST_KEY'),'credentials excluded');
-  const decoded=JSON.parse(require('node:zlib').gunzipSync(Buffer.from(workspaceData.vh2ServiceArchives[0],'base64')));
-  assert(decoded,'embedded timeline is a readable compressed archive');
-  console.log('PASS existing Horde UI: mocked chat/photos, frozen-moment rendering, social/history, life expression policy, population authoring/removal, independent life, social progression and money gifts, shared plans, autonomous exploration controls, feed setup, reviewed multi-view bible generation, backup download and paused restore into a separate service');
+  const checkpoint=workspaceData.vh2Checkpoints[0];
+  assert.equal(checkpoint.data.type,'application/vnd.horde.vh2-transfer+zip');
+  assert.equal(Buffer.from(await checkpoint.data.arrayBuffer()).subarray(0,2).toString(),'PK','embedded timeline is a ZIP checkpoint');
+  console.log('PASS existing Horde UI: mocked chat/photos, frozen-moment rendering, social/history, life expression policy, population authoring/removal, independent life, social progression and money gifts, shared plans, feed setup, reviewed character-sheet generation, backup download and paused restore into a separate service');
  }finally{if(browser)await browser.close();server.kill();if(recoveryServer)recoveryServer.kill();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

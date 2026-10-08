@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link id="horde-fonts" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="preload" as="style">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=20261008-worlds-release">
+    <link rel="stylesheet" href="style.css?v=20261009-worlds-check-contract">
     <link rel="stylesheet" href="virtual_humans/frontend/vh-workspace.css?v=20260925-v182">
 </head>
 <body>
@@ -539,6 +539,7 @@
                                         <div class="world-timeline-actions" id="world-timeline-actions">
                                             <button class="tool-btn" id="world-new-session-btn" type="button" title="New World Session">＋ New timeline</button>
                                             <button class="tool-btn" id="world-rename-session-btn" type="button" title="Rename Current Session">Rename timeline</button>
+                                            <button class="tool-btn" id="world-correct-state-btn" type="button">Correct world state…</button>
                                             <button class="tool-btn tool-btn-danger" id="world-del-session-btn" type="button" title="Delete Current Session" aria-label="Delete current timeline">Delete timeline</button>
                                         </div>
                                     </div>
@@ -830,7 +831,6 @@
                             <button type="button" class="creator-overview-card" data-world-studio-target="w-sandbox"><span>04</span><strong>Starting lives</strong><small>Define who players can begin as, including world-specific skills and perks.</small></button>
                             <button type="button" class="creator-overview-card" data-world-studio-target="w-ai"><span>05</span><strong>Rules &amp; models</strong><small>Choose narrative-only play or optional RPG rules, checks and model behavior.</small></button>
                             <button type="button" class="creator-overview-card" data-world-studio-target="w-visuals"><span>06</span><strong>Presentation</strong><small>Add optional banners, room art, portraits and visual styling.</small></button>
-                            <button type="button" class="creator-overview-card" data-companion-studio-target="cs-chat-style"><span>05</span><strong>Chat style</strong><small>Fine-tune voice, conversational habits and example exchanges.</small></button>
                             <details class="creator-advanced-card">
                                 <summary>Advanced world systems</summary>
                                 <div><button type="button" data-world-studio-target="w-items">Items &amp; objects</button><button type="button" data-world-studio-target="w-factions">Factions</button><button type="button" data-world-studio-target="w-lore">Lore</button><button type="button" data-world-studio-target="w-note">Author's Note</button><button type="button" data-world-studio-target="w-hud">HUD &amp; Stats</button><button type="button" data-world-studio-target="w-visual-map">World Architect</button><button type="button" data-world-studio-target="w-architect-agent">Architect Agent</button><button type="button" data-world-studio-target="w-builder">AI Builder</button></div>
@@ -4063,7 +4063,13 @@
                         <input id="global-comfy-reference-node" class="form-input" placeholder="e.g. 12, 18, 24 — identity, room, clothing">
                     </div>
                 </div>
-                <p class="form-hint">Profiles keep several workflows and node mappings ready to switch without replacing JSON. Horde Studio auto-detects standard CLIP prompt and KSampler seed nodes. Set a LoadImage node ID only when the workflow accepts the human’s identity reference.</p>
+                <p class="form-hint">Profiles keep several workflows and node mappings ready to switch without replacing JSON. Horde Studio auto-detects standard CLIP prompt and KSampler seed nodes. For a FaceID or other specialized image input, enter its LoadImage node ID. If you map several IDs, the first gets identity, then a previous photo, then other scene references.</p>
+                <label class="form-label" for="global-comfy-reference-mode">When this workflow has fewer image inputs than selected references</label>
+                <select id="global-comfy-reference-mode" class="form-select">
+                    <option value="fit">Fit to workflow · attach identity first and show omitted references</option>
+                    <option value="all">Require every reference · stop before generation</option>
+                </select>
+                <p class="form-hint">The active workflow profile—not the checkpoint name—determines its LoadImage capacity. A one-input FaceID workflow receives the identity image when one is available. Continuity, place and clothing images not attached remain described in the scene, and the photo review shows what was omitted.</p>
                 <button id="test-local-image-engines-btn" class="btn btn-ghost" type="button" style="margin-top:10px;">Test local endpoints</button>
                 <div id="local-image-engines-result" class="form-hint" aria-live="polite"></div>
                 </div>
@@ -4224,10 +4230,11 @@
                 <div class="settings-section-head"><span class="settings-section-kicker">Your library</span><h3>Data &amp; Backup</h3><p>Move your complete installation or recover from a local backup.</p></div>
                 <div class="settings-card settings-data-card">
                 <div class="settings-action-row">
-                    <button id="backup-all-btn" class="btn btn-ghost btn-full">💾 Export Full Backup</button>
+                    <button id="backup-all-btn" class="btn btn-ghost btn-full" title="Portable ZIP of your complete installation, including played Worlds and media">💾 Export Full Backup</button>
                     <button id="restore-all-btn" class="btn btn-ghost btn-full">📂 Restore Backup</button>
                     <input type="file" id="restore-all-input" accept=".json,.hordebackup" style="display:none;">
                 </div>
+                <p class="form-hint">Includes played Worlds, local media and restorable VH2 life checkpoints. Limit: under 4 GB for the ZIP and up to 2 GB per life. Restore into a clean local service; existing lives are never overwritten. If an interrupted restore saved the service lives but not browser data, retry the exact same backup while those lives are unchanged.</p>
                 <div class="settings-danger-zone"><div><strong>Hard reset</strong><span>Deletes every local character, World, conversation and setting.</span></div>
                 <button id="purge-data-btn" class="btn btn-danger btn-full">⚠️ Purge All Data (Hard Reset)</button>
                 </div></div>
@@ -4932,8 +4939,8 @@
                 </div>
                 <div id="sz-persona-preview" class="session-persona-preview">No Persona selected. The Starting Life will be the only identity source.</div>
                 <label id="sz-life-seed-option" class="sandbox-toggle-card session-life-seed-option">
-                    <input id="sz-life-seed-enabled" type="checkbox" checked>
-                    <span><strong>Initialize my active life</strong><small>Before the opening scene, create or connect a believable home, household, family, classmates/coworkers, friends, routines and relationships from the Persona and Starting Life.</small></span>
+                    <input id="sz-life-seed-enabled" type="checkbox">
+                    <span><strong>Enrich my starting life with AI (optional)</strong><small>Generate additional home, household, social connections and routines from your Persona and Starting Life. Uses your model, may cost credits and can add up to 45 seconds before play. Your authored world and existing relationships work without this.</small></span>
                 </label>
                 <div id="sz-life-seed-status" class="form-hint"></div>
             </div>
@@ -5298,7 +5305,7 @@
 <script src="labs-core.js?v=20260822-v161"></script>
 <script src="labs-tasks.js?v=20260822-v161"></script>
 <script src="labs-guide.js?v=20260822-v161"></script>
-    <script src="help-system.js?v=20261008-worlds-release"></script>
+    <script src="help-system.js?v=20261009-worlds-check-contract"></script>
 <script src="labs-ui.js?v=20260822-v161"></script>
 <script src="rpg-mechanics.js?v=20260823-v166-rpg-release"></script>
 <script src="multiplayer-engine.js?v=20260902-v171"></script>
@@ -5314,15 +5321,17 @@
     <script src="virtual_humans/engine/vh-mind-library.js?v=20260920-expanded-library"></script>
     <script src="virtual_humans/engine/vh-mind-engine.js?v=20260920-expanded-library"></script>
     <script src="virtual_humans/engine/vh-life-schema.js?v=20260913-v18-storage"></script>
-    <script src="virtual_humans/frontend/vh2-horde-integration.js?v=20260925-v182"></script>
-    <script src="virtual_humans/frontend/vh-workspace.js?v=20260925-v182"></script>
+    <script src="virtual_humans/frontend/vh2-horde-integration.js?v=20261004-comfy-fit"></script>
+    <script src="virtual_humans/frontend/vh-workspace.js?v=20261004-comfy-fit"></script>
     <script src="virtual_humans/frontend/vh-assistant-ui.js?v=20260925-v182"></script>
     <script src="virtual_humans/frontend/vh-setup-ui.js?v=20260925-v182"></script>
     <script src="virtual_humans/frontend/vh-page-builder.js?v=20260925-v182"></script>
     <script src="bundled-humans.js?v=20260913-v18-storage"></script>
     <script src="human-package.js?v=20260913-v18-storage"></script>
     <script src="large-archive.js?v=20261008-worlds-release"></script>
-    <script src="worlds/model-client.js?v=20261008-worlds-release"></script>
-    <script src="app.js?v=20261008-worlds-release"></script>
+    <script src="worlds/model-client.js?v=20261009-worlds-check-contract"></script>
+    <script src="worlds/scene-draft.js?v=20261009-worlds-check-contract"></script>
+    <script src="worlds/turn-context.js?v=20261009-worlds-check-contract"></script>
+    <script src="app.js?v=20261009-worlds-check-contract"></script>
 </body>
 </html>

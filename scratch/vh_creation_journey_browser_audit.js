@@ -40,6 +40,7 @@ try{
  assert(await page.locator('#cs-appearance').isVisible(),'Appearance is visible');
  assert.equal(await page.locator('#cs-backstory').isVisible(),true,'Background remains immediately available');
  await page.locator('#cs-name').fill('Iri the Archivist');
+ await page.locator('#cs-age').fill('28');
  await page.locator('[data-vh-field-builder="personality"]').click();let dialog=page.locator('dialog[open]');await dialog.waitFor();
  const selected=()=>dialog.locator('section > label:first-child input:checked');
  assert.equal(await selected().count(),1,'Field action selects exactly one field');assert.match(await selected().locator('..').innerText(),/personality|brief/i);
@@ -59,7 +60,9 @@ try{
 	 const authoredCard=page.locator('.vh-card').filter({hasText:'Iri the Archivist'});
 	 assert.equal(await authoredCard.count(),1,'Authored human has one library card');
 	 assert(await authoredCard.locator('[data-vh-edit]').isVisible(),'Library exposes one clear Edit human action per human');
-	 assert(await authoredCard.locator('[data-vh-delete]').isVisible(),'Library exposes a visible Delete action per human');
+	 await authoredCard.locator('summary[aria-label="More actions"]').click();
+	 assert(await authoredCard.locator('[data-vh-delete]').isVisible(),'Library keeps Delete human discoverable in the card menu');
+	 await authoredCard.locator('summary[aria-label="More actions"]').click();
 	 assert.equal(await page.locator('[data-vh-life]').count(),0,'Life is not a competing library destination');
 	 await authoredCard.locator('[data-vh-chat]').click();await page.waitForFunction(()=>state.view==='companionChat');
  assert.equal(await page.locator('#vh-primary-chat [data-mode=life]').innerText(),'Live human','Chat exposes the evolving timeline with an explicit name');

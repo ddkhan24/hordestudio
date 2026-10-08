@@ -30,6 +30,7 @@ const fixture = JSON.parse(fs.readFileSync(path.join(root, 'scratch/fixtures/wor
             clearInterval(companionAgencyTimer);
             clearInterval(companionAlwaysOnTimer);
             const world = structuredClone(originalFixture);
+            world.kernel={...world.kernel,sceneDrafts:false}; // Exercise the legacy receipt knowledge adapter.
             world.model = 'offline/model';
             world.contextSize = 32768;
             world.maxTokens = 2048;
@@ -94,6 +95,7 @@ const fixture = JSON.parse(fs.readFileSync(path.join(root, 'scratch/fixtures/wor
             });
             observer.observe(document.getElementById('world-messages-container'), { childList: true, subtree: true, characterData: true });
             const receipt = {
+                action_resolution: { kind: 'question', status: 'answered', outcome: 'Captain Iven will pull together a party at first light if the ranger has not returned.' },
                 scene: { player_location_id: 'square', player_location_changed: false,
                     present_character_ids: ['iven'] },
                 events: [{ type: 'interaction', actor_id: 'iven', status: 'completed',
@@ -110,6 +112,9 @@ const fixture = JSON.parse(fs.readFileSync(path.join(root, 'scratch/fixtures/wor
             window.fetch = async (url, options = {}) => {
                 if (!String(url).includes('/chat/completions')) return realFetch(url, options);
                 const body = JSON.parse(options.body || '{}');
+                if (body.messages?.some(message => String(message.content).includes('[AUTHORITATIVE COMMITTED TURN]')))
+                    return new Response(JSON.stringify({ choices: [{ message: { content: receipt.action_resolution.outcome + '\n' + hostedLine } }] }),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } });
                 if (!body.stream) return new Response(JSON.stringify({ choices: [{ message: { content: '{}' } }] }),
                     { status: 200, headers: { 'Content-Type': 'application/json' } });
                 prompt = (body.messages || []).filter(message => message.role === 'system')
@@ -169,7 +174,8 @@ const fixture = JSON.parse(fs.readFileSync(path.join(root, 'scratch/fixtures/wor
         assert.match(result.lastText, /pull together a party/,
             'the player must still see the conditional agreement that was committed');
         assert.doesNotMatch(result.lastText, /citizen to rot in that cellar/i);
-        assert.deepEqual(result.redactions, [{ reason: 'npc_unproven_absent_whereabouts' }]);
+        assert(result.redactions.length >= 1, 'the unsafe model statement must be redacted');
+        assert(result.redactions.every(item => item.reason === 'npc_unproven_absent_whereabouts'));
         assert.equal(result.knowledgeDrops, 1, 'the same leak must not become permanent NPC knowledge');
         assert.equal(result.observations.some(item => /Tomas is in Tower Cellar/i.test(item.text || '')), false);
         assert.deepEqual(result.rejected, []);

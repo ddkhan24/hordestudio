@@ -1,0 +1,89 @@
+{
+  "action": "I ask Halloway to set an exact deadline for the registers: would 10 AM today work? I wait for her answer before making any promise.",
+  "proposal": {
+    "protocol": "scene_draft_v2",
+    "narrative": [
+      {
+        "id": "p1",
+        "text": "You lean in slightly, keeping your voice professional. \"Agent Halloway, to ensure everything is organized and complete, would a 10:00 AM deadline for those registers work for you?\""
+      },
+      {
+        "id": "p2",
+        "text": "Halloway doesn't blink. She slowly turns her head to look at the clock on the wall, then back to you. A thin, joyless smile touches her lips, though it doesn't reach her eyes. \"Ten o'clock,\" she repeats, her nasal tone flattening. \"That is precisely fifty-eight minutes from now. I find your optimism... refreshing. Yes. Ten o'clock. If they aren't on my desk by then, I'll simply start my audit with the records I *do* have, and I'll make a very detailed note regarding the branch's inability to produce basic documentation.\""
+      }
+    ],
+    "actions": [
+      {
+        "request": "I ask Halloway to set an exact deadline for the registers: would 10 AM today work?",
+        "kind": "speech",
+        "status": "resolved",
+        "response_id": "p1"
+      },
+      {
+        "request": "I wait for her answer before making any promise.",
+        "kind": "wait",
+        "status": "resolved",
+        "response_id": "p2"
+      }
+    ],
+    "events": [
+      {
+        "type": "dialogue",
+        "actor_id": "player",
+        "status": "completed",
+        "passage_id": "p1",
+        "witnessed_by__": [
+          "player",
+          "npc_gloria",
+          "npc_halloway"
+        ]
+      },
+      {
+        "type": "dialogue",
+        "actor_id": "npc_halloway",
+        "status": "completed",
+        "passage_id": "p2",
+        "witnessed_by__": [
+          "player",
+          "npc_gloria",
+          "npc_halloway"
+        ]
+      }
+    ],
+    "effects": {
+      "ledger_update": "Agent Halloway agreed to a 10:00 AM deadline for the claims registers and correspondence logs."
+    },
+    "speech": [
+      {
+        "speaker": "player",
+        "listeners": [
+          "npc_halloway",
+          "npc_gloria"
+        ],
+        "passage_id": "p1"
+      },
+      {
+        "speaker": "npc_halloway",
+        "listeners": [
+          "player",
+          "npc_gloria"
+        ],
+        "passage_id": "p2"
+      }
+    ],
+    "commitments": [
+      {
+        "id": "deadline_halloway_files",
+        "title": "Deliver Registers to Halloway",
+        "description": "Provide claims registers and correspondence logs to Agent Halloway.",
+        "day": 1,
+        "minute_of_day": 600,
+        "location_id": "loc_reception",
+        "status": "scheduled",
+        "reschedule": false,
+        "passage_id": "p2"
+      }
+    ],
+    "resolutions": []
+  }
+}

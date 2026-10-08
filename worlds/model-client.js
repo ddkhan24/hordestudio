@@ -92,6 +92,13 @@ async function json({ url, body, init = {}, fetcher = root.fetch, now = clockNow
             }
             data = {};
         }
+        if (response.ok) {
+            try { data = decodeCompletionBody(raw); }
+            catch (error) {
+                outcome = error.code === 'WORLD_MODEL_PROVIDER_ERROR' ? 'provider_error' : 'empty_completion';
+                throw error;
+            }
+        }
         if (outcome !== 'invalid_json') outcome = response.ok ? 'ok' : 'http_error';
         return { response, data };
     } catch (error) {

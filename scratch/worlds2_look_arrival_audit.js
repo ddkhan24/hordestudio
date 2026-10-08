@@ -53,5 +53,11 @@ const unrelated = ctx.validateWorldTurnReceipt(world, arrived, { ...arrivalRecei
     playerStartLocationId: 'causeway', precommittedArrival: { from: 'square', to: 'causeway' }
 });
 assert(unrelated.rejectedEvents.length > 0, 'Different movement must not be forgiven.');
+const withoutOrigin=structuredClone(arrivalReceipt);
+delete withoutOrigin.events[0].from_location_id;
+const acknowledged=ctx.validateWorldTurnReceipt(world,arrived,withoutOrigin,{
+    playerStartLocationId:'causeway',precommittedArrival:{from:'square',to:'causeway'}});
+assert.equal(acknowledged.rejectedEvents.length,0);
+assert.equal(acknowledged.receipt.events.length,0,'target-only acknowledgment cannot replay already completed travel');
 
 console.log('PASS: precommitted exit arrival ignores origin prose and exact movement echo, not unrelated travel');

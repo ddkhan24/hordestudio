@@ -94,8 +94,17 @@ const client = require('../worlds/model-client.js');
     assert.equal(streamFailure.outcome, 'aborted');
     assert.equal(observed.length, 6, 'each JSON attempt produces exactly one diagnostic');
     const callbackSafe = await client.json({ url: 'https://fixture.test/chat/completions', body,
-        fetcher: async () => new Response('{"choices":[]}', { status: 200 }),
+        fetcher: async () => new Response('{"choices":[{"message":{"content":"ok"}}]}', { status: 200 }),
         onSettled: () => { throw new Error('diagnostics unavailable'); } });
     assert.equal(callbackSafe.response.status, 200, 'a telemetry failure must not discard a valid reply');
+    for (const [payload, code, outcome] of [
+        [{ error: { message: 'provider failed' } }, 'WORLD_MODEL_PROVIDER_ERROR', 'provider_error'],
+        [{ choices: [] }, 'WORLD_MODEL_EMPTY_COMPLETION', 'empty_completion']
+    ]) {
+        await assert.rejects(client.json({ url: 'https://fixture.test/chat/completions', body,
+            fetcher: async () => new Response(JSON.stringify(payload), { status: 200 }),
+            onSettled: detail => observed.push(detail) }), error => error.code === code);
+        assert.equal(observed.at(-1).outcome, outcome);
+    }
     console.log('✓ World model client bounds stalled HTTP 200 bodies and reports each outcome once');
 })().catch(error => { console.error(error); process.exitCode = 1; });

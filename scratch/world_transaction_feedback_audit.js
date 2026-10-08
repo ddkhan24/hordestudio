@@ -9,9 +9,9 @@ const turn = functionSource('executeWorldTurn');
 const agent = functionSource('runWorldAgent');
 
 assert.match(receipt, /deferFeedback: context\.deferFeedback === true/);
-assert.match(turn, /\{ \.\.\.receiptContext, deferFeedback: true \}/);
+assert.match(turn, /\{ \.\.\.candidateContext, deferFeedback: true \}/);
 const transactionIndex = turn.indexOf('}, candidate => candidate.accepted);');
-const feedbackIndex = turn.indexOf('if (attempt.accepted) pendingWorldActionFeedback = attempt.result.actionResult');
+const feedbackIndex = turn.search(/if \(attempt\.accepted\) \{\s*(?:receiptValidationFeedback = \[\];\s*)?(?:rejectedReceiptProposal = null;\s*)?acceptedTurnReceipt = attempt\.result\.committed\.validation\.receipt;\s*pendingWorldActionFeedback = attempt\.result\.actionResult;/);
 assert(transactionIndex >= 0 && feedbackIndex > transactionIndex,
     'only an accepted transaction may expose pending feedback, including after summary-only salvage');
 assert.match(turn, /const saved = await saveWorldsState\(options\);\s*if \(pendingWorldActionFeedback\)/);

@@ -161,6 +161,17 @@ const normalizedQueued = context.processStructuredActions(normalizedValidation.l
 assert.equal(normalizedQueued.checkResults[0].pending, true);
 assert.deepEqual(JSON.parse(JSON.stringify(repairSession.pendingCheck.on_success)),
     { exit_unlocks: [{ from_location_id: 'gate', to_location_id: 'cellar' }] });
+const modernRepair = context.repairWorldSingletonCheckReceipt(world, session('modern_repair'), {
+    ...malformedProbe4Repair,
+    action_resolution: { kind: 'physical', status: 'pending_check',
+        outcome: 'You probe the lock; the Wits check decides whether it opens.' },
+    state_updates: { checks: { ...malformedProbe4Repair.state_updates.checks,
+        success_text: 'You open the lock with the bent wire.',
+        failure_text: 'The tumblers jam under the wire.' } }
+});
+assert.equal(modernRepair?.action_resolution?.status, 'pending_check');
+assert.equal(modernRepair?.state_updates?.checks?.[0]?.success_text,
+    'You open the lock with the bent wire.');
 assert.equal(context.repairWorldSingletonCheckReceipt(world, session('not_drop_event'), {
     ...malformedProbe4Repair, events: [{ type: 'inventory', status: 'completed',
         actor_id: 'player', item: 'improvised wire', action: 'draw wire from strap' }]

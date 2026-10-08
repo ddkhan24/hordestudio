@@ -38,7 +38,7 @@ const root = path.resolve(__dirname, '..');
                 intro: '', startLocationId: 'lobby',
                 locations: [{ id: 'lobby', name: 'Lobby', description: 'A quiet office lobby.', exits: [] }],
                 entities: [{ id: 'npc_gloria', name: 'Gloria Bell', type: 'npc', startLocation: 'lobby', persona: 'Receptionist' }],
-                kernel: { enabled: true, memoryMode: 'ledger' },
+                kernel: { enabled: true, memoryMode: 'ledger', sceneDrafts: false }, // Legacy receipt compatibility fixture.
                 hudConfig: { showClock: true, showQuests: false, showLedger: true, stats: [] }
             };
             state.worlds = [world];
@@ -87,13 +87,17 @@ const root = path.resolve(__dirname, '..');
                 if (!String(url).includes('/chat/completions')) return realFetch(url, options);
                 const body = JSON.parse(options.body || '{}');
                 modelRequests.push(body);
+                if (body.messages?.some(message => String(message.content).includes('[AUTHORITATIVE COMMITTED TURN]')))
+                    return new Response(JSON.stringify({ choices: [{ message: { content: 'You arrive and look around.' } }] }),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } });
                 if (body.stream) {
                     const sse = `data: ${JSON.stringify({ choices: [{ delta: { content: 'You arrive and look around.' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`;
                     return new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
                 }
                 repairPrompts.push(body.messages?.[0]?.content || '');
                 const frame = buildWorldSceneFrame(world, sess);
-                const repaired = { summary: 'The player arrived.', scene: {
+                const repaired = { summary: 'The player arrived.',
+                    action_resolution: { kind: 'travel', status: 'resolved', outcome: 'You arrive and look around.' }, scene: {
                     player_location_id: frame.player_location_id,
                     player_location_changed: !forceBadFlag,
                     present_character_ids: frame.present_character_ids
@@ -178,7 +182,7 @@ const root = path.resolve(__dirname, '..');
         assert.equal(result.frozenMove.location, 'lobby');
         assert.equal(result.frozenMove.source, 'frozen_no_receipt');
         assert.equal(result.frozenMove.receipt.scene.player_location_changed, true);
-        assert.deepEqual(result.frozenMove.rejected.map(item => item.reason), ['missing_mandatory_receipt']);
+        assert.deepEqual(result.frozenMove.rejected.map(item => item.reason), ['missing_mandatory_receipt', 'player_location_change_flag_mismatch']);
         assert.equal(result.multiLeg.location, 'office');
         assert.deepEqual(result.multiLeg.rejected, []);
         assert.equal(result.precommittedMultiLeg.location, 'office');

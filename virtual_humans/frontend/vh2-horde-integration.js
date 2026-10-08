@@ -216,9 +216,10 @@ async function vh2Flush(timeline){
 }
 async function vh2FlushOwned(timeline){
     const link=timeline.vh2;
-    for(let attempt=0;link.outbox?.length&&attempt<8;attempt++){
+    for(let attempt=0;attempt<8;attempt++){
         // Never submit a command until its enqueue transaction has completed.
         await vh2EnqueueLocks.get(timeline.id)?.catch(()=>{});
+        if(!link.outbox?.length)break;
         const body=link.outbox[0];if(!body)break;
         if(body.type!=='create_profile'&&body.expectedRevision===undefined){
             const p=await vh2Request(timeline,'/vh2/projection?worldId='+encodeURIComponent(link.worldId));
@@ -272,6 +273,62 @@ async function vh2Poll(companion,timeline=getActiveCompanionTimeline(companion.i
 }
 function vh2ProviderRead(result,previous){
  return result.status==='fulfilled'?{...result.value,stale:false}:{...(previous||{}),stale:true,error:String(result.reason?.message||'Settings unavailable')};
+}
+function vh2ProjectionMessageSignature(messages){
+ let hash=2166136261;const feed=value=>{const text=String(value??'');for(let index=0;index<text.length;index++){hash^=text.charCodeAt(index);hash=Math.imul(hash,16777619);}};
+ for(const message of messages||[]){feed(message.id);feed(message.role);feed(message.type);feed(message.timestamp);feed(message.text);feed(message.deliveryState);feed(message.readAt);feed(message.awaitingReply);feed(message.attention?.stage);}
+ return `${(messages||[]).length}:${(hash>>>0).toString(36)}`;
+}
+function vh2NormalizeProjectionMessages(companion,timeline,messages){
+ const link=timeline.vh2;
+ const normalized=(messages||[]).map(message=>({...normalizeCompanionMessage({...message,
+  photo:message.assetId&&message.type==='photo'?vh2PhotoAssetUrl(link.worldId,message.assetId,timeline):message.photo,
+  audio:message.assetId&&message.type==='voice'?vh2PhotoAssetUrl(link.worldId,message.assetId,timeline):message.audio,
+  role:message.role==='assistant'?'companion':message.role,
+  deliveryState:message.role==='assistant'?'delivered':message.readAt?'read':'delivered'}),text:message.text}));
+ const repaired=typeof repairCompanionProtocolLeaks==='function'
+  ? repairCompanionProtocolLeaks(normalized,companion.name)
+  : normalized;
+ return vh2DedupeCanonicalMessages(repaired);
+}
+function vh2MessageMatchesConversation(message,link){
+ const persona=link.conversationPersonaId||link.canonicalPersonaId||'';
+ return !persona||!message.playerPersonaId||message.playerPersonaId===persona;
+}
+function vh2DedupeCanonicalMessages(messages){
+ const ids=new Set(),responses=new Set(),result=[];
+ for(const message of messages){
+  if(!message?.id||ids.has(message.id))continue;
+  const sources=vh2ResponseDedupeKey(message);
+  if(sources&&responses.has(sources))continue;
+  ids.add(message.id);if(sources)responses.add(sources);result.push(message);
+ }
+ return result;
+}
+function vh2ResponseDedupeKey(message){
+ return message.role==='companion'&&message.sourceMessageIds?.length
+  ? message.sourceMessageIds.join(',')+'|'+message.type+'|'+String(message.text||'').trim() : '';
+}
+function vh2ProjectionTailMatches(timeline,latest,hiddenClipIds){
+ const pendingIds=new Set((timeline.vh2.outbox||[]).filter(command=>command.type==='receive_message').map(command=>'vh2-pending:'+command.key));
+ const visible=timeline.messages.filter(message=>!hiddenClipIds.has(message.id)
+  &&(!message.id.startsWith('vh2-pending:')||pendingIds.has(message.id)||message.deliveryState==='failed')
+  &&vh2MessageMatchesConversation(message,timeline.vh2));
+ if(latest.length>visible.length)return false;
+ const tail=visible.slice(-latest.length);
+ return latest.every((message,index)=>tail[index]?.id===message.id
+  &&tail[index]?.type===message.type&&tail[index]?.role===message.role
+  &&String(tail[index]?.text||'')===String(message.text||''));
+}
+function vh2ReconcileProjectionMessages(companion,timeline,latest,hiddenClipIds){
+ const link=timeline.vh2,pendingIds=new Set((link.outbox||[]).filter(command=>command.type==='receive_message').map(command=>'vh2-pending:'+command.key));
+ const latestIds=new Set(latest.map(message=>message.id)),latestResponses=new Set(latest.map(vh2ResponseDedupeKey).filter(Boolean)),retained=[];
+ for(const message of timeline.messages){
+  if(hiddenClipIds.has(message.id)||latestIds.has(message.id)||latestResponses.has(vh2ResponseDedupeKey(message))||!vh2MessageMatchesConversation(message,link))continue;
+  if(message.id.startsWith('vh2-pending:')&&!pendingIds.has(message.id)&&message.deliveryState!=='failed')continue;
+  retained.push(message);
+ }
+ timeline.messages=vh2DedupeCanonicalMessages([...retained,...latest]);
 }
 function vh2ImageStudioFingerprint(companion){
  const fields={source:companion.imageSource||'provider',model:companion.imageModel||'',tool:companion.mcpImageTool||'',arguments:companion.mcpImageArguments||{},parameters:companion.imageParameters||{},options:companion.imageProviderOptions||{},endpoint:companion.imageProviderTag||''};
@@ -348,6 +405,12 @@ async function vh2PollOwned(companion,timeline,options={}){
         link.lastSyncedAt=Date.now();if(!light)link.lastFullSyncedAt=link.lastSyncedAt;link.imageStudioFingerprint??=vh2ImageStudioFingerprint(companion);
         const s=projection.state,c=s.truth.companion;link.runtimeReboot=s.runtimeReboot||null;link.currentAge=companionCurrentAge(c);link.calendarAges=c.vh2Calendar?.ages||{};
         await vh2EnsureAssetUrls(timeline,[...(s.communication.messages||[]).map(m=>m.assetId),...(s.photos||[]).map(p=>p.assetId),...(c.vh2Assets?.entries||[]).map(entry=>entry.assetId)]);
+        const hiddenClipIds=new Set(s.hiddenClipMessageIds||[]);
+        const latest=vh2NormalizeProjectionMessages(companion,timeline,s.communication.messages);
+        const projectionMessageSignature=vh2ProjectionMessageSignature(s.communication.messages);
+        const projectionMessagesCurrent=link.messageMergeVersion===2
+            &&link.projectionMessageSignature===projectionMessageSignature
+            &&vh2ProjectionTailMatches(timeline,latest,hiddenClipIds);
         link.clips=s.clips||[];link.conversationDeleted=!!s.communication.deletedAt;
         if(s.communication.name)timeline.name=s.communication.name;
         if(link.conversationGeneration!==(s.communication.generation||0)){
@@ -355,7 +418,7 @@ async function vh2PollOwned(companion,timeline,options={}){
             link.conversationGeneration=s.communication.generation||0;link.transcriptBefore=undefined;
         }
         link.contactRelationship={role:c.connectionType||'stranger',context:c.relationshipContext||'',knownBeforeDays:c.knownBeforeDays||0};
-        if(link.revision===projection.revision&&link.error===providerError&&link.requiresMigration===!!projection.requiresMigration&&link.workerSignature===workerSignature)return;
+        if(link.revision===projection.revision&&link.error===providerError&&link.requiresMigration===!!projection.requiresMigration&&link.workerSignature===workerSignature&&projectionMessagesCurrent)return;
         link.workerSignature=workerSignature;link.providerJobs=workerStatus.jobs;link.imageProvider=imageProvider;link.flightProvider=flightProvider;link.textProvider=textProvider;link.serviceStatus=serviceStatus;link.dialogueError=serviceStatus.dialogueError||'';link.imageStudioFingerprint??=vh2ImageStudioFingerprint(companion);
         if(s.clips){const local=new Map();for(const t of state.companionTimelines?.[companion.id]?.sessions||[])for(const j of t.runtime?.videoJobs||[])if(j.status==='ready'&&(j.assetId||j.outputUrl||j.bundledSrc)&&!j.deletedAt)local.set(j.id,j);for(const j of companion.videoJobs||[])if(!local.has(j.id)||j.deletedAt||j.status==='ready')local.set(j.id,j);for(const j of s.clips){const prior=local.get(j.id)||companion.startingVideoClips?.find(seed=>seed.id===j.id);local.set(j.id,normalizeCompanionVideoJob({...prior,...j,...(!j.deletedAt&&['draft','ready'].includes(j.status)&&prior?.status==='ready'?{status:'ready',assetId:prior.assetId,outputUrl:prior.outputUrl,bundledSrc:prior.bundledSrc}:{})}));}companion.videoJobs=[...local.values()];}
         changed=true;link.requiresMigration=!!projection.requiresMigration;link.psychology=s.truth.companion.vh2Psychology?.policy;link.conversationAppraisal=c.vh2Psychology?.conversationPolicy;link.relationshipLearning=c.vh2Psychology?.relationshipPolicy;link.checkIns=c.vh2Psychology?.checkIns||[];link.photos=s.photos||[];link.socialPosts=s.social?.posts||[];link.socialSettings={enabled:c.socialFeedEnabled,frequency:c.socialPostFrequency,audience:c.socialAudience};link.clipSettings={enabled:c.allowVideoClips};link.error=providerError;link.revision=projection.revision;link.running=s.running;link.autoReplies=!!s.integration?.autoReplies;
@@ -366,13 +429,8 @@ async function vh2PollOwned(companion,timeline,options={}){
         // Clip jobs belong to the service state, outside truth.companion.
         // Do not let the legacy runtime restore erase the just-loaded queue.
         if(s.clips)timeline.runtime.videoJobs=companion.videoJobs;
-        const pendingIds=new Set((link.outbox||[]).filter(command=>command.type==='receive_message').map(command=>'vh2-pending:'+command.key));
-        const hiddenClipIds=new Set(s.hiddenClipMessageIds||[]);
-        const retained=new Map(timeline.messages.filter(m=>!hiddenClipIds.has(m.id)&&(!m.id.startsWith('vh2-pending:')||pendingIds.has(m.id)||m.deliveryState==='failed')).map(m=>[m.id,m]));
-        const latest=s.communication.messages.map(m=>({...normalizeCompanionMessage({...m,photo:m.assetId&&m.type==='photo'?vh2PhotoAssetUrl(link.worldId,m.assetId,timeline):m.photo,audio:m.assetId&&m.type==='voice'?vh2PhotoAssetUrl(link.worldId,m.assetId,timeline):m.audio,role:m.role==='assistant'?'companion':m.role,
-            deliveryState:m.role==='assistant'?'delivered':m.readAt?'read':'delivered'}),text:m.text}));
-        for(const m of latest)retained.set(m.id,m);
-        timeline.messages=[...retained.values()].sort((a,b)=>a.timestamp-b.timestamp);
+        vh2ReconcileProjectionMessages(companion,timeline,latest,hiddenClipIds);
+        link.messageMergeVersion=2;link.projectionMessageSignature=projectionMessageSignature;
         if(getActiveCompanionTimeline(companion.id)===timeline){
             applyCompanionRuntime(companion,timeline.runtime);state.companionThreads[companion.id]=timeline.messages;
         }
@@ -384,6 +442,8 @@ async function vh2CreateTimeline(companion){
     if(!companion||companionTimelineBusy(companion))return;
     const existing=ensureCompanionTimelineStore(companion.id).sessions.find(t=>t.vh2?.worldId);
     if(existing){activateCompanionTimeline(companion.id,existing.id);await vh2Poll(companion,existing,{force:true,throwOnError:true});if(existing.vh2.starterProfilePending)await vh2ImportStarterProfile(companion);return existing;}
+    const age=Number(companion.age);
+    if(!Number.isFinite(age)||age<18||age>120)throw Error('Set an explicit adult age from 18 to 120 in Edit human before starting this life.');
     await vh2SyncProvider(companion);
     const old=getActiveCompanionTimeline(companion.id),personaId=old.personaId||('player:'+companion.id);
     const timeline=old&&!old.vh2&&!old.messages.length?old:createCompanionTimeline(companion,{name:'Conversation'});
@@ -597,6 +657,9 @@ async function vh2PreparePhoto(companion,timeline,photoId,authored=safeJsonClone
         const worldId=timeline.vh2.worldId;
         const snapshot=await vh2Request(timeline,'/vh2/photo-job?worldId='+encodeURIComponent(worldId)+'&id='+encodeURIComponent(photoId));
         const frozen={...authored,...snapshot.companion,id:authored.id};
+        // Compact captures keep only service-owned visual fields. Retain authored
+        // places and other omitted profile data while honoring explicit snapshot values.
+        frozen.lifeProfile={...(authored.lifeProfile||{}),...(snapshot.companion.lifeProfile||{})};
         const renderer=timeline.vh2.imageProvider,referenceCapture=snapshot.destination==='reference'||!!snapshot.photoContext?.referenceStudy;
         if(renderer?.configured&&vh2SupportsDurableImages(companion,timeline)&&!(referenceCapture&&authored.referenceImageSource))Object.assign(frozen,{imageSource:renderer.provider,imageModel:renderer.model==='provider default'?'':renderer.model,mcpImageTool:renderer.tool||'',mcpImageArguments:safeJsonClone(renderer.arguments||{}),imageParameters:safeJsonClone(renderer.imageParameters||{}),imageProviderOptions:safeJsonClone(renderer.imageProviderOptions||{}),imageProviderTag:renderer.imageProviderTag||''});
         if(renderer?.configured&&vh2SupportsDurableImages(companion,timeline)&&!(referenceCapture&&authored.referenceImageSource)){
@@ -615,12 +678,17 @@ async function vh2PreparePhoto(companion,timeline,photoId,authored=safeJsonClone
         await vh2EnsureAssetUrls(timeline,(snapshot.referenceAssets||[]).map(e=>e.assetId));const bibleReferences=await Promise.all((snapshot.referenceAssets||[]).map(e=>vh2PhotoData(vh2PhotoAssetUrl(worldId,e.assetId,timeline))));
         if(context.assetStudy?.role==='identity'&&!bibleReferences.length&&authored.basePhoto)bibleReferences.push(await vh2PhotoData(authored.basePhoto));
         context.bibleRoles=(snapshot.referenceAssets||[]).map(e=>({role:e.role,label:e.label}));
-        const references=await Promise.all(companionPhotoReferences(frozen,snapshot.scene,{photoContext:context,previousPhoto:previous,bibleReferences}).map(source=>vh2PhotoData(source)));
+        const photoOptions={photoContext:context,previousPhoto:previous,bibleReferences};
+        const referencePlan=frozen.imageSource==='comfyui'?companionComfyReferencePlan(frozen,snapshot.scene,photoOptions):null;
+        const selectedReferences=referencePlan?.selected||companionPhotoReferences(frozen,snapshot.scene,photoOptions);
+        const references=await Promise.all(selectedReferences.map(source=>vh2PhotoData(source)));
+        const attachedPrevious=referencePlan&&!referencePlan.previousAttached?null:previous;
         if(context.referenceStudy&&(!context.assetStudy||context.assetStudy.requiresReference)&&!references.length)throw Error('Upload and approve an identity reference before generating missing views.');
         if(references.length>1&&['local_image'].includes(frozen.imageSource))throw Error('This local image route cannot yet preserve multiple VH2 references. Choose a multi-reference provider.');
         const referenceHashes=await Promise.all(references.map(async ref=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(ref)))).map(b=>b.toString(16).padStart(2,'0')).join('')));
-        const manifest={style:context.style||'',direction:context.direction||'',promptPreview:buildCompanionPhotoPrompt(frozen,snapshot.scene,{photoContext:context,previousPhoto:previous,atMs:context.atMs,captureType:snapshot.captureType}),referenceHashes,provider:String(['higgsfield','magnific','local_image','comfyui'].includes(frozen.imageSource)?frozen.imageSource:companionImageProviderId(frozen)),model:String(frozen.imageModel||'provider default')};
-        return {snapshot,frozen,context,previous,bibleReferences,references,manifest,photoId};
+        const manifest={style:context.style||'',direction:context.direction||'',promptPreview:buildCompanionPhotoPrompt(frozen,snapshot.scene,{photoContext:context,previousPhoto:attachedPrevious,bibleReferences,attachedReferences:referencePlan?.selected,hasReference:referencePlan?.identityAttached,atMs:context.atMs,captureType:snapshot.captureType}),referenceHashes,provider:String(['higgsfield','magnific','local_image','comfyui'].includes(frozen.imageSource)?frozen.imageSource:companionImageProviderId(frozen)),model:String(frozen.imageModel||'provider default')};
+        if(referencePlan)manifest.usedReferenceAssetIds=(snapshot.referenceAssets||[]).filter((entry,index)=>selectedReferences.includes(bibleReferences[index])).map(entry=>entry.id);
+        return {snapshot,frozen,context,previous,bibleReferences,references,referencePlan,manifest,photoId};
 }
 async function vh2GeneratePhoto(companion,timeline,scene,captureType,destination='private_chat',existingPhotoId=null,reviewed=null,onProgress=()=>{}){
     if(vh2PhotoLocks.has(timeline.id))throw Error('Photo generation is already running.');
@@ -667,9 +735,11 @@ async function vh2LoadHistory(companion,timeline){
     const endpoint='/vh2/transcript?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline)+'&before=';
     let result=await vh2Request(timeline,endpoint+(link.transcriptBefore||0));
     if(link.transcriptBefore===undefined&&result.before!==null&&result.messages.every(m=>timeline.messages.some(existing=>existing.id===m.id)))result=await vh2Request(timeline,endpoint+result.before);
-    await vh2EnsureAssetUrls(timeline,result.messages.map(m=>m.assetId));const merged=new Map(result.messages.map(m=>[m.id,{...normalizeCompanionMessage({...m,photo:m.assetId&&m.type==='photo'?vh2PhotoAssetUrl(link.worldId,m.assetId,timeline):m.photo,audio:m.assetId&&m.type==='voice'?vh2PhotoAssetUrl(link.worldId,m.assetId,timeline):m.audio,role:m.role==='assistant'?'companion':m.role,deliveryState:m.role==='assistant'?'delivered':m.readAt?'read':'delivered'}),text:m.text}]));
-    for(const message of timeline.messages)merged.set(message.id,message);
-    timeline.messages=[...merged.values()].sort((a,b)=>a.timestamp-b.timestamp);link.transcriptBefore=result.before;
+    await vh2EnsureAssetUrls(timeline,result.messages.map(m=>m.assetId));
+    const pageMessages=vh2NormalizeProjectionMessages(companion,timeline,result.messages);
+    const existingIds=new Set(timeline.messages.map(message=>message.id));
+    const older=pageMessages.filter(message=>!existingIds.has(message.id)&&vh2MessageMatchesConversation(message,link));
+    timeline.messages=vh2DedupeCanonicalMessages([...older,...timeline.messages]);link.transcriptBefore=result.before;
     if(getActiveCompanionTimeline(companion.id)===timeline)state.companionThreads[companion.id]=timeline.messages;
     await saveVirtualHumansState();
     if(state.activeCompanionId===companion.id&&getActiveCompanionTimeline(companion.id)===timeline){
@@ -728,7 +798,7 @@ function vh2RenderSavedGallery(companion,timeline,content){
  const posts=[...new Map([...(link.libraryPosts||[]),...(link.socialPosts||[])].map(p=>[p.id,p])).values()];
  const saved=all.filter(p=>p.destination==='gallery'&&['captured','submitted'].includes(p.status));
  const ready=all.filter(p=>p.destination==='gallery'&&p.assetId);
- const published=posts.filter(p=>p.status==='published'&&p.visibility==='public'&&p.assetId&&!ready.some(photo=>photo.assetId===p.assetId));
+ const published=posts.filter(p=>p.status==='published'&&p.visibility==='public'&&p.assetId&&!ready.some(photo=>photo.id===p.photoId));
  content.innerHTML='<section class="vh-saved-gallery"><header><div><h3>Gallery</h3><p>Saved ideas are free. Generate when you want, with the original prompt and references.</p></div><button type="button" class="tool-btn" data-image-activity>Image activity</button></header><div data-saved-moments></div><div class="vh-gallery-ready" data-gallery-ready></div></section>';
  content.querySelector('[data-image-activity]').onclick=()=>vh2OpenImageActivity(companion,timeline);
  const moments=content.querySelector('[data-saved-moments]');
@@ -743,7 +813,7 @@ function vh2RenderSavedGallery(companion,timeline,content){
   moments.append(card);
  }
  const images=content.querySelector('[data-gallery-ready]');
- for(const photo of [...ready,...published]){const figure=document.createElement('figure');figure.innerHTML=`<img loading="lazy" src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,photo.assetId,timeline))}" alt="${escapeHTML(photo.caption||photo.scene||'Saved photo')}"><figcaption>${escapeHTML(posts.some(p=>p.assetId===photo.assetId&&p.status==='published')?'Shared on the social feed':'Private gallery · not posted or sent')}</figcaption>`;images.append(figure);}
+ for(const {photo,shared} of [...ready.map(photo=>({photo,shared:posts.some(post=>post.photoId===photo.id&&post.status==='published')})),...published.map(photo=>({photo,shared:true}))]){const figure=document.createElement('figure');figure.innerHTML=`<img loading="lazy" src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,photo.assetId,timeline))}" alt="${escapeHTML(photo.caption||photo.scene||'Saved photo')}"><figcaption>${escapeHTML(shared?'Shared on the social feed':'Private gallery · not posted or sent')}</figcaption>`;images.append(figure);}
  if(!saved.length&&!ready.length&&!published.length)moments.innerHTML='<p class="vh-social-empty">No saved moments yet. Ideas will appear here as life unfolds.</p>';
  const earlier=document.createElement('button');earlier.type='button';earlier.className='tool-btn';earlier.textContent='Load earlier moments';earlier.disabled=link.photoBefore===null;
  earlier.onclick=async()=>{earlier.disabled=true;try{const result=await vh2Request(timeline,'/vh2/library?worldId='+encodeURIComponent(link.worldId)+vh2ConversationQuery(timeline)+'&kind=photo&before='+(link.photoBefore||0));link.libraryPhotos=[...new Map([...(link.libraryPhotos||[]),...result.items].map(p=>[p.id,p])).values()];link.photoBefore=result.before;await saveVirtualHumansState();renderCompanionSocialPanel(companion);}catch(error){showToast(error.message,'error');earlier.disabled=false;}};content.querySelector('section').append(earlier);
@@ -756,7 +826,7 @@ function vh2SleepExplanation(companion,link){
  return `Asleep since ${time} · ${Math.floor(minutes/60)}h ${minutes%60}m slept. Sleep pressure ${Math.round(sleep.pressure)}/100. Physical energy can recover before sleep need; waking also considers time slept and their body clock.`;
 }
 
-function vh2OpenFeedPhoto(link,post){
+function vh2OpenFeedPhoto(link,post,timeline){
  const d=document.createElement('dialog');d.className='vh-feed-lightbox';d.setAttribute('aria-label','Full photo');d.innerHTML=`<button type="button">Close photo</button><img src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,post.assetId,timeline))}" alt="${escapeHTML(post.caption||'Social photograph')}">${post.caption?`<p>${escapeHTML(post.caption)}</p>`:''}`;d.querySelector('button').onclick=()=>d.close();d.addEventListener('close',()=>d.remove(),{once:true});document.body.append(d);d.showModal();
 }
 
@@ -824,11 +894,11 @@ function vh2RenderSocial(companion,content,button,author=false){
         const date=new Date(post.publishedAt),stamp=date.toLocaleDateString(undefined,{month:'short',day:'numeric',...(date.getFullYear()!==new Date().getFullYear()?{year:'numeric'}:{})});
         card.dataset.socialPost=post.id;
         card.innerHTML=`<header class="vh-feed-post-head"><span class="vh-feed-avatar">${avatar}</span><div><strong>${escapeHTML(companion.name)}</strong><span>@${escapeHTML(handle)} · <time datetime="${date.toISOString()}" title="${escapeHTML(date.toLocaleString())}">${escapeHTML(stamp)}</time></span></div><details class="vh-feed-post-info"><summary aria-label="Post details">•••</summary><p>${post.origin==='authored_starter'?'From their starting profile':escapeHTML(post.captureContext?.placeLabel||'A moment from their life')}</p></details></header>${post.caption?`<p class="vh-feed-caption">${escapeHTML(post.caption)}</p>`:''}${post.assetId?`<button type="button" class="vh-feed-photo" aria-label="Open full photo"><img loading="lazy" src="${escapeHTML(vh2PhotoAssetUrl(link.worldId,post.assetId,timeline))}" alt="${escapeHTML(post.caption||'Photo from '+companion.name)}"></button>`:''}<div class="vh-feed-actions"></div>`;
-        card.querySelector('.vh-feed-photo')?.addEventListener('click',()=>vh2OpenFeedPhoto(link,post));
+        card.querySelector('.vh-feed-photo')?.addEventListener('click',()=>vh2OpenFeedPhoto(link,post,timeline));
         const actions=card.querySelector('.vh-feed-actions'),like=document.createElement('button');like.type='button';like.className='vh-feed-like'+(post.likedByPlayer?' is-liked':'');like.setAttribute('aria-pressed',String(!!post.likedByPlayer));like.setAttribute('aria-label',post.likedByPlayer?'Unlike post':'Like post');like.innerHTML=vh2FeedIcon('heart')+'<span>'+(post.likedByPlayer?'Liked':'Like')+'</span>';like.onclick=async()=>{like.disabled=true;try{await act('like_post',{postId:post.id,liked:!post.likedByPlayer});}finally{like.disabled=false;}};actions.append(like);
         const comments=document.createElement('details');comments.className='vh-feed-comments';comments.open=!!link.socialOpenComments?.[post.id];comments.innerHTML=`<summary>${post.comments.length?'View '+post.comments.length+' comment'+(post.comments.length===1?'':'s'):'Add a comment'}</summary>`;comments.ontoggle=()=>{if(comments.isConnected)(link.socialOpenComments||={})[post.id]=comments.open;};
         const commentButton=document.createElement('button');commentButton.type='button';commentButton.setAttribute('aria-label','Comment on post');commentButton.innerHTML=vh2FeedIcon('comment')+'<span>'+(post.comments.length||'Comment')+'</span>';commentButton.onclick=()=>{(link.socialOpenComments||={})[post.id]=true;comments.open=true;comments.querySelector('input').focus({preventScroll:true});};actions.append(commentButton);
-        if(author){const withdraw=document.createElement('button');withdraw.type='button';withdraw.textContent='Withdraw post';withdraw.onclick=()=>{withdraw.disabled=true;return act('withdraw_post',{postId:post.id});};card.querySelector('.vh-feed-post-info').append(withdraw);}
+        if(author){const withdraw=document.createElement('button');withdraw.type='button';withdraw.textContent='Withdraw post';withdraw.onclick=()=>{withdraw.disabled=true;return act('withdraw_post',{postId:post.id});};card.querySelector('.vh-feed-post-info > p').append(document.createElement('br'),withdraw);}
         for(const comment of post.comments){const row=document.createElement('p');const who=comment.authorName||(comment.authorId===timeline.vh2.personaId||comment.authorId===timeline.personaId?'You':'Contact');row.innerHTML=`<strong>${escapeHTML(who)}</strong> ${escapeHTML(comment.text)}`;comments.append(row);}
         const form=document.createElement('form'),input=document.createElement('input'),send=document.createElement('button');input.maxLength=500;input.required=true;input.placeholder='Add a comment…';input.setAttribute('aria-label','Comment on post');input.value=link.socialDrafts?.[post.id]||'';input.oninput=()=>{(link.socialDrafts ||= {})[post.id]=input.value;};send.type='submit';send.textContent='Post';form.append(input,send);
         form.onsubmit=async event=>{event.preventDefault();if(!input.value.trim()||send.disabled)return;send.disabled=true;send.textContent='Posting…';input.blur();try{await act('comment_post',{postId:post.id,text:input.value});}finally{send.disabled=false;send.textContent='Post';}};comments.append(form);card.append(comments);content.append(card);
@@ -1263,8 +1333,9 @@ function vh2TravelPanel(host,companion,timeline){
 // Older snapshots may omit assets; an explicit empty reference is a removal.
 function vh2RestorePhotoReferences(frozen,authored){
  const restore=(item,source)=>Object.prototype.hasOwnProperty.call(item,'photo')?item:{...item,photo:source?.photo};
- frozen.lifeProfile.places=frozen.lifeProfile.places.map(p=>restore(p,authored.lifeProfile.places.find(x=>x.id===p.id)));
- if(frozen.lifeProfile.world?.items)frozen.lifeProfile.world.items=frozen.lifeProfile.world.items.map(i=>restore(i,authored.lifeProfile.world?.items?.find(x=>x.id===i.id)));
+ const authoredPlaces=authored.lifeProfile?.places||[];
+ frozen.lifeProfile.places=(frozen.lifeProfile.places||[]).map(p=>restore(p,authoredPlaces.find(x=>x.id===p.id)));
+ if(frozen.lifeProfile.world?.items)frozen.lifeProfile.world.items=frozen.lifeProfile.world.items.map(i=>restore(i,authored.lifeProfile?.world?.items?.find(x=>x.id===i.id)));
 }
 
 // Reference generation state belongs to the timeline, not to a button that polling replaces.

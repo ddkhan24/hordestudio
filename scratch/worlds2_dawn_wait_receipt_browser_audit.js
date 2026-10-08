@@ -123,7 +123,8 @@ Captain Iven: "Gear up! We're moving out. If the ranger hasn't come back, we sea
             };
             const run = async id => {
                 const world = { ...rawWorld, id, model: 'offline/model',
-                    contextSize: 32768, maxTokens: 2048 };
+                    contextSize: 32768, maxTokens: 2048,
+                    kernel: { ...rawWorld.kernel, resolveFirst: false, sceneDrafts: false } };
                 state.worlds = [world];
                 state.worldInstances = { [id]: { sessions: [], activeSessionId: null } };
                 state.activeWorldId = id;
@@ -245,7 +246,8 @@ Captain Iven: "Gear up! We're moving out. If the ranger hasn't come back, we sea
             exact: 727, dawn: 722, question: null, hypothetical: null,
             ambiguous: null, completion: true, referencedCrowdRejected: true
         });
-        assert.equal(result.prompts.length, 9);
+        assert(result.prompts.length >= 9 && result.prompts.length <= 18,
+            'each of nine turns may make at most one validation-guided repair retry');
         for (const prompt of result.prompts) {
             assert.match(prompt, /minutes_elapsed:727/);
             assert.match(prompt, /Anonymous villagers, guards and crowds/);

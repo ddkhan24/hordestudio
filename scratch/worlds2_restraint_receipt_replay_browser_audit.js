@@ -30,6 +30,7 @@ const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'wor
             clearInterval(companionAgencyTimer);
             clearInterval(companionAlwaysOnTimer);
             const world = { ...rawWorld, model: 'offline/model', contextSize: 32768, maxTokens: 2048 };
+            world.kernel={...world.kernel,sceneDrafts:false}; // Recorded legacy restraint receipt.
             state.worlds = [world];
             state.activeWorldId = world.id;
             state.apiKey = 'offline-fixture';
@@ -78,10 +79,14 @@ const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'wor
             window.fetch = async (url, options = {}) => {
                 if (!String(url).includes('/chat/completions')) return realFetch(url, options);
                 const body = JSON.parse(options.body || '{}');
+                if (body.messages?.some(message => String(message.content).includes('[AUTHORITATIVE COMMITTED TURN]')))
+                    return new Response(JSON.stringify({ choices: [{ message: { content: phase.narrative } }] }),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } });
                 if (body.stream) {
                     const chunk = { choices: [{ delta: { content: phase.narrative, tool_calls: [{ index: 0,
                         id: 'live-replay-tool', type: 'function', function: {
-                            name: 'commit_world_turn', arguments: JSON.stringify(phase.receipt)
+                            name: 'commit_world_turn', arguments: JSON.stringify({ ...phase.receipt,
+                                action_resolution: { kind: 'physical', status: 'resolved', outcome: phase.narrative } })
                         } }] }, finish_reason: 'tool_calls' }] };
                     return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`,
                         { status: 200, headers: { 'Content-Type': 'text/event-stream' } });

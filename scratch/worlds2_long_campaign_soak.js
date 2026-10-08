@@ -130,17 +130,22 @@ async function snapshot(page) {
                         else options.signal?.addEventListener('abort', fail, { once: true });
                     });
                 }
-                const receipt = { summary: `No lasting change on turn ${soak.serial}.`,
-                    scene: { player_location_id: 'room', player_location_changed: false, present_character_ids: [] },
-                    events: [], entity_updates: [], state_updates: {} };
+                const variant = soak.mode === 'reroll' ? ' alternate' : '';
+                const sceneText = `Scene #${soak.serial}${variant}: You observe a clear, uneventful moment after Action #${soak.serial}.`;
+                const receipt = { protocol:'scene_draft_v2',narrative:[{id:'p1',text:sceneText}],
+                    actions:[{request:`Action #${soak.serial}`,kind:'observation',status:'answered',response_id:'p1'}],
+                    events:[],effects:{},speech:[],commitments:[] };
                 if (!body.stream) {
-                    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(receipt) } }],
+                    const repair = JSON.stringify(body.messages || []).includes('[WORLD TURN RECEIPT REPAIR]');
+                    return new Response(JSON.stringify({ choices: [{ message: {
+                        content: repair ? JSON.stringify(receipt) : sceneText } }],
                         usage: { prompt_tokens: 80, completion_tokens: 20, total_tokens: 100 } }),
                     { status: 200, headers: { 'Content-Type': 'application/json' } });
                 }
-                const variant = soak.mode === 'reroll' ? ' alternate' : '';
-                const content = `Scene #${soak.serial}${variant}: A clear, uneventful moment.\n<world_turn_receipt>${JSON.stringify(receipt)}</world_turn_receipt>`;
-                const event = { choices: [{ delta: { content }, finish_reason: 'stop' }],
+                const event = { choices: [{ delta: { content: '', tool_calls: [{ index: 0,
+                    id: `soak_receipt_${soak.serial}`, type: 'function', function: {
+                        name: 'commit_world_turn', arguments: JSON.stringify(receipt) } }] },
+                    finish_reason: 'tool_calls' }],
                     usage: { prompt_tokens: 80, completion_tokens: 20, total_tokens: 100 } };
                 return new Response(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`,
                     { status: 200, headers: { 'Content-Type': 'text/event-stream' } });

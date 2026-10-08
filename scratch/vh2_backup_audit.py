@@ -1,6 +1,6 @@
 """Portable archive integrity, isolation, credential exclusion and paused recovery."""
 from test_runtime import node_executable
-import sys,tempfile,unittest,json,gzip,uuid,io,zipfile,base64,hashlib
+import sys,tempfile,unittest,json,gzip,uuid,io,zipfile,base64,hashlib,sqlite3
 from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -99,6 +99,70 @@ class Backup(unittest.TestCase):
    result=vh2_backup.restore_character(copied,{'companionId':'checkpoint-copy','importId':'checkpoint-copy','archives':[{'worldId':self.w,'data':later}]})
    copied_id=result['worlds'][0]['worldId'];self.assertEqual(copied.projection(copied_id)['state'],copied.replay(copied_id))
   finally:copied.close()
+ def test_workspace_checkpoints_restore_atomically_and_reject_damage(self):
+  other=self.source.command(dict(schemaVersion=1,key='create-second',type='create',name='Morgan'))['worldId']
+  checkpoints=[(self.w,vh2_backup.export_checkpoint(self.source,self.w)),(other,vh2_backup.export_checkpoint(self.source,other))]
+  def package(entries):
+   output=io.BytesIO();manifest={'format':'horde-vh2-workspace-checkpoints','version':1,
+       'archives':[{'worldId':world_id,'path':'lives/'+str(index).zfill(4)+'.zip'} for index,(world_id,_) in enumerate(entries)]}
+   with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_STORED) as archive:
+    archive.writestr('manifest.json',json.dumps(manifest))
+    for index,(_,checkpoint) in enumerate(entries):archive.writestr('lives/'+str(index).zfill(4)+'.zip',checkpoint)
+   return output.getvalue()
+  upload=package(checkpoints)
+  result=vh2_backup.restore_checkpoint_workspace(self.dest,upload)
+  self.assertFalse(result['alreadyRestored'])
+  self.assertEqual({item['worldId'] for item in result['worlds']},{self.w,other})
+  for world_id in (self.w,other):
+   self.assertFalse(self.dest.projection(world_id)['state']['running'])
+   self.assertEqual(self.dest.projection(world_id)['state'],self.dest.replay(world_id))
+  before={world_id:self.dest.projection(world_id) for world_id in (self.w,other)}
+  self.dest.close();self.dest=self.open('destination')
+  retry=vh2_backup.restore_checkpoint_workspace(self.dest,upload)
+  self.assertTrue(retry['alreadyRestored'])
+  self.assertEqual(retry['worlds'],result['worlds'])
+  self.assertEqual(before,{world_id:self.dest.projection(world_id) for world_id in (self.w,other)})
+  with self.assertRaises(Conflict):vh2_backup.restore_checkpoint_workspace(self.dest,package(checkpoints[::-1]))
+  self.dest.command(dict(schemaVersion=1,key='changed-after-restore',type='set_running',worldId=self.w,
+      expectedRevision=self.dest.projection(self.w)['revision'],running=True))
+  changed=self.dest.projection(self.w)
+  with self.assertRaises(Conflict):vh2_backup.restore_checkpoint_workspace(self.dest,upload)
+  self.assertEqual(changed,self.dest.projection(self.w))
+  state_changed=self.open('state-changed')
+  try:
+   vh2_backup.restore_checkpoint_workspace(state_changed,upload)
+   with state_changed.connect() as db:
+    row=db.execute('SELECT state FROM worlds WHERE id=?',(self.w,)).fetchone()
+    altered=json.loads(row['state']);altered['truth']['companion']['name']='Changed without revision'
+    db.execute('UPDATE worlds SET state=? WHERE id=?',(json.dumps(altered),self.w))
+   with self.assertRaises(Conflict):vh2_backup.restore_checkpoint_workspace(state_changed,upload)
+   self.assertEqual(state_changed.projection(self.w)['state']['truth']['companion']['name'],'Changed without revision')
+  finally:state_changed.close()
+  conflict=self.open('conflict')
+  try:
+   vh2_backup.restore(conflict,checkpoints[1][1]);before=conflict.projection(other)
+   with self.assertRaises(Conflict):vh2_backup.restore_checkpoint_workspace(conflict,package(checkpoints))
+   self.assertEqual(before,conflict.projection(other))
+   self.assertEqual(len(conflict.status()['worlds']),1)
+  finally:conflict.close()
+  damaged=self.open('damaged')
+  try:
+   corrupt=checkpoints[1][1][:-100]
+   with self.assertRaises(ValueError):vh2_backup.restore_checkpoint_workspace(damaged,package([checkpoints[0],(other,corrupt)]))
+   self.assertEqual(damaged.status()['worlds'],[])
+   with self.assertRaises(ValueError):vh2_backup.restore_checkpoint_workspace(damaged,package([checkpoints[0],(self.w,checkpoints[1][1])]))
+   self.assertEqual(damaged.status()['worlds'],[])
+  finally:damaged.close()
+  receipt_failure=self.open('receipt-failure')
+  try:
+   with receipt_failure.connect() as db:
+    db.execute('''CREATE TABLE vh2_workspace_restore_receipts (
+      archive_sha256 TEXT PRIMARY KEY, receipt TEXT NOT NULL, state_hashes TEXT NOT NULL, created_at INTEGER NOT NULL)''')
+    db.execute('''CREATE TRIGGER fail_workspace_receipt BEFORE INSERT ON vh2_workspace_restore_receipts
+      BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END''')
+   with self.assertRaises(sqlite3.IntegrityError):vh2_backup.restore_checkpoint_workspace(receipt_failure,upload)
+   self.assertEqual(receipt_failure.status()['worlds'],[])
+  finally:receipt_failure.close()
  def package(self,body,extra=None):
   out=io.BytesIO();metadata={'format':'horde-character-lives','version':1,**body,'archives':[]}
   with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as z:

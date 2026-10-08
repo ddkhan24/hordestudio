@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-VERSION="${1:-18.2.1}"
+VERSION="${1:-18.3}"
 ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 BUILD_DIR=$(mktemp -d)
 PACKAGE_DIR="$BUILD_DIR/Horde Studio"

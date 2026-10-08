@@ -59,7 +59,7 @@ const root = path.resolve(__dirname, '..');
                 model: 'fixture/model', contextSize: 32768, maxTokens: 2048,
                 dmPrompt: 'A quiet guard hall.', intro: '', startLocationId: 'hall',
                 locations: [{ id: 'hall', name: 'Hall', description: 'A stone hall.', exits: [] }],
-                entities: [], kernel: { enabled: true, memoryMode: 'ledger', repairMode: 'adaptive' },
+                entities: [], kernel: { enabled: true, memoryMode: 'ledger', repairMode: 'adaptive', resolveFirst: false, sceneDrafts: false },
                 hudConfig: { showClock: false, showQuests: false, showLedger: true, stats: [
                     { id: 'hp', name: 'Health', value: 12, min: 0, max: 12 }
                 ] },

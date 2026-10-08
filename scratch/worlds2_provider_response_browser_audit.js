@@ -38,7 +38,7 @@ const root = path.resolve(__dirname, '..');
                 model: 'fixture/model', contextSize: 32768, maxTokens: 1024,
                 dmPrompt: 'A quiet room.', intro: '', startLocationId: 'hall',
                 locations: [{ id: 'hall', name: 'Hall', description: 'A quiet room.', exits: [] }],
-                entities: [], kernel: { enabled: true, memoryMode: 'ledger', repairMode: 'adaptive' },
+                entities: [], kernel: { enabled: true, memoryMode: 'ledger', repairMode: 'adaptive', resolveFirst: false, sceneDrafts: false },
                 hudConfig: { showClock: false, showQuests: false, showLedger: false, stats: [] },
                 gameRules: { profileId: 'adventure', modules: {
                     stats: false, health: false, conditions: false, inventory: false,
@@ -63,8 +63,25 @@ const root = path.resolve(__dirname, '..');
             window.fetch = async (url, options = {}) => {
                 if (!String(url).includes('/chat/completions')) return realFetch(url, options);
                 const body = JSON.parse(options.body || '{}');
-                calls.push({ phase, stream: body.stream, hasTools: !!body.tools });
-                if (!body.stream) throw new Error(`Unexpected secondary completion in ${phase}`);
+                calls.push({ phase, stream: body.stream, hasTools: !!body.tools,
+                    purpose: String(body.messages?.at(-1)?.content || '').slice(0, 110) });
+                if (!body.stream) {
+                    if (phase === 'tool_only_rescue_inline'
+                        && String(body.messages?.at(-1)?.content || '').includes('requested tools have been processed')) {
+                        const rescuedReceipt = { ...receipt,
+                            state_updates: { ledger_update: 'The player heard the floorboards creak.' } };
+                        const rescued = `The floorboards creak under your boots.\n<world_turn_receipt>${JSON.stringify(rescuedReceipt)}</world_turn_receipt>`;
+                        return new Response(JSON.stringify({ choices: [{ message: { content: rescued } }] }),
+                            { status: 200, headers: { 'Content-Type': 'application/json' } });
+                    }
+                    if (phase === 'rejected_tool_only_repaired') {
+                        const isRepair = String(body.messages?.[0]?.content || '').includes('[WORLD TURN RECEIPT REPAIR]');
+                        return new Response(JSON.stringify({ choices: [{ message: {
+                            content: isRepair ? JSON.stringify(receipt) : 'The room is still.'
+                        } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+                    }
+                    throw new Error(`Unexpected secondary completion in ${phase}`);
+                }
                 const completion = (content, withTool = false) => ({
                     choices: [{ message: { content,
                         ...(withTool ? { tool_calls: [{ index: 0, id: 'receipt-' + phase,
@@ -78,6 +95,33 @@ const root = path.resolve(__dirname, '..');
                     if (phase === 'sse_tool') delta.tool_calls = completion('', true).choices[0].message.tool_calls;
                     return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`,
                         { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+                }
+                if (phase === 'tool_only_rescue_inline') {
+                    const delta = { content: '', tool_calls: [{ index: 0, id: 'empty-tool',
+                        type: 'function', function: { name: 'commit_world_turn', arguments: '{}' } }] };
+                    return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: 'tool_calls' }] })}\n\ndata: [DONE]\n\n`,
+                        { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+                }
+                if (phase === 'two_tools_first_rejected') {
+                    const first = { ...receipt, scene: null };
+                    const message = { ...completion('The room is still.').choices[0].message,
+                        tool_calls: [first, receipt].map((candidate, index) => ({
+                            index, id: `candidate-${index}`, type: 'function',
+                            function: { name: 'commit_world_turn', arguments: JSON.stringify(candidate) }
+                        })) };
+                    return new Response(JSON.stringify({ choices: [{ message, finish_reason: 'tool_calls' }] }),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } });
+                }
+                if (phase === 'rejected_tool_only_repaired') {
+                    const delta = { content: '', tool_calls: [{ index: 0, id: 'rejected-tool',
+                        type: 'function', function: { name: 'commit_world_turn', arguments: JSON.stringify({ scene: null }) } }] };
+                    return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: 'tool_calls' }] })}\n\ndata: [DONE]\n\n`,
+                        { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+                }
+                if (phase === 'json_tool_leaked_tail') {
+                    const leak = 'The door creaks.\n\n<{ "scene": {"player_location_id":"hall"}, "events": [] }<\n\n***\n\nWait, I must use the tool.';
+                    return new Response(JSON.stringify(completion(leak, true)),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } });
                 }
                 if (phase === 'json_tool' || phase === 'json_tool_local') return new Response(JSON.stringify(completion('The stones are still.', true)),
                     { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -128,6 +172,10 @@ const root = path.resolve(__dirname, '..');
                 sseTool: await run('sse_tool', 'I look around.'),
                 sseInline: await run('sse_inline', 'I inspect the candle.'),
                 jsonTool: await run('json_tool', 'I inspect the stones.'),
+                jsonToolLeakedTail: await run('json_tool_leaked_tail', 'I inspect the door.'),
+                toolOnlyRescueInline: await run('tool_only_rescue_inline', 'I listen to the floor.'),
+                twoToolsFirstRejected: await run('two_tools_first_rejected', 'I study the room.'),
+                rejectedToolOnlyRepaired: await run('rejected_tool_only_repaired', 'I study the wall.'),
                 jsonInline: await run('json_inline', 'I breathe.'),
                 jsonToolLocal: await run('json_tool_local', 'I inspect the stones again.'),
                 toolUnsupported: await run('tool_unsupported', 'I listen to the room.'),
@@ -139,6 +187,7 @@ const root = path.resolve(__dirname, '..');
                 httpError: await run('http_error', 'I ask for news.'),
                 authError: await run('auth_error', 'I ask the door.'),
                 stalled: await run('stalled_body', 'I examine the wall.'),
+                partialProtocol: scrubNarrativeArtifacts('The door creaks.\n\n<{ "scene"'),
                 calls, initialLength
             };
             return result;
@@ -149,6 +198,24 @@ const root = path.resolve(__dirname, '..');
         assert.equal(outcome.sseInline.text, 'The candle burns.');
         assert.equal(outcome.jsonTool.source, 'tool_call');
         assert.equal(outcome.jsonTool.text, 'The stones are still.');
+        assert.equal(outcome.jsonToolLeakedTail.source, 'tool_call');
+        assert.equal(outcome.jsonToolLeakedTail.text, 'The door creaks.',
+            'A malformed pseudo-JSON tool tail and OOC postamble must not reach the transcript.');
+        assert.equal(outcome.partialProtocol, 'The door creaks.',
+            'The partial pseudo-tool prefix must not flash during streaming.');
+        assert.equal(outcome.toolOnlyRescueInline.source, 'inline_narrative_rescue',
+            JSON.stringify({ turn: outcome.toolOnlyRescueInline,
+                calls: outcome.calls.filter(call => call.phase === 'tool_only_rescue_inline') }));
+        assert.equal(outcome.toolOnlyRescueInline.text, 'The floorboards creak under your boots.',
+            'A tagged receipt in narrative rescue must be validated before asking the model to repair again.');
+        assert.equal(outcome.twoToolsFirstRejected.source, 'tool_call',
+            'A rejected first tool candidate must not block a later valid receipt in the same response.');
+        assert.equal(outcome.rejectedToolOnlyRepaired.source, 'receipt_repair',
+            'A rejected tool-only response must be repaired before narrative follow-up.');
+        assert.equal(outcome.rejectedToolOnlyRepaired.text, 'The room is still.');
+        assert.deepEqual(outcome.calls.filter(call => call.phase === 'rejected_tool_only_repaired')
+            .map(call => [call.stream, call.hasTools]), [[true, true], [false, true], [false, false]],
+            'A rejected tool-only turn must repair canon before requesting prose.');
         assert.equal(outcome.jsonInline.source, 'inline_rescue');
         assert.equal(outcome.jsonInline.text, 'The air is clear.');
         assert.equal(outcome.jsonToolLocal.source, 'tool_call');
@@ -173,9 +240,10 @@ const root = path.resolve(__dirname, '..');
         assert.match(outcome.httpError.toast, /unsupported model/i);
         assert.match(outcome.authError.toast, /authorization/i);
         assert.match(outcome.stalled.toast, /stopped/i);
-        assert.equal(outcome.calls.length, 16, 'only unsupported-tools 400s may trigger a second request');
-        assert(outcome.calls.every(call => call.stream));
-        assert.equal(outcome.calls.filter(call => !call.hasTools).length, 2);
+        assert.equal(outcome.calls.length, 24,
+            'rejected receipts may use one bounded validation-guided repair retry');
+        assert.equal(outcome.calls.filter(call => !call.stream).length, 4);
+        assert.equal(outcome.calls.filter(call => !call.hasTools).length, 4);
         assert.deepEqual(outcome.calls.filter(call => call.phase === 'tool_unsupported').map(call => call.hasTools),
             [true, false]);
         assert.deepEqual(outcome.calls.filter(call => call.phase === 'tool_unsupported_local').map(call => call.hasTools),

@@ -30,10 +30,10 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   let status=await page.evaluate(()=>({worldId:getActiveCompanionTimeline('shared-life-fixture').vh2.worldId,persona:getActiveCompanionTimeline('shared-life-fixture').personaId,count:ensureCompanionTimelineStore('shared-life-fixture').sessions.length,messages:getCompanionThread('shared-life-fixture').length}));
   assert.equal(status.worldId,started.worldId);assert.equal(status.persona,'noah');assert.equal(status.count,2);assert.equal(status.messages,0);
   await page.locator('#companion-new-timeline-btn').click();picker=page.getByRole('dialog',{name:'New conversation'});await picker.getByRole('button',{name:'Noah · Current chat',exact:true}).click();await picker.waitFor({state:'detached'});assert.equal(await page.evaluate(()=>ensureCompanionTimelineStore('shared-life-fixture').sessions.length),2);
-  await page.locator('#cc-persona-select').selectOption('lena');await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').personaId==='lena');
-  await page.locator('#cc-profile-details > summary').click();await page.locator('.vh-contact-relationship [data-role]').selectOption('best_friend');await page.locator('.vh-contact-relationship [data-days]').fill('2000');await page.locator('.vh-contact-relationship [data-context]').fill('Friends since school.');await page.getByRole('button',{name:'Save connection',exact:true}).click();await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').vh2.contactRelationship.role==='best_friend');
+  await page.locator('#companion-new-timeline-btn').click();picker=page.getByRole('dialog',{name:'New conversation'});await picker.getByRole('button',{name:'Lena · Open existing chat',exact:true}).click();await picker.waitFor({state:'detached'});await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').personaId==='lena');
+  await page.locator('#vh-chat-more > summary').click();await page.locator('#cc-profile-details > summary').click();await page.locator('.vh-contact-relationship [data-role]').selectOption('best_friend');await page.locator('.vh-contact-relationship [data-days]').fill('2000');await page.locator('.vh-contact-relationship [data-context]').fill('Friends since school.');await page.getByRole('button',{name:'Save connection',exact:true}).click();await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').vh2.contactRelationship.role==='best_friend');
   await page.evaluate(async()=>{const t=getActiveCompanionTimeline('shared-life-fixture');await vhUiCommand(t,'receive_message',{text:'A private message from Lena.'});});
-  await page.locator('#cc-persona-select').selectOption('noah');await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').personaId==='noah');assert.equal(await page.evaluate(()=>getCompanionThread('shared-life-fixture').length),0);
+  await page.locator('#companion-new-timeline-btn').click();picker=page.getByRole('dialog',{name:'New conversation'});await picker.getByRole('button',{name:'Noah · Open existing chat',exact:true}).click();await picker.waitFor({state:'detached'});await page.waitForFunction(()=>getActiveCompanionTimeline('shared-life-fixture').personaId==='noah');assert.equal(await page.evaluate(()=>getCompanionThread('shared-life-fixture').length),0);
   await page.locator('#companion-new-timeline-btn').click();await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), 'vh-persona-conversations-desktop.png')});await page.setViewportSize({width:390,height:844});await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), 'vh-persona-conversations-mobile.png')});assert(await page.evaluate(()=>document.querySelector('.vh-conversation-picker').getBoundingClientRect().width<=390));await page.getByRole('dialog',{name:'New conversation'}).getByRole('button',{name:'Close',exact:true}).click();
   const result=await page.evaluate(async()=>{
    const c=getCompanion('shared-life-fixture');const archive=await buildCompanionArchivePayload(c,'portable-human');
@@ -55,6 +55,7 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   const template=await page.evaluate(async()=>{
    const archive=await buildCompanionArchivePayload(getCompanion('shared-life-fixture'),'character-template');
    if(archive.vh2ServiceArchives||archive.timelines)throw Error('Template leaked lived history.');
+   if(!/^data:image\/(?:png|jpeg|webp);base64,/.test(archive.companion.startingReferences[0]?.image||''))throw Error('Template reference needs a canonical image data URL.');
    const imported=await importCompanionArchiveData(archive);state.activeCompanionId=imported.id;
    await vh2CreateTimeline(imported);const t=getActiveCompanionTimeline(imported.id);await vhUiCommand(t,'set_running',{running:false});
    const video=await HordeDB.get('companionVideoAsset:'+imported.videoJobs[0].assetId);
@@ -107,7 +108,8 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
   assert.match(await activity.locator('.vh-image-purpose').textContent(),/Personal gallery idea/);
   await activity.getByRole('button',{name:'Close',exact:true}).click();
   await page.evaluate(()=>renderCompanionSocialPanel(getCompanion('shared-life-fixture')));
-  assert.match(await page.locator('.vh-gallery-ready').textContent(),/Private gallery · not posted or sent/);
+  assert.equal(await page.locator('.vh-gallery-ready figure').count(),2,'identical image bytes must keep distinct private and published records');
+  assert.match(await page.locator('.vh-gallery-ready figure').first().textContent(),/Private gallery · not posted or sent/);
   await page.setViewportSize({width:1440,height:1050});await page.screenshot({path:require('node:path').join(require('node:os').tmpdir(), 'vh-saved-gallery-desktop.png')});
   assert.deepEqual(errors,[]);console.log('PASS starter upload/playback before and after life creation, repair of missed starters, all four real chat-menu actions, last-chat deletion/reopening, persona isolation, shared life, both portable imports, saved gallery references, free preview and one explicit fixture image render. No external providers.');
  }finally{await browser?.close();server.kill('SIGTERM');}

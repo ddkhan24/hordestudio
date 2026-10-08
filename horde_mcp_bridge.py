@@ -133,6 +133,8 @@ STATIC_FILES = {
     "/style.css": ("style.css", "text/css"),
     "/app.js": ("app.js", "text/javascript"),
     "/worlds/model-client.js": ("worlds/model-client.js", "text/javascript"),
+    "/worlds/scene-draft.js": ("worlds/scene-draft.js", "text/javascript"),
+    "/worlds/turn-context.js": ("worlds/turn-context.js", "text/javascript"),
     "/large-archive.js": ("large-archive.js", "text/javascript"),
     "/bundled-humans.js": ("bundled-humans.js", "text/javascript"),
     "/human-package.js": ("human-package.js", "text/javascript"),
@@ -3342,7 +3344,20 @@ def comfy_generate(body: dict[str, Any]) -> str:
     if not nodes:
         nodes = [str(k) for k,v in workflow.items() if isinstance(v,dict) and v.get("class_type")=="LoadImage"]
     if references and len(nodes)<len(references):
-        raise ValueError(f"This ComfyUI workflow needs {len(references)} LoadImage inputs for these references, but has {len(nodes)}. Add connected LoadImage nodes or map their comma-separated IDs in reference order.")
+        supplied = body.get("referenceSources")
+        labels = supplied if isinstance(supplied, list) and len(supplied) == len(references) else []
+        sources = []
+        for index in range(len(references)):
+            label = labels[index] if labels and isinstance(labels[index], str) else ""
+            label = " ".join(label.split())[:120]
+            if not label or label.lower().startswith(("data:", "http:", "https:")):
+                label = "source not recorded"
+            sources.append(f"{index + 1}. {label}")
+        raise ValueError(
+            f"This ComfyUI workflow needs {len(references)} LoadImage inputs for these references, but has {len(nodes)}. "
+            f"Selected references: {'; '.join(sources)}. "
+            "Add connected LoadImage nodes or map their comma-separated IDs in reference order."
+        )
     reference_input = str(mapping.get("referenceInput") or "image")
     if any(not isinstance(workflow.get(node,{}).get('inputs'),dict) or reference_input not in workflow[node]['inputs'] for node in nodes[:len(references)]):
         raise ValueError("A configured ComfyUI reference node/input does not exist.")
@@ -4051,6 +4066,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 from virtual_humans.backend import vh2_backup
                 try:return self.respond(200,vh2_backup.restore_workspace(get_vh2_service(),json.loads(self.rfile.read(length))))
                 except VH2Conflict as error:return self.respond(409,{"error":str(error)})
+            if parsed_path == "/vh2/workspace/restore-checkpoints":
+                # A full local installation restore may span several gigabytes
+                # of media. Never expose the batch endpoint through a private
+                # host's reverse proxy, and never buffer the upload in RAM.
+                if REMOTE_VH2_MODE or not self.client_is_loopback():return self.respond(403,{"error":"Workspace checkpoint restore is local-only."})
+                from virtual_humans.backend import vh2_backup
+                length=int(self.headers.get("Content-Length","0"))
+                media_type=self.headers.get("Content-Type","").split(";",1)[0].strip().lower()
+                if media_type!="application/zip" or not 0<length<=vh2_backup.MAX_WORKSPACE_CHECKPOINT_UPLOAD:
+                    raise ValueError("The workspace checkpoint package is missing or exceeds the 4 GB limit.")
+                import tempfile
+                with tempfile.TemporaryFile() as upload:
+                    remaining=length
+                    while remaining:
+                        chunk=self.rfile.read(min(1024*1024,remaining))
+                        if not chunk:raise ValueError("Incomplete workspace checkpoint upload.")
+                        upload.write(chunk);remaining-=len(chunk)
+                    upload.seek(0)
+                    try:return self.respond(200,vh2_backup.restore_checkpoint_workspace(get_vh2_service(),upload))
+                    except VH2Conflict as error:return self.respond(409,{"error":str(error)})
             if parsed_path == "/vh2/character/restore":
                 if not self.vh2_access_allowed():return self.respond(403,{'error':'Character restore is not authorized.'})
                 from virtual_humans.backend import vh2_backup
