@@ -3,6 +3,8 @@
  * Run with: node scratch/world_intent_reliability_audit.js
  */
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const vm = require('node:vm');
 const { buildContext } = require('./app_source.js');
 
@@ -12,7 +14,7 @@ buildContext(vm, [
     'detectPlayerOutfitIntent', 'applyPlayerOutfitIntent',
     'accumulateWorldToolCall', 'parseWorldToolArguments',
     'findReferencedWorldNpcs', 'resolveNpcId',
-    'applyNarratedPresence'
+    'applyNarratedPresence', 'scrubNarrativeArtifacts'
 ], context);
 
 const tests = [];
@@ -105,6 +107,40 @@ test('a generic building never guesses between two plausible doors', () => {
 
 test('proper authored names beat generic map categories', () => {
     assert.equal(resolveMovement(movementWorld(true), 'I enter the Copper Inn').target?.id, 'inn');
+});
+
+test('compound office travel never mistakes the person left behind for a destination', () => {
+    const world = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'Policy Panic at Bramble and Pike.horde_world'), 'utf8'));
+    const reception = world.locations.find(location => /Reception Lobby/i.test(location.name));
+    const input = 'I leave Gloria at reception, cross the bullpen, and enter Denton Pike’s office. I tell Denton the state examiner is waiting for him.';
+    const result = resolveMovement(world, input, reception.id);
+    assert.match(result.phrase, /Denton Pike/i);
+    assert.match(result.target?.name || '', /Denton Pike.*Office/i);
+    assert.doesNotMatch(result.target?.name || '', /Gloria/i);
+    const carryingInput = "I ask Gloria to keep the examiner comfortable, then I take my training binder through the bullpen and into Denton Pike's office. I show my employee badge.";
+    const carrying = resolveMovement(world, carryingInput, reception.id);
+    assert.match(carrying.phrase, /Denton Pike/i);
+    assert.equal(carrying.target?.id, result.target?.id);
+    const waypoint = [...carryingInput.matchAll(/\b(?:through|into|across)\s+([^,.;!?]+?)(?=\s+(?:and|then)\s+|[,.;!?]|$)/ig)]
+        .map(match => context.resolveWorldMovementTarget(world, reception.id, match[1]))
+        .find(location => /Bullpen/i.test(location?.name || ''));
+    assert.match(waypoint?.name || '', /Bullpen/i, 'the explicitly traversed bullpen was not authorized');
+    assert.equal(context.extractUserMovementTarget('I take the binder to Gloria and ask her a question.'), '');
+});
+
+test('a coordinated command to another person does not move the player', () => {
+    assert.equal(context.extractUserMovementTarget('I tell Emily to walk to the hall and enter the bathroom.'), '');
+    assert.equal(context.extractUserMovementTarget('I tell Emily to wait, then enter the bathroom.'), 'the bathroom');
+});
+
+test('visible engine pseudo-calls and provider thought channels never reach players', () => {
+    const content = 'Gloria turns toward the door.\ncommit_world_turn(\n  scene={"player_location_id":"lobby"},\n  events=[]\n)\n<|channel>thought I should emit state <|channel>final\nThe inspector steps inside.';
+    const clean = context.scrubNarrativeArtifacts(content);
+    assert.match(clean, /Gloria turns/);
+    assert.match(clean, /inspector steps inside/);
+    assert.doesNotMatch(clean, /commit_world_turn|player_location_id|channel|should emit state/);
+    const pseudoCall = context.scrubNarrativeArtifacts('Denton leans forward.\n\ncall commit_world_turn {\n  events: [{type: "movement", actor_id: "player"}],\n  scene: {player_location_id: "loc_denton"}\n}');
+    assert.equal(pseudoCall, 'Denton leans forward.');
 });
 
 test('player outfit replacement, addition and removal preserve the right state', () => {

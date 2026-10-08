@@ -78,7 +78,11 @@ thread = threading.Thread(target=server.serve_forever, daemon=True)
 thread.start()
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 try:
-    for path, expected in [('/', b'<!DOCTYPE html>'), ('/app.js', b''), ('/virtual_humans/frontend/vh-page-builder.js', b'vhOpenPageBuilder'), ('/health', b'Horde Studio')]:
+    for path, expected in [('/', b'<!DOCTYPE html>'), ('/app.js', b''),
+                           ('/large-archive.js', b'HordeLargeArchive'),
+                           ('/worlds/model-client.js', b'HordeWorldModelClient'),
+                           ('/virtual_humans/frontend/vh-page-builder.js', b'vhOpenPageBuilder'),
+                           ('/health', b'Horde Studio')]:
         with opener.open('http://127.0.0.1:%s%s' % (server.server_port, path), timeout=10) as response:
             body = response.read()
             assert response.status == 200 and body and expected.lower() in body.lower(), path

@@ -3,6 +3,11 @@ name: Engine Checks
 on:
   pull_request:
   workflow_call:
+    inputs:
+      source_ref:
+        description: Git ref to check, when validating an existing release tag
+        required: false
+        type: string
   workflow_dispatch:
 
 permissions:
@@ -13,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -26,6 +33,38 @@ jobs:
         run: |
           node scratch/browser_storage_transaction_audit.js
           node scratch/browser_engine_smoke_audit.js
+          node scratch/world_insights_browser_audit.js
+          node scratch/world_mobile_play_browser_audit.js
+          node scratch/worlds2_composer_scroll_browser_audit.js
+          node scratch/worlds2_turn_telemetry_browser_audit.js
+          node scratch/worlds2_prompt_and_npc_browser_audit.js
+          node scratch/worlds2_route_closure_browser_audit.js
+          node scratch/worlds2_persistence_browser_audit.js
+          node scratch/worlds2_storage_migration_browser_audit.js
+          node scratch/worlds2_atomic_turn_persistence_browser_audit.js
+          node scratch/world_command_browser_audit.js
+          node scratch/worlds2_negated_movement_receipt_browser_audit.js
+          node scratch/worlds2_dawn_wait_receipt_browser_audit.js
+          node scratch/world_render_purity_browser_audit.js
+          node scratch/world_model_routes_browser_audit.js
+          node scratch/worlds2_startup_recovery_browser_audit.js
+          node scratch/worlds2_exit_unlock_browser_audit.js
+          node scratch/worlds2_life_seed_fallback_browser_audit.js
+          node scratch/worlds2_long_campaign_soak.js
+          HORDE_WORLDS_ONLY=1 node scratch/worlds2_campaign_browser_audit.js
+          node scratch/worlds2_manual_gate_browser_audit.js
+          node scratch/worlds2_narrated_check_browser_audit.js
+          node scratch/worlds2_receipt_boundary_browser_audit.js
+          node scratch/worlds2_provider_response_browser_audit.js
+          node scratch/worlds2_hosted_turn_deadline_browser_audit.js
+          node scratch/worlds2_pickup_receipt_replay_browser_audit.js
+          node scratch/worlds2_npc_knowledge_browser_audit.js
+          node scratch/worlds2_restraint_receipt_replay_browser_audit.js
+          node scratch/worlds2_introduced_arrival_repair_browser_audit.js
+          node scratch/worlds2_receipt_repair_timeout_browser_audit.js
+          node scratch/worlds2_call_telemetry_audit.js
+          node scratch/worlds2_model_attempt_audit.js
+          node scratch/worlds_starting_quests_browser_audit.js
           node scratch/human_package_browser_audit.js
           node scratch/v18_bundle_browser_audit.js
           python3 scripts/check-vh-ux.py --output /tmp/vh-ux-acceptance
@@ -34,6 +73,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

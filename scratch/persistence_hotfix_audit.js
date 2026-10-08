@@ -29,7 +29,7 @@ assert(/if \(changed\) world\.lastAdvancedAt = nowMs/.test(social),
     'supporting-cast advancement markers must be conditional on a canonical change');
 assert(/saveStateInFlight/.test(save) && /saveStateQueued/.test(save),
     'saveState must coalesce overlapping full-state writes');
-assert(/await persistStateSnapshot\(\)/.test(save),
+assert(/await persistStateSnapshot\(\{[\s\S]*allWorldInstances: flushWorldInstances/.test(save),
     'coalesced saves must still commit the latest state snapshot');
 assert(/const savingWorldMedia = worldMediaDirty/.test(persist),
     'world media dirtiness must be captured per persistence pass');

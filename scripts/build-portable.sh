@@ -19,6 +19,7 @@ mkdir -p "$APP_DIR" "$OUTPUT_DIR"
 for file in \
   index.html \
   app.js \
+  large-archive.js \
   human-package.js \
   bundled-humans.js \
   video-worlds.js \
@@ -51,6 +52,7 @@ do
 done
 
 cp -R "$ROOT_DIR/world-packs" "$APP_DIR/"
+cp -R "$ROOT_DIR/worlds" "$APP_DIR/"
 
 # Keep the real source tree layout; never flatten modules or ship bytecode.
 python3 - "$ROOT_DIR" "$APP_DIR" <<'PY'

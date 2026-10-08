@@ -9,8 +9,9 @@ const execute = functionSource('executeWorldTurn');
 const addMessage = functionSource('addWorldMessage');
 const commit = functionSource('commitWorldTurnReceipt');
 const render = functionSource('renderWorldPlayState');
+const travel = functionSource('travelThroughWorldExit');
 
-assert(execute && addMessage && commit && render, 'transaction functions must remain extractable');
+assert(execute && addMessage && commit && render && travel, 'transaction functions must remain extractable');
 
 assert(/function addWorldMessage\(role, text, metadata = \{\}, targetSession = null, targetWorld = null\)/.test(addMessage),
     'world messages must accept an explicit initiating timeline and world');
@@ -24,16 +25,17 @@ assert(boundMessageCalls.length >= 9,
     'every normal, reroll, fallback, and rollback message path must bind to the initiating timeline');
 assert(/processStructuredActions\(validation\.legacyArgs, world, sess, \{/.test(commit),
     'receipt reducers must never look up the active timeline after generation');
-assert(/processStructuredActions\(\{ label: args\.label \}, world, sess\)/.test(execute),
-    'secret receipt processing must use the initiating timeline');
+assert(/pendingSecretReveals\.push\(args\.label\)/.test(execute)
+    && /if \(!frozenReceiptApplied && \(successfulStateCall \|\| inlineStateApplied \|\| repairedReceiptApplied\)\) \{[\s\S]*?processStructuredActions\(\{ label \}, world, sess\)/.test(execute),
+    'secret discovery must be deferred until a verified receipt and bound to the initiating timeline');
 
 assert(/let stateCallSeen = false/.test(execute),
     'turn execution must track whether its single canonical receipt was already consumed');
 assert(/if \(stateCallSeen\) throw new Error\('Duplicate commit_world_turn ignored/.test(execute),
     'duplicate canonical receipts must be rejected before mutation');
-assert(/const beforeReceipt = captureWorldTurnState\(world, sess\)/.test(execute)
-    && /if \(!accepted\) restoreWorldTurnState\(world, sess, beforeReceipt\)/.test(execute),
-    'a rejected receipt must restore its captured session transaction');
+assert(/attemptWorldStateMutation\(world, sess, \(\) => \{[\s\S]*?commitWorldTurnReceipt/.test(execute)
+    && /\}, candidate => candidate\.accepted\)/.test(execute),
+    'a rejected receipt must use the shared rollback boundary');
 assert(/const auditOk = \(committed\.audit\?\.rejected \|\| \[\]\)\.length === 0/.test(execute),
     'receipt acceptance must include semantic validation and cast assertions');
 assert(/successfulStateCall = candidate\.accepted/.test(execute)
@@ -42,11 +44,17 @@ assert(/successfulStateCall = candidate\.accepted/.test(execute)
 
 const sessionHandler = app.slice(app.indexOf("document.getElementById('world-session-select').onchange"),
     app.indexOf("document.getElementById('world-session-zero-btn').onclick"));
-assert(sessionHandler.indexOf('if (worldTurnInProgress)') < sessionHandler.indexOf('.activeSessionId = e.target.value'),
+assert(sessionHandler.indexOf('if (worldTurnInProgress || worldMutationInProgress)') >= 0
+    && sessionHandler.indexOf('if (worldTurnInProgress || worldMutationInProgress)') < sessionHandler.indexOf('.activeSessionId = e.target.value'),
     'timeline switching must be blocked before changing activeSessionId');
 
 const exitHandler = render.slice(render.indexOf('// 3. Location & Exits'), render.indexOf('// 4. Inventory & Outfit'));
-assert(exitHandler.indexOf('if (worldTurnInProgress)') < exitHandler.indexOf('movePlayerAlongWorldPath'),
-    'exit clicks must be rejected before any player movement during an active turn');
+assert(/const movement = await travelThroughWorldExit\(sourceWorld, sourceSess, exit\)/.test(exitHandler),
+    'exit clicks must enter the shared command boundary');
+assert(travel.indexOf('if (worldTurnInProgress || worldMutationInProgress)') < travel.indexOf('movePlayerAlongWorldPath'),
+    'exit travel must be rejected before any movement during an active command');
+assert(/await saveWorldsState\(\{ worldId: world\.id \}\);\s*attempt\.commit\(\)/.test(travel)
+    && /attempt\.rollback\(\)/.test(travel),
+    'exit travel must commit only after save and roll back on save failure');
 
 console.log('✓ World turn receipt and cross-timeline transaction guards are present');

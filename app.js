@@ -2,8 +2,11 @@ window.__hordeRuntimeErrors = window.__hordeRuntimeErrors || [];
 
 // --- Horde Persistence (IndexedDB) ---
 const DB_NAME = 'HordeStudioDB';
-const DB_VERSION = 1;
+// v2 prevents an older build from opening the sharded World timeline store and
+// silently treating its empty legacy record as a fresh campaign library.
+const DB_VERSION = 2;
 const STORE_NAME = 'state';
+const WORLD_SHARD_FORMAT = 'gzip-json-v1';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
@@ -12,6 +15,38 @@ const HORDE_STUDIO_RELEASED_AT = '2026-09-30T19:26:55Z';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
 let worldMediaDirty = false;
+let persistedWorldInstanceIds = null; // null = legacy combined record has not migrated yet
+
+async function compressWorldShard(json) {
+    const stream = new Blob([json], { type: 'application/json' }).stream()
+        .pipeThrough(new CompressionStream('gzip'));
+    const blob = await new Response(stream).blob();
+    return { $hordeWorldShard: WORLD_SHARD_FORMAT, blob };
+}
+
+async function decodeWorldShard(value) {
+    if (!value || value.$hordeWorldShard !== WORLD_SHARD_FORMAT) {
+        return HordeHumanPackage.storageDecode(value);
+    }
+    if (!(value.blob instanceof Blob) || typeof DecompressionStream === 'undefined') {
+        throw new Error('Saved World timeline compression is unavailable or damaged. Update Horde Studio before opening this campaign.');
+    }
+    const reader = value.blob.stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+    const chunks = [];
+    let bytes = 0;
+    try {
+        while (true) {
+            const { value: chunk, done } = await reader.read();
+            if (done) break;
+            bytes += chunk.length;
+            if (bytes > 1024 * 1024 * 1024) throw new Error('Saved World timeline exceeds the supported 1 GB decoded shard limit.');
+            chunks.push(chunk);
+        }
+    } finally { reader.releaseLock(); }
+    const parsed = JSON.parse(await new Blob(chunks).text());
+    if (!isPlainObject(parsed)) throw new Error('Saved World timeline is damaged. Restore a verified backup.');
+    return parsed;
+}
 
 const HordeDB = {
     db: null,
@@ -30,12 +65,24 @@ const HordeDB = {
             };
             request.onsuccess = (e) => {
                 this.db = e.target.result;
+                this.db.onversionchange = () => {
+                    this.conflicted = true;
+                    this.db.close();
+                    if (document.getElementById('toast-container')) {
+                        showToast('Horde Studio storage changed in another tab. Reload this tab before saving.', 'error');
+                    }
+                };
                 this.get('stateRevision').then(value => {
                     this.revision = Number.isSafeInteger(value) ? value : 0;
                     this.conflicted = false;
                     this.conflictNotified = false;
                     resolve();
                 }, reject);
+            };
+            request.onblocked = () => {
+                if (document.getElementById('toast-container')) {
+                    showToast('Close other Horde Studio tabs to finish the storage upgrade, then reload this tab.', 'error');
+                }
             };
         });
     },
@@ -63,13 +110,16 @@ const HordeDB = {
         if (this.startupReads?.has(key)) {
             const value = this.startupReads.get(key);
             this.startupReads.delete(key);
-            return HordeHumanPackage.storageDecode(value);
+            return key.startsWith('worldInstance:') ? decodeWorldShard(value)
+                : HordeHumanPackage.storageDecode(value);
         }
         if (!this.db) throw new Error('Database is not initialized');
         return new Promise((resolve, reject) => {
             const transaction = this.db.transaction([STORE_NAME], 'readonly');
             const request = transaction.objectStore(STORE_NAME).get(key);
-            request.onsuccess = () => HordeHumanPackage.storageDecode(request.result).then(resolve, reject);
+            request.onsuccess = () => (key.startsWith('worldInstance:')
+                ? decodeWorldShard(request.result)
+                : HordeHumanPackage.storageDecode(request.result)).then(resolve, reject);
             request.onerror = () => reject(request.error || transaction.error || new Error(`Unable to read ${key}`));
         });
     },
@@ -103,8 +153,18 @@ const HordeDB = {
         // Capture media-heavy snapshots synchronously before the transaction;
         // Blob deduplication preserves complete reversible history within IDB limits.
         const storedMap = Object.fromEntries(Object.entries(kvMap).map(([key, value]) =>
-            [key, HordeHumanPackage.storageEncode(value)]));
-        return new Promise((resolve, reject) => {
+            [key, key.startsWith('worldInstance:') && value != null
+                && typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined'
+                ? { $hordeWorldShardSource: JSON.stringify(value) }
+                : HordeHumanPackage.storageEncode(value)]));
+        // Scoped World and Virtual Human saves can arrive alongside a full-app
+        // save. Queue the transactions in this tab so each revision check sees
+        // the preceding committed revision, while another tab still conflicts.
+        const commit = async () => {
+            const readyMap = Object.fromEntries(await Promise.all(Object.entries(storedMap).map(async ([key, value]) =>
+                [key, value?.$hordeWorldShardSource !== undefined
+                    ? await compressWorldShard(value.$hordeWorldShardSource) : value])));
+            return new Promise((resolve, reject) => {
             const transaction = this.db.transaction([STORE_NAME], 'readwrite');
             const store = transaction.objectStore(STORE_NAME);
             let operationError = null;
@@ -133,7 +193,7 @@ const HordeDB = {
             try {
                 // Queue/clones synchronously, before yielding. A failed revision
                 // check aborts every put, so no partial stale snapshot is durable.
-                for (const [key, value] of Object.entries(storedMap)) {
+                for (const [key, value] of Object.entries(readyMap)) {
                     if (key === 'stateRevision') throw new Error('The storage revision is engine-owned');
                     this.startupReads?.delete(key);
                     store.put(value, key);
@@ -142,7 +202,11 @@ const HordeDB = {
                 operationError = error;
                 transaction.abort();
             }
-        });
+            });
+        };
+        const pending = (this.writeQueue || Promise.resolve()).catch(() => {}).then(commit);
+        this.writeQueue = pending.catch(() => {});
+        return pending;
     },
     close() {
         if (this.db) this.db.close();
@@ -216,7 +280,7 @@ const HordeVectorMemory = {
         return `h_${hash.toString(16).padStart(16, '0')}_${clean.length}`;
     },
 
-    async getCachedEmbedding(text) {
+    async getCachedEmbedding(text, onDiagnostics = null) {
         if (!text) return null;
         await this.init();
         // Cache entries are provider/model scoped. Text-only keys silently mixed
@@ -231,7 +295,7 @@ const HordeVectorMemory = {
         if (this.isFallbackActive) this.triggerFallback(false);
 
         try {
-            const emb = await getEmbedding(text);
+            const emb = await getEmbedding(text, onDiagnostics);
             this.cache.set(key, emb);
             while (this.cache.size > this.maxCacheEntries) {
                 this.cache.delete(this.cache.keys().next().value);
@@ -260,13 +324,13 @@ const HordeVectorMemory = {
         }
     },
 
-    async search(memoryList, queryText, limit = 4, threshold = 0.35) {
+    async search(memoryList, queryText, limit = 4, threshold = 0.35, onDiagnostics = null, maxBackfill = 12) {
         if (!memoryList || memoryList.length === 0) return [];
 
         const words = memorySearchTerms(queryText);
         let queryVec = null;
         if (!this.isFallbackActive) {
-            try { queryVec = await this.getCachedEmbedding(queryText); }
+            try { queryVec = await this.getCachedEmbedding(queryText, onDiagnostics); }
             catch (err) {
                 console.warn("Vector search failed, falling back to hybrid keyword search:", err);
                 this.triggerFallback(true);
@@ -283,9 +347,9 @@ const HordeVectorMemory = {
                 .map(block => ({ block, lexical: memoryLexicalScore(block.text, words) }))
                 .filter(item => item.lexical > 0 || item.block.pinned)
                 .sort((a, b) => b.lexical - a.lexical)
-                .slice(0, Math.max(2, Math.min(12, limit * 2)));
+                .slice(0, Math.max(0, Math.min(12, maxBackfill, limit * 2)));
             for (const item of stale) {
-                const embedding = await this.getCachedEmbedding(item.block.text);
+                const embedding = await this.getCachedEmbedding(item.block.text, onDiagnostics);
                 if (!embedding) break;
                 item.block.embedding = embedding;
                 item.block.embeddingNamespace = namespace;
@@ -358,6 +422,9 @@ function memoryDedupeKey(memory) {
 
 let generationController = null;
 let worldTurnInProgress = false; // re-entry guard for executeWorldTurn
+const WORLD_HOSTED_TURN_DEADLINE_MS = 150000;
+let worldMutationInProgress = false; // short, persisted non-generation commands
+let worldTurnPersistenceFence = null;
 let lastPresetContextWarningKey = '';
 
 // --- API Provider Abstraction ---
@@ -1396,7 +1463,9 @@ function safeJsonClone(value) {
 }
 
 function worldPersistenceManifest(world) {
-    return { ...safeJsonClone(world), mediaAssets: [] };
+    // Exclude media before cloning. Copying a large photo library and then
+    // discarding it made every text turn pay for all World images again.
+    return safeJsonClone({ ...world, mediaAssets: [] });
 }
 
 async function verifyWorldPersisted(world) {
@@ -1628,7 +1697,7 @@ function validateRoomData(value, label = 'Room') {
     return safeJsonClone(value);
 }
 
-function validateWorldData(value, label = 'World') {
+function validateWorldData(value, label = 'World', { clone = true } = {}) {
     requirePlainObject(value, label);
     requireString(value.name, `${label} name`, { max: 300 });
     requireSafeId(value.id, `${label} id`, { optional: true });
@@ -1743,7 +1812,7 @@ function validateWorldData(value, label = 'World') {
             throw new Error(`${label} game rules zero HP mode is invalid`);
         }
     }
-    return safeJsonClone(value);
+    return clone ? safeJsonClone(value) : value;
 }
 
 function validateBackupData(value) {
@@ -1767,7 +1836,7 @@ function validateBackupData(value) {
         requireString(item.color, `Backup persona ${index + 1} color`, { optional: true, max: 20 });
         requireSafeId(item.id, `Backup persona ${index + 1} id`, { optional: true });
     });
-    (value.worlds || []).forEach((item, index) => validateWorldData(item, `Backup world ${index + 1}`));
+    (value.worlds || []).forEach((item, index) => validateWorldData(item, `Backup world ${index + 1}`, { clone: false }));
     (value.videoWorlds || []).forEach((item, index) => {
         requirePlainObject(item, `Backup Video Adventure ${index + 1}`);
         requireSafeId(item.id, `Backup Video Adventure ${index + 1} id`);
@@ -1792,8 +1861,14 @@ function validateBackupData(value) {
         }
         Object.entries(value.companionVideoAssets).forEach(([assetId, source]) => {
             requireSafeId(assetId, 'Backup Virtual Human video asset id');
-            requireString(source, `Backup Virtual Human video asset ${assetId}`, { max: 512 * 1024 * 1024 });
-            if (!/^data:video\/[a-z0-9.+-]+;base64,/i.test(source)) {
+            if (source instanceof Blob) {
+                if (!source.type.startsWith('video/') || source.size > 512 * 1024 * 1024) {
+                    throw new Error(`Backup Virtual Human video asset ${assetId} is invalid`);
+                }
+            } else {
+                requireString(source, `Backup Virtual Human video asset ${assetId}`, { max: 512 * 1024 * 1024 });
+            }
+            if (!(source instanceof Blob) && !/^data:video\/[a-z0-9.+-]+;base64,/i.test(source)) {
                 throw new Error(`Backup Virtual Human video asset ${assetId} is invalid`);
             }
         });
@@ -1803,8 +1878,13 @@ function validateBackupData(value) {
         if (Object.keys(value.chatAssets).length > 5000) throw new Error('Backup has too many Chat assets');
         Object.entries(value.chatAssets).forEach(([assetId, source]) => {
             requireSafeId(assetId, 'Backup Chat asset id');
-            requireString(source, `Backup Chat asset ${assetId}`, { max: 128 * 1024 * 1024 });
-            if (!/^data:(?:image|video|audio|application\/pdf)\/[a-z0-9.+-]+;base64,/i.test(source)
+            if (source instanceof Blob) {
+                if (!/^(?:image|video|audio)\/[a-z0-9.+-]+$|^application\/pdf$/i.test(source.type)
+                    || source.size > 128 * 1024 * 1024) throw new Error(`Backup Chat asset ${assetId} is invalid`);
+            } else {
+                requireString(source, `Backup Chat asset ${assetId}`, { max: 128 * 1024 * 1024 });
+            }
+            if (!(source instanceof Blob) && !/^data:(?:image|video|audio|application\/pdf)\/[a-z0-9.+-]+;base64,/i.test(source)
                 && !/^data:application\/pdf;base64,/i.test(source)) {
                 throw new Error(`Backup Chat asset ${assetId} is invalid`);
             }
@@ -1816,8 +1896,18 @@ function validateBackupData(value) {
         requireSafeId(item.id, `Backup preset ${index + 1} id`, { optional: true });
         validatePresetData(item.data, `Backup preset ${index + 1}`);
     });
-    ['chats', 'chatContinuities', 'activeSessionId', 'globalSettings', 'theme', 'worldInstances', 'videoWorldSessions'].forEach(key => {
+    ['chats', 'chatContinuities', 'activeSessionId', 'globalSettings', 'theme', 'worldInstances', 'worldRecoverySnapshots', 'videoWorldSessions'].forEach(key => {
         if (value[key] !== undefined) requirePlainObject(value[key], `Backup ${key}`);
+    });
+    if (Object.keys(value.worldRecoverySnapshots || {}).length > 30) {
+        throw new Error('Backup has too many recoverable Worlds');
+    }
+    Object.entries(value.worldRecoverySnapshots || {}).forEach(([worldId, recovery]) => {
+        requireSafeId(worldId, 'Backup recoverable World id');
+        requirePlainObject(recovery, `Backup recoverable World ${worldId}`);
+        validateWorldData(recovery.world, `Backup recoverable World ${worldId}`, { clone: false });
+        requireString(recovery.capturedAt, `Backup recoverable World ${worldId} date`, { optional: true, max: 100 });
+        requireString(recovery.reason, `Backup recoverable World ${worldId} reason`, { optional: true, max: 500 });
     });
     Object.entries(value.chatContinuities || {}).forEach(([continuityId, continuity]) => {
         requirePlainObject(continuity, `Chat continuity ${continuityId}`);
@@ -1845,11 +1935,11 @@ function validateBackupData(value) {
         requireArray(instance.sessions, `World instance ${worldId} sessions`, { optional: true, max: 5000 });
         (instance.sessions || []).forEach((session, index) => {
             requirePlainObject(session, `World session ${index + 1}`);
-            requireArray(session.history, `World session ${index + 1} history`, { optional: true, max: 100000 });
+            requireArray(session.history, `World session ${index + 1} history`, { optional: true, max: 250000 });
             (session.history || []).forEach((message, messageIndex) => {
                 requirePlainObject(message, `World message ${messageIndex + 1}`);
                 requireString(message.role, `World message ${messageIndex + 1} role`, { max: 20 });
-                requireString(message.text, `World message ${messageIndex + 1} text`);
+                requireString(message.text, `World message ${messageIndex + 1} text`, { max: 2_000_000 });
             });
             requireArray(session.quests, `World session ${index + 1} quests`, { optional: true, max: 500 });
             (session.quests || []).forEach((quest, questIndex) => {
@@ -1902,7 +1992,9 @@ function validateBackupData(value) {
             requireArray(session.checkHistory, `World session ${index + 1} check history`, { optional: true, max: 1000 });
         });
     });
-    return safeJsonClone(value);
+    // The freshly parsed archive is already detached from the live state. A
+    // second deep clone doubles peak memory for large campaign restores.
+    return value;
 }
 
 function repairLoadedState() {
@@ -2119,7 +2211,7 @@ function repairLoadedState() {
 async function loadState() {
     const started=performance.now();
     await HordeDB.init();
-    await HordeDB.prefetch(['activeCompanionId', 'activePersonaId', 'activeSessionId', 'activeVideoWorldId', 'activeWorldId', 'apiKey', 'bedrockApiKey', 'characters', 'chatContinuities', 'chats', 'companionThreads', 'companionTimelines', 'companions', 'customApiKey', 'customHeaders', 'evolinkApiKey', 'falApiKey', 'globalSettings', 'gptprotoApiKey', 'hotapiApiKey', 'labsDiagnostics', 'nanogptApiKey', 'nvidiaApiKey', 'personas', 'regexScripts', 'rooms', 'systemPresets', 'theme', 'videoWorldSessions', 'videoWorlds', 'wavespeedApiKey', 'worldInstances', 'worldMediaAssets', 'worldRecoverySnapshots', 'worlds']);
+    await HordeDB.prefetch(['activeCompanionId', 'activePersonaId', 'activeSessionId', 'activeVideoWorldId', 'activeWorldId', 'apiKey', 'bedrockApiKey', 'characters', 'chatContinuities', 'chats', 'companionThreads', 'companionTimelines', 'companions', 'customApiKey', 'customHeaders', 'evolinkApiKey', 'falApiKey', 'globalSettings', 'gptprotoApiKey', 'hotapiApiKey', 'labsDiagnostics', 'nanogptApiKey', 'nvidiaApiKey', 'personas', 'regexScripts', 'rooms', 'systemPresets', 'theme', 'videoWorldSessions', 'videoWorlds', 'wavespeedApiKey', 'worldInstanceIndex', 'worldInstances', 'worldMediaAssets', 'worldRecoverySnapshots', 'worlds']);
     window.__hordeStartup={storageMs:performance.now()-started};
     // Shipped worlds are authored against the same schema users migrate to.
     // Do this at startup (after the whole script has initialized) rather than
@@ -2287,7 +2379,7 @@ async function loadState() {
             if (separateAssets) world.mediaAssets = separateAssets;
             else if ((world.mediaAssets || []).length) worldMediaDirty = true; // migrate early embedded builds
         });
-        state.worldInstances = await HordeDB.get('worldInstances') || {};
+        state.worldInstances = await loadPersistedWorldInstances();
         state.activeWorldId = await HordeDB.get('activeWorldId') || null;
         state.videoWorlds = await HordeDB.get('videoWorlds') || [];
         state.videoWorldSessions = await HordeDB.get('videoWorldSessions') || {};
@@ -2454,7 +2546,9 @@ async function loadState() {
         }
         if (changed) {
             state.globalSettings.includedWorldReceipts = [...new Set(offered)];
-            await saveState();
+            // The one-time opening-scene repair above can touch an inactive
+            // timeline; ordinary saves deliberately omit those large shards.
+            await saveState({ allWorldInstances: true });
         }
     }
 
@@ -2561,33 +2655,145 @@ async function loadState() {
 
 let saveStateInFlight = null;
 let saveStateQueued = false;
+let saveStateAllWorldInstancesQueued = false;
+let saveStateReplaceWorldLibraryQueued = false;
+let saveStateAssetRecordsQueued = new Map();
+let worldSaveInFlight = null;
+let worldSaveQueued = false;
+let worldSaveActiveRequested = false;
+let worldSaveRequestedIds = new Set();
+let worldMigrationDeferred = false;
+let worldMigrationNoticeShown = false;
 let virtualHumanSaveInFlight = null;
 let virtualHumanSaveScope = 0;
 
-async function persistStateSnapshot() {
+function worldRecordsForPersistence(savingWorldMedia, {
+    allInstances = false, includeActiveInstance = true, instanceIdsToSave = [],
+    captureMissingWorlds = true
+} = {}) {
+    // World media stays in a separate record and is rewritten only after
+    // an asset edit. Timeline saves may then avoid unrelated app records.
+    // Background embeddings, model diagnostics, settings saves and even the
+    // first v1→v2 migration may run while a turn is awaiting narration. They
+    // must see the last committed World, not a half-applied player action.
+    const pendingTurn = worldTurnPersistenceFence?.committing
+        ? null : worldTurnPersistenceFence;
+    const storedWorlds = (state.worlds || []).map(world =>
+        pendingTurn?.worldId === world.id ? pendingTurn.worldManifest : worldPersistenceManifest(world));
+    const visibleWorldIds = new Set(storedWorlds.map(world => world.id));
+    const recovery = isPlainObject(state.worldRecoverySnapshots)
+        ? state.worldRecoverySnapshots : {};
+    if (captureMissingWorlds) lastPersistedWorldManifests.forEach(previous => {
+        if (!isPlainObject(previous) || !previous.id || visibleWorldIds.has(previous.id)) return;
+        recovery[previous.id] = {
+            capturedAt: new Date().toISOString(),
+            reason: 'World was absent from a later save',
+            world: safeJsonClone(previous)
+        };
+    });
+    state.worldRecoverySnapshots = Object.fromEntries(
+        Object.entries(recovery)
+            .sort((a, b) => String(b[1]?.capturedAt || '').localeCompare(String(a[1]?.capturedAt || '')))
+            .slice(0, 30)
+    );
+    const liveInstances = isPlainObject(state.worldInstances) ? state.worldInstances : {};
+    const instances = pendingTurn?.worldId && Object.hasOwn(liveInstances, pendingTurn.worldId)
+        ? { ...liveInstances, [pendingTurn.worldId]: pendingTurn.instance }
+        : liveInstances;
+    const instanceIds = Object.keys(instances);
+    const previousIds = persistedWorldInstanceIds;
+    const legacyMode = previousIds === null && worldMigrationDeferred;
+    const migrate = previousIds === null && !worldMigrationDeferred;
+    const changedIds = new Set(legacyMode ? [] : allInstances || migrate ? instanceIds : [
+        ...instanceIds.filter(id => !previousIds.has(id)),
+        ...instanceIdsToSave.filter(id => Object.hasOwn(instances, id)),
+        ...(includeActiveInstance && state.activeWorldId && Object.hasOwn(instances, state.activeWorldId)
+            ? [state.activeWorldId] : [])
+    ]);
+    const records = {
+        worlds: storedWorlds,
+        worldRecoverySnapshots: state.worldRecoverySnapshots,
+        activeWorldId: state.activeWorldId
+    };
+    if (legacyMode) {
+        // If the first sharding transaction could not fit beside the legacy
+        // record, continue saving complete timelines in the old format until
+        // the next restart instead of silently dropping turns.
+        records.worldInstances = instances;
+    } else records.worldInstanceIndex = instanceIds;
+    // The first v2 save atomically writes every shard, the index, and an empty
+    // legacy record. A failed transaction leaves the complete v1 map intact.
+    if (migrate) records.worldInstances = {};
+    changedIds.forEach(id => { records[`worldInstance:${id}`] = instances[id]; });
+    if (previousIds) previousIds.forEach(id => {
+        if (!Object.hasOwn(instances, id)) records[`worldInstance:${id}`] = null;
+    });
+    if (savingWorldMedia) {
+        records.worldMediaAssets = Object.fromEntries((state.worlds || []).map(world => [
+            world.id,
+            safeJsonClone(Array.isArray(world.mediaAssets) ? world.mediaAssets : [])
+        ]));
+        worldMediaDirty = false;
+    }
+    return { records, storedWorlds, instanceIds };
+}
+
+async function loadPersistedWorldInstances() {
+    worldMigrationDeferred = false;
+    const index = await HordeDB.get('worldInstanceIndex');
+    if (index == null) {
+        persistedWorldInstanceIds = null;
+        const legacy = await HordeDB.get('worldInstances');
+        if (legacy != null && !isPlainObject(legacy)) throw new Error('Saved World timelines are damaged. Restore a verified backup.');
+        return legacy || {};
+    }
+    if (!Array.isArray(index) || index.length > 10000 || new Set(index).size !== index.length
+        || index.some(id => typeof id !== 'string' || !id || id.length > 160
+            || ['__proto__', 'prototype', 'constructor'].includes(id))) {
+        throw new Error('Saved World timeline index is damaged. Restore a verified backup.');
+    }
+    const shards = await Promise.all(index.map(id => HordeDB.get(`worldInstance:${id}`)));
+    if (shards.some(instance => !isPlainObject(instance))) {
+        throw new Error('A saved World timeline is missing or damaged. Restore a verified backup.');
+    }
+    persistedWorldInstanceIds = new Set(index);
+    return Object.fromEntries(index.map((id, indexNumber) => [id, shards[indexNumber]]));
+}
+
+async function commitWorldMigrationAware(records) {
+    try {
+        await HordeDB.setMultiple(records);
+        return !worldMigrationDeferred;
+    } catch (error) {
+        const quota = error?.name === 'QuotaExceededError' || /quota/i.test(error?.message || '');
+        if (persistedWorldInstanceIds !== null || !Object.hasOwn(records, 'worldInstanceIndex') || !quota) throw error;
+        // The failed transaction was atomic. A second, complete legacy save
+        // preserves this turn while keeping older builds from seeing an
+        // incomplete shard index. It may still fail if storage is truly full.
+        const legacyRecords = Object.fromEntries(Object.entries(records).filter(([key]) =>
+            key !== 'worldInstanceIndex' && !key.startsWith('worldInstance:')));
+        legacyRecords.worldInstances = state.worldInstances;
+        await HordeDB.setMultiple(legacyRecords);
+        worldMigrationDeferred = true;
+        if (!worldMigrationNoticeShown) {
+            worldMigrationNoticeShown = true;
+            showToast('World changes saved, but timeline optimization needs more browser storage. Export a backup, free space, then reload to retry.', 'error');
+        }
+        return false;
+    }
+}
+
+async function persistStateSnapshot({ allWorldInstances = false, replaceWorldLibrary = false, assetRecords = {} } = {}) {
     const savingWorldMedia = worldMediaDirty;
     try {
         (state.companions || []).forEach(companion => persistCompanionRuntime(companion));
-        // Keep heavy image payloads out of the world manifest that is rewritten
-        // on virtually every turn. The separate payload is only rewritten when
-        // an asset changes, then reattached on load and embedded on export.
-        const storedWorlds = (state.worlds || []).map(worldPersistenceManifest);
-        const visibleWorldIds = new Set(storedWorlds.map(world => world.id));
-        const recovery = isPlainObject(state.worldRecoverySnapshots)
-            ? state.worldRecoverySnapshots : {};
-        lastPersistedWorldManifests.forEach(previous => {
-            if (!isPlainObject(previous) || !previous.id || visibleWorldIds.has(previous.id)) return;
-            recovery[previous.id] = {
-                capturedAt: new Date().toISOString(),
-                reason: 'World was absent from a later save',
-                world: safeJsonClone(previous)
-            };
+        // Ordinary chat, settings and VH saves must not clone years of World
+        // history. Explicit World mutations can request a full shard flush.
+        const worldSnapshot = worldRecordsForPersistence(savingWorldMedia, {
+            allInstances: allWorldInstances,
+            includeActiveInstance: allWorldInstances,
+            captureMissingWorlds: !replaceWorldLibrary
         });
-        state.worldRecoverySnapshots = Object.fromEntries(
-            Object.entries(recovery)
-                .sort((a, b) => String(b[1]?.capturedAt || '').localeCompare(String(a[1]?.capturedAt || '')))
-                .slice(0, 30)
-        );
         const records = {
             // Credentials are tab-session only unless the user opts in to
             // "Remember key on this device". Persisting '' erases stored copies.
@@ -2613,10 +2819,7 @@ async function persistStateSnapshot() {
             theme: state.theme,
             systemPresets: state.systemPresets,
             regexScripts: state.regexScripts,
-            worlds: storedWorlds,
-            worldRecoverySnapshots: state.worldRecoverySnapshots,
-            worldInstances: state.worldInstances,
-            activeWorldId: state.activeWorldId,
+            ...worldSnapshot.records,
             videoWorlds: state.videoWorlds,
             videoWorldSessions: state.videoWorldSessions,
             activeVideoWorldId: state.activeVideoWorldId,
@@ -2626,18 +2829,11 @@ async function persistStateSnapshot() {
             activeCompanionId: state.activeCompanionId,
             labsDiagnostics: (state.labsDiagnostics || []).slice(-100)
         };
-        if (savingWorldMedia) {
-            records.worldMediaAssets = Object.fromEntries((state.worlds || []).map(world => [
-                world.id,
-                safeJsonClone(Array.isArray(world.mediaAssets) ? world.mediaAssets : [])
-            ]));
-            // Clear before yielding to IndexedDB. If another media edit occurs
-            // while this transaction is open it will set the flag again and
-            // the coalesced follow-up pass will preserve that newer payload.
-            worldMediaDirty = false;
-        }
-        await HordeDB.setMultiple(records);
-        lastPersistedWorldManifests = safeJsonClone(storedWorlds);
+        // Full backup restore stages attachment blobs here so canonical state
+        // and its referenced assets commit (or fail) in one IDB transaction.
+        const migrated = await commitWorldMigrationAware({ ...records, ...assetRecords });
+        lastPersistedWorldManifests = safeJsonClone(worldSnapshot.storedWorlds);
+        if (migrated) persistedWorldInstanceIds = new Set(worldSnapshot.instanceIds);
         writeGlobalSettingsMirror(records.globalSettings);
     } catch (err) {
         if (savingWorldMedia) worldMediaDirty = true;
@@ -2655,6 +2851,55 @@ async function persistStateSnapshot() {
     }
 }
 
+async function persistWorldStateSnapshot({ includeActiveInstance = true, requestedWorldIds = [] } = {}) {
+    const savingWorldMedia = worldMediaDirty;
+    try {
+        if (saveStateInFlight) await saveStateInFlight;
+        // A World turn should not serialize every unrelated campaign. A full
+        // app save above still flushes all shards for uncommon global edits.
+        const snapshot = worldRecordsForPersistence(savingWorldMedia, {
+            includeActiveInstance, instanceIdsToSave: requestedWorldIds
+        });
+        const migrated = await commitWorldMigrationAware(snapshot.records);
+        lastPersistedWorldManifests = safeJsonClone(snapshot.storedWorlds);
+        if (migrated) persistedWorldInstanceIds = new Set(snapshot.instanceIds);
+    } catch (err) {
+        if (savingWorldMedia) worldMediaDirty = true;
+        if (err?.code === 'STATE_CONFLICT') {
+            if (!HordeDB.conflictNotified) showToast(err.message, 'error');
+            HordeDB.conflictNotified = true;
+        } else if (err?.name === 'QuotaExceededError' || /quota/i.test(err?.message || '')) {
+            showToast('⚠️ Storage FULL — World changes are NOT being saved. Export a backup now.', 'error');
+        } else {
+            showToast('World save failed: ' + (err.message || err), 'error');
+        }
+        console.error('saveWorldsState failed:', err);
+        throw err;
+    }
+}
+
+async function saveWorldsState({ worldId = null } = {}) {
+    if (worldId) worldSaveRequestedIds.add(String(worldId));
+    else worldSaveActiveRequested = true;
+    worldSaveQueued = true;
+    if (worldSaveInFlight) return worldSaveInFlight;
+    worldSaveInFlight = (async () => {
+        do {
+            worldSaveQueued = false;
+            const includeActiveInstance = worldSaveActiveRequested;
+            const requestedWorldIds = [...worldSaveRequestedIds];
+            worldSaveActiveRequested = false;
+            worldSaveRequestedIds = new Set();
+            await persistWorldStateSnapshot({ includeActiveInstance, requestedWorldIds });
+        } while (worldSaveQueued);
+    })();
+    try {
+        await worldSaveInFlight;
+    } finally {
+        worldSaveInFlight = null;
+    }
+}
+
 /**
  * Serialize full-state persistence and coalesce bursts. IndexedDB structured
  * clones values at put-time, so overlapping saves of media-heavy state can
@@ -2662,13 +2907,33 @@ async function persistStateSnapshot() {
  * Every caller still waits until its request (or a newer snapshot) is safely
  * committed; calls arriving during a transaction request one trailing pass.
  */
-async function saveState() {
+async function saveState({ allWorldInstances = false, replaceWorldLibrary = false, assetRecords = null } = {}) {
+    if (allWorldInstances) saveStateAllWorldInstancesQueued = true;
+    if (replaceWorldLibrary) saveStateReplaceWorldLibraryQueued = true;
+    if (assetRecords) {
+        for (const [key, value] of Object.entries(assetRecords)) {
+            if (!/^(?:chatAsset:|companionVideoAsset:)/.test(key)) {
+                throw new Error('Only backup attachment records can be staged with a full save.');
+            }
+            saveStateAssetRecordsQueued.set(key, value);
+        }
+    }
     saveStateQueued = true;
     if (saveStateInFlight) return saveStateInFlight;
     saveStateInFlight = (async () => {
         do {
             saveStateQueued = false;
-            await persistStateSnapshot();
+            const flushWorldInstances = saveStateAllWorldInstancesQueued;
+            saveStateAllWorldInstancesQueued = false;
+            const replacingWorldLibrary = saveStateReplaceWorldLibraryQueued;
+            saveStateReplaceWorldLibraryQueued = false;
+            const flushAssetRecords = Object.fromEntries(saveStateAssetRecordsQueued);
+            saveStateAssetRecordsQueued = new Map();
+            await persistStateSnapshot({
+                allWorldInstances: flushWorldInstances,
+                replaceWorldLibrary: replacingWorldLibrary,
+                assetRecords: flushAssetRecords
+            });
         } while (saveStateQueued);
     })();
     try {
@@ -3520,10 +3785,22 @@ function normalizeWorldPresentation(world) {
     return raw;
 }
 
+function worldPresentationForDisplay(world) {
+    if (!world) return null;
+    // Normalization is useful for legacy display defaults, but a view must
+    // not rewrite the saved presentation or scan/filter every embedded image.
+    return normalizeWorldPresentation({
+        presentation: { ...(isPlainObject(world.presentation) ? world.presentation : {}) },
+        mediaAssets: []
+    });
+}
+
 function worldMediaAsset(world, assetId) {
-    if (!assetId) return null;
-    normalizeWorldPresentation(world);
-    return world.mediaAssets.find(asset => asset.id === assetId) || null;
+    if (!world || !assetId) return null;
+    // A lookup must not prune the authored media library as a side effect of
+    // drawing a card, map, or transcript. Import/edit paths normalize it.
+    return (Array.isArray(world.mediaAssets) ? world.mediaAssets : [])
+        .find(asset => asset?.id === assetId) || null;
 }
 
 function worldMediaSource(world, assetId) {
@@ -4824,6 +5101,8 @@ function schedulePostStartupWork(name, task, timeout = 1200) {
     requestAnimationFrame(() => requestAnimationFrame(enqueue));
 }
 
+let hordePrimaryStateLoaded = false;
+
 async function init() {
     // Ask the browser to protect our IndexedDB from storage-pressure eviction
     if (navigator.storage && navigator.storage.persist) {
@@ -4832,6 +5111,7 @@ async function init() {
 
     const startupAt=performance.now();
     await loadState();
+    hordePrimaryStateLoaded = true;
     window.__hordeStartup.loadStateMs=performance.now()-startupAt;
     setupNavigation();
     setupStudioTabs();
@@ -9227,16 +9507,43 @@ function parseWorldToolArguments(raw) {
 }
 
 const WORLD_TURN_EVENT_TYPES = Object.freeze([
-    'movement', 'activity', 'interaction', 'outfit', 'inventory', 'condition',
+    'movement', 'escort', 'activity', 'interaction', 'outfit', 'inventory', 'condition',
     'time', 'observation', 'status', 'relationship', 'quest', 'discovery',
     'environment', 'dialogue', 'other'
 ]);
+const WORLD_RESTRAINT_REPAIR_RULE = '\nIf the player actually frees a bound NPC, use a completed interaction event with actor_id:"player", participants:["exact NPC ID"] and evidence of the release, then set that NPC’s unbound activity in entity_updates. An explicit agreement to follow needs a separate completed escort join event with the NPC as actor. Never invent per-NPC state_updates flags such as tomas_bound.';
 
 function resolveWorldActorId(world, sess, actorRef) {
     const raw = String(actorRef || '').trim();
     if (!raw) return null;
     if (/^(?:player|user|pc|protagonist)$/i.test(raw)) return 'player';
     return resolveNpcId(world, raw, sess);
+}
+
+function prepareWorldIntroducedActors(world, sess, introductions, turnId) {
+    const used = new Set(['player', 'user', 'pc', 'protagonist',
+        ...(world.entities || []).map(entity => String(entity.id || '').toLowerCase())]);
+    return (Array.isArray(introductions) ? introductions : []).slice(0, 20).map((raw, index) => {
+        if (!isPlainObject(raw) || !String(raw.name || '').trim()) return null;
+        const name = String(raw.name).trim().slice(0, 120);
+        const requested = String(raw.id || '').trim();
+        // A model may describe an already-authored NPC as newly introduced,
+        // sometimes under a shortened name ("Gloria" for "Gloria Bell").
+        // Never duplicate that actor or reinterpret their ID as a new person.
+        if ((world.entities || []).some(entity => entity.type === 'npc'
+            && isVisibleToSession(entity, sess) && entity.id.toLowerCase() === requested.toLowerCase())) return null;
+        const existing = (world.entities || []).find(entity => entity.type === 'npc'
+            && isVisibleToSession(entity, sess) && entity.name.toLowerCase() === name.toLowerCase());
+        if (existing) return null;
+        const slug = name.replace(/^(?:agent|officer|dr|doctor|mr|mrs|ms)\.?\s+/i, '')
+            .toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 65);
+        const base = /^[a-z][a-z0-9_-]{2,99}$/i.test(requested) && !used.has(requested.toLowerCase())
+            ? requested : `npc_${slug || 'person'}`;
+        let id = base;
+        if (used.has(id.toLowerCase())) id = `${base}_${String(turnId || sess.turnCount || 1).replace(/[^a-z0-9]/gi, '_').slice(-20)}_${index + 1}`;
+        used.add(id.toLowerCase());
+        return { ...raw, name, id };
+    }).filter(Boolean);
 }
 
 function buildWorldSceneFrame(world, sess) {
@@ -9313,7 +9620,7 @@ function buildKernelLocationManifest(world, sess, userInput) {
         });
         const movementPhrase = extractUserMovementTarget(userInput);
         const movementTarget = movementPhrase
-            ? resolveWorldMovementTarget(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, sess.playerLocation, movementPhrase) : null;
+            ? resolveWorldMovementTarget(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, sess.playerLocation, movementPhrase, true, sess) : null;
         if (movementTarget) add(movementTarget, 990, 'movement_target');
     }
 
@@ -9368,15 +9675,31 @@ function normalizeWorldTurnReceipt(world, sess, rawReceipt) {
             stateUpdates[key] = source[key];
         }
     });
+    // Model-provided IDs are diagnostic labels, not authority. A seed/arrival
+    // receipt and the next player turn can otherwise both become "turn_1"
+    // because the session count increments after commit. Keep every active
+    // receipt addressable even when a provider repeats its own turn_id.
+    const usedIds = new Set((Array.isArray(sess.worldTurnReceipts) ? sess.worldTurnReceipts : [])
+        .map(entry => String(entry?.receipt?.turn_id || '')).filter(Boolean));
+    const proposedId = String(source.turn_id || `turn_${Math.max(1, parseInt(sess.turnCount) || 1)}`)
+        .trim().slice(0, 100) || 'turn_1';
+    let uniqueId = proposedId;
+    if (usedIds.has(uniqueId)) {
+        const stem = proposedId.slice(0, 80);
+        let ordinal = Math.max(2, (parseInt(sess.worldStateVersion) || 0) + 1);
+        while (usedIds.has(`${stem}_${ordinal}`)) ordinal++;
+        uniqueId = `${stem}_${ordinal}`;
+    }
     return {
         version: 1,
-        turn_id: String(source.turn_id || `turn_${Math.max(1, parseInt(sess.turnCount) || 1)}`).slice(0, 100),
+        turn_id: uniqueId,
         summary: String(source.summary || source.turn_summary || '').slice(0, 300),
         scene: {
             player_location_id: String(sceneSource.player_location_id || sceneSource.location_id || '').slice(0, 120),
             player_location_changed: sceneSource.player_location_changed === true,
             present_character_ids: (Array.isArray(sceneSource.present_character_ids)
-                ? sceneSource.present_character_ids : []).map(id => String(id || '').slice(0, 120)).filter(Boolean).slice(0, 80)
+                ? sceneSource.present_character_ids : []).map(id => String(id || '').slice(0, 120))
+                .filter(id => id && !/^(?:player|user|pc|protagonist)$/i.test(id)).slice(0, 80)
         },
         events: (Array.isArray(source.events) ? source.events : []).slice(0, 100),
         entity_updates: (Array.isArray(source.entity_updates) ? source.entity_updates : []).slice(0, 100),
@@ -9384,16 +9707,460 @@ function normalizeWorldTurnReceipt(world, sess, rawReceipt) {
     };
 }
 
+// A provider occasionally describes a pending dice check correctly but wraps
+// it in a malformed, non-completing "attempt" event. The rejected receipt must
+// never be partially committed. A second, deliberately narrower candidate may
+// retain only that check when every discarded proposal is demonstrably a
+// no-op; its success/failure branch still goes through the normal validator.
+function buildSafeCheckOnlyWorldReceipt(world, sess, rawReceipt, context = {}) {
+    const source = isPlainObject(rawReceipt?.receipt) ? rawReceipt.receipt : rawReceipt;
+    if (!isPlainObject(source) || Object.keys(source).some(key => !new Set([
+        'version', 'turn_id', 'turn_summary', 'summary', 'scene', 'events',
+        'entity_updates', 'state_updates', 'checks'
+    ]).has(key))) return null;
+    const receipt = normalizeWorldTurnReceipt(world, sess, source);
+    if (Object.keys(receipt.state_updates).some(key => key !== 'checks')
+        || !Array.isArray(receipt.state_updates.checks)
+        || receipt.state_updates.checks.length !== 1) return null;
+    const check = receipt.state_updates.checks[0];
+    if (!isPlainObject(check) || !String(check.label || '').trim()
+        || !Number.isFinite(Number(check.difficulty))
+        || check.provided_roll !== undefined || check.force_resolve !== undefined) return null;
+    if (String(context.playerStartLocationId || sess.playerLocation) !== String(sess.playerLocation)
+        || receipt.scene.player_location_id !== sess.playerLocation
+        || receipt.scene.player_location_changed) return null;
+    const frame = buildWorldSceneFrame(world, sess);
+    const assertedCast = [...receipt.scene.present_character_ids].sort();
+    const actualCast = [...frame.present_character_ids].sort();
+    if (assertedCast.length !== actualCast.length
+        || assertedCast.some((id, index) => id !== actualCast[index])) return null;
+    if (receipt.events.length > 3 || receipt.events.some(event => !isPlainObject(event)
+        || event.actor_id !== 'player'
+        || !['intended', 'attempted', 'in_progress'].includes(event.status))) return null;
+    if (receipt.entity_updates.length > 1 || receipt.entity_updates.some(patch =>
+        !isPlainObject(patch) || String(patch.entity_id || patch.actor_id) !== 'player'
+        || (patch.location_id && patch.location_id !== sess.playerLocation)
+        || Object.keys(patch).some(key => !['entity_id', 'actor_id', 'location_id',
+            'activity', 'interacting_with', 'conditions', 'outfit'].includes(key))
+        || (patch.conditions !== undefined && (!Array.isArray(patch.conditions)
+            || patch.conditions.length > 0))
+        || (patch.outfit && String(patch.outfit) !== String(sess.outfit || 'Standard attire')))) return null;
+    return {
+        turn_id: receipt.turn_id,
+        summary: receipt.summary,
+        scene: receipt.scene,
+        events: [],
+        entity_updates: [],
+        state_updates: { checks: safeJsonClone(receipt.state_updates.checks) }
+    };
+}
+
+// A repair model may wrap a single otherwise-valid pending check as an object
+// and use its prose alias "rollable_stat_id". Normalize only this exact,
+// side-effect-free repair shape. Never discard a completed event or invent an
+// item here; the regular receipt/check validators still decide whether the
+// resulting proposal is canonical.
+function repairWorldSingletonCheckReceipt(world, sess, rawReceipt) {
+    const source = isPlainObject(rawReceipt?.receipt) ? rawReceipt.receipt : rawReceipt;
+    if (!isPlainObject(source) || Object.keys(source).some(key => ![
+        'version', 'turn_id', 'summary', 'turn_summary', 'scene', 'events',
+        'entity_updates', 'state_updates'
+    ].includes(key)) || !isPlainObject(source.scene)
+        || !Array.isArray(source.events) || source.events.length
+        || !Array.isArray(source.entity_updates) || source.entity_updates.length
+        || !isPlainObject(source.state_updates)
+        || Object.keys(source.state_updates).some(key => key !== 'checks')
+        || !isPlainObject(source.state_updates.checks)) return null;
+    const check = source.state_updates.checks;
+    if (Object.keys(check).some(key => ![
+        'id', 'label', 'stat_id', 'rollable_stat_id', 'difficulty',
+        'on_success', 'on_failure'
+    ].includes(key)) || !String(check.label || '').trim()
+        || !Number.isInteger(Number(check.difficulty))) return null;
+    const statId = String(check.stat_id || check.rollable_stat_id || '').trim();
+    if (!statId || (check.stat_id && check.rollable_stat_id
+        && String(check.stat_id) !== String(check.rollable_stat_id))) return null;
+    const rollable = (world.hudConfig?.stats || []).some(stat =>
+        String(stat.id || '').toLowerCase() === statId.toLowerCase()
+        && stat.roll?.enabled === true);
+    if (!rollable) return null;
+    const difficulty = Number(check.difficulty);
+    const dice = normalizeWorldDiceConfig(world);
+    if (difficulty < 2 || difficulty > dice.sides + 10) return null;
+    const view = typeof worldForSession === 'function' ? worldForSession(world, sess) : world;
+    const current = getLocationRef(view, sess.playerLocation);
+    const flatBranch = (raw, success) => {
+        if (raw === undefined || raw === null) return {};
+        if (!isPlainObject(raw) || Object.keys(raw).some(key => ![
+            'events', 'entity_updates', 'state_updates', 'exit_unlocks'
+        ].includes(key)) || (raw.events !== undefined
+            && (!Array.isArray(raw.events) || raw.events.length))
+            || (raw.entity_updates !== undefined
+                && (!Array.isArray(raw.entity_updates) || raw.entity_updates.length))
+            || (raw.state_updates !== undefined
+                && (!isPlainObject(raw.state_updates) || Object.keys(raw.state_updates).length))) return null;
+        if (raw.exit_unlocks === undefined) return {};
+        if (!success || !current || !Array.isArray(raw.exit_unlocks)
+            || raw.exit_unlocks.length !== 1) return null;
+        const request = raw.exit_unlocks[0];
+        if (!isPlainObject(request) || Object.keys(request).some(key => ![
+            'from_location_id', 'to_location_id'
+        ].includes(key)) || request.from_location_id !== current.id) return null;
+        const authored = (current.exits || []).some(exit => exit?.allowCheckUnlock === true
+            && resolveWorldExitTarget(view, exit)?.id === request.to_location_id);
+        return authored ? { exit_unlocks: safeJsonClone(raw.exit_unlocks) } : null;
+    };
+    const onSuccess = flatBranch(check.on_success, true);
+    const onFailure = flatBranch(check.on_failure, false);
+    if (!onSuccess || !onFailure) return null;
+    return { ...source, state_updates: { checks: [{
+        ...(check.id ? { id: String(check.id).slice(0, 80) } : {}),
+        label: String(check.label).slice(0, 120), stat_id: statId,
+        difficulty, on_success: onSuccess, on_failure: onFailure
+    }] } };
+}
+
+function worldNarrativeSentences(text) {
+    return String(text || '').split(/(?<=[.!?])\s+|\n+/).filter(Boolean);
+}
+
+function worldNegatedActionClaim(sentence) {
+    return /\b(?:do|does|did|are|is|was|were|have|has|had|will|would)\s+not\b|\b(?:don't|doesn't|didn't|isn't|aren't|wasn't|weren't|haven't|hasn't|hadn't|won't|wouldn't|never)\b/i
+        .test(String(sentence || '').replace(/[’]/g, "'"));
+}
+
+function worldConsumptionClauses(sentence) {
+    return String(sentence || '').split(/[,;]|\b(?:while|whereas|although|but)\b|\band\b(?=\s+(?:(?:you|she|he|they)\s+)?(?:put|leave|return|keep|stow|carry|hold|store)\b)/i)
+        .map(clause => clause.trim()).filter(Boolean);
+}
+
+function worldPlayerConsumptionClaim(sentence) {
+    const ingest = '(?:swallow(?:s|ed|ing)?|drink(?:s|ing)?|drank|drunk|quaff(?:s|ed|ing)?|consum(?:e|es|ed|ing)|eat|eats|eating|ate)';
+    const playerSubject = new RegExp(`\\b(?:you|the player|the protagonist)\\s+(?:(?:then|finally|slowly|quickly|immediately|actually|now|have|has|had|are|were|begin to|start to)\\s+){0,4}${ingest}\\b`, 'i');
+    const coordinated = new RegExp(`\\b(?:you|the player|the protagonist)\\b[^.!?]{0,50}\\band\\s+(?:(?:then|finally|slowly|quickly)\\s+)?${ingest}\\b`, 'i');
+    return worldConsumptionClauses(sentence).some(clause => {
+        const words = clause.replace(/[’]/g, "'");
+        return (playerSubject.test(words) || coordinated.test(words))
+            && !worldNegatedActionClaim(words)
+            && !/[?]\s*["”']?$/.test(words)
+            && !/\b(?:could|would|might|should|can|may|ask|asks|asked|consider|considered|try|tried|attempt|attempted)\b/i.test(words);
+    });
+}
+
+function worldItemReferenceMatches(reference, name, ownedNames = []) {
+    const fullName = String(name || '').toLowerCase();
+    const head = fullName.split(/\s+/).at(-1);
+    const uniqueHead = head && head.length >= 4 && ownedNames.filter(value =>
+        String(value || '').toLowerCase().split(/\s+/).at(-1) === head).length === 1;
+    const words = String(reference || '').toLowerCase();
+    return words.includes(fullName) || (uniqueHead
+        && new RegExp(`\\b${head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(words));
+}
+
+function worldConsumptionMentionsItem(sentence, name, ownedNames = []) {
+    return worldConsumptionClauses(sentence).some(clause => {
+        if (!worldPlayerConsumptionClaim(clause)) return false;
+        return worldItemReferenceMatches(clause, name, ownedNames);
+    });
+}
+
+function worldPlayerInjuryClaim(sentence) {
+    const words = String(sentence || '').replace(/[’]/g, "'");
+    if (worldNegatedActionClaim(words)
+        || /\b(?:could|would|might|should|if|imagine|recall|remember|ask|say|said|warn|warned)\b/i.test(words)) return false;
+    // Active attacks such as "You hit the guard" or "You burn the rope" are
+    // not injuries to the player. Require passive damage, a body-part victim,
+    // or an explicit first-person injury outcome.
+    return /\byou\s+(?:are|were|have been|get|got|become|became)\s+(?:hit|struck|burn(?:ed|t)?|wounded|injured|poisoned|fractured|cut|bleeding)\b/i.test(words)
+        || /\byou\s+(?:suffer(?:ed)?\s+(?:a\s+)?(?:burn|wound|injury|fracture)|take\s+\d+\s+(?:points?\s+of\s+)?damage|start\s+bleeding)\b/i.test(words)
+        || /\byour\s+(?:skin|body|arm|leg|hand|forearm|face|chest|back|throat|head)\b[^.!?]{0,75}\b(?:sear(?:s|ed|ing)?|burn(?:s|ed|ing)?|wound(?:s|ed|ing)?|bleed(?:s|ing)?|poison(?:s|ed|ing)?|fractur(?:e|es|ed|ing)|is\s+(?:hit|struck|cut|injured))\b/i.test(words)
+        || /\b(?:sear(?:s|ed)?|burn(?:s|ed)?|wound(?:s|ed)?|cut(?:s)?|poison(?:s|ed)?)\s+your\s+(?:skin|body|arm|leg|hand|forearm|face|chest|back|throat|head)\b/i.test(words)
+        || /\b(?:catches|hits|strikes|sears|burns|cuts|wounds|injures|poisons)\s+you\b[^.!?]{0,140}\b(?:skin|body|arm|leg|hand|forearm|face|chest|back|throat|head|burn|blood|wound|stinging)\b/i.test(words);
+}
+
+function worldPickupIntentWord(input, world, sess) {
+    const source = String(input || '');
+    const match = source.match(/\b(?:i|we)\b[^.!?]{0,180}?\b(?:take|pick(?:\s*up)?|collect|pocket|stash)\s+(?:(?:the|a|an|my)\s+)?([a-z][a-z0-9'-]{2,})/i);
+    if (!match) return '';
+    const word = String(match[1] || '').toLowerCase();
+    const suffix = source.slice((match.index || 0) + match[0].length);
+    if (/['’]s$/.test(word) || /^['’]s\b/.test(suffix)) return '';
+    const abstractObjects = new Set(['look', 'breath', 'step', 'seat', 'moment', 'time', 'hand',
+        'path', 'road', 'route', 'exit', 'door', 'stairs', 'turn', 'chance', 'care',
+        'advice', 'offer', 'risk', 'responsibility', 'word', 'hint', 'meaning']);
+    if (abstractObjects.has(word)) return '';
+    if (world && sess && sessionNpcs(world, sess).some(npc =>
+        String(npc.name || '').toLowerCase().split(/\s+/)[0] === word)) return '';
+    return word;
+}
+
+function worldPickupIntentObjectWord(input, world, sess) {
+    const source = String(input || '');
+    const match = source.match(/\b(?:i|we)\b[^.!?]{0,180}?\b(?:take|pick(?:\s*up)?|collect|pocket|stash)\s+([^.!?]{1,100})/i);
+    if (!match) return '';
+    const objectPhrase = match[1].split(/[,;]|\b(?:off|from|into|onto|and|then|while|with|after|before|toward|towards|to|for)\b/i)[0];
+    const words = objectPhrase.match(/[a-z][a-z0-9'-]{2,}/gi) || [];
+    const word = String(words.at(-1) || '').toLowerCase();
+    if (!word || new Set(['advice', 'offer', 'breath', 'step', 'seat', 'moment', 'time',
+        'hand', 'path', 'road', 'route', 'exit', 'door', 'stairs', 'turn', 'chance',
+        'care', 'risk', 'responsibility', 'word', 'hint', 'meaning', 'look']).has(word)) return '';
+    if (world && sess && sessionNpcs(world, sess).some(npc =>
+        String(npc.name || '').toLowerCase().split(/\s+/)[0] === word)) return '';
+    return word;
+}
+
+function worldCompletedPlayerPickupSentence(narrative, item = '') {
+    const head = String(item || '').toLowerCase().match(/[a-z][a-z0-9'-]*$/)?.[0] || '';
+    const headPattern = head
+        ? new RegExp(`\\b${head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i') : null;
+    return worldNarrativeSentences(narrative).find(sentence => {
+        const action = sentence.match(/\b(?:you|your)\b([^.!?]{0,110}?)\b(tuck|pocket|stash|collect|take|pick\s*up|carry|hold)\b/i);
+        if (!action || worldNegatedActionClaim(sentence)
+            || /\b(?:try|tried|attempt|attempted|could|would|might|should|can't|cannot|refus(?:e|es|ed)|stops?)\b/i.test(sentence)
+            || /\b(?:watch|see|hear|notice|observe|ask|tell|order|instruct)\b/i.test(action[1])) return false;
+        return action[2].toLowerCase() !== 'take' || (headPattern && headPattern.test(sentence));
+    }) || '';
+}
+
+function worldCompletedPlayerInventoryGain(narrative, item, playerInput = '', world = null, sess = null) {
+    const head = String(item || '').toLowerCase().match(/[a-z][a-z0-9'-]*$/)?.[0] || '';
+    if (!head) return '';
+    const itemPhrase = '(?:(?:the|a|an|my|his|her|their)\\s+)?(?:(?!(?:and|but|while)\\b)[a-z-]+\\s+){0,3}' + head + '\\b';
+    const playerTakes = new RegExp('\\b(?:you|your)\\b[^.!?;]{0,90}\\b(?:tuck|pocket|stash|collect|take|pick\\s*up|carry|hold|accept|receive)\\b\\s+' + itemPhrase, 'i');
+    const givenToPlayer = new RegExp('\\b(?:hands?|gives?|passes?|places?|puts?)\\b\\s+' + itemPhrase + '[^.!?;]{0,55}\\b(?:to you|into your hands?|in your hands?|into your pack)\\b|\\b(?:hands?|gives?|passes?)\\s+you\\s+' + itemPhrase, 'i');
+    const sentences = worldNarrativeSentences(narrative);
+    const headPattern = new RegExp('\\b' + head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+    const askedToPickUpThisItem = worldPickupIntentObjectWord(playerInput, world, sess) === head;
+    return sentences.find((sentence, index) => {
+        if (worldNegatedActionClaim(sentence) || /[?]\s*["”']?$/.test(sentence)
+            || /^\s*[^.!?]{1,60}:\s*["“]/.test(sentence)
+            || /\b(?:could|would|might|should|if|try|attempt|refus(?:e|es|ed))\b/i.test(sentence)) return false;
+        if (playerTakes.test(sentence)) return true;
+        if (givenToPlayer.test(sentence)
+            && !/\b(?:offers?|holds?|extends?)\b[^.!?]{0,100}\b(?:out|toward|towards)\b/i.test(sentence)) return true;
+        // Long-form prose may name the object and then use "it" in the actual
+        // transfer: "The leather strap ... You tuck it into your pack." Keep
+        // that anaphora scoped to the item the player asked to pick up and a
+        // nearby explicit head noun; a mere offer, sighting or third-party
+        // action cannot supply the completed player-to-inventory step.
+        if (!askedToPickUpThisItem || !sentences.slice(Math.max(0, index - 2), index)
+            .some(previous => headPattern.test(previous))) return false;
+        const storage = sentence.match(/\b(?:you|your)\b([^.!?;]{0,110}?)\b(?:tuck|pocket|stash|put|place|store)\s+(?:it|the\s+(?:piece(?:\s+of\s+evidence)?|item|object|evidence))\b[^.!?;]{0,70}\b(?:in|into)\s+your\s+(?:pack|bag|pocket|satchel)\b/i);
+        return !!storage && !/\b(?:watch|see|hear|notice|observe|ask|tell|order|instruct)\b/i.test(storage[1]);
+    }) || '';
+}
+
+function worldPlayerRefusedItem(input, item) {
+    const head = String(item || '').toLowerCase().match(/[a-z][a-z0-9'-]*$/)?.[0] || '';
+    if (!head) return false;
+    return new RegExp('\\b(?:i|we)\\b[^.!?]{0,100}\\b(?:refuse|decline|reject|(?:do not|don.t|won.t)\\b[^.!?]{0,40}\\b(?:take|accept|receive|pick\\s*up))\\b[^.!?]{0,90}\\b(?:' + head + '|any item|anything)\\b', 'i')
+        .test(String(input || ''));
+}
+
+function worldPickupItemCorroborated(item, world, sess, context) {
+    const name = String(item || '').trim().toLowerCase();
+    const input = String(context.playerInput || '').toLowerCase();
+    const narrative = String(context.narrativeText || '').toLowerCase();
+    const intentWord = worldPickupIntentWord(context.playerInput, world, sess);
+    const head = name.match(/[a-z][a-z0-9'-]*$/)?.[0] || '';
+    return !!(!worldPlayerRefusedItem(context.playerInput, item)
+        && intentWord && name.split(/\s+/).includes(intentWord)
+        && head.length >= 3 && new RegExp(`\\b${head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(input)
+        && new RegExp(`\\b${head.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(narrative)
+        && worldCompletedPlayerPickupSentence(context.narrativeText, item));
+}
+
+// An older tool schema advertised inventory_add at receipt root. Some models
+// returned a player-scoped proposal there instead of an inventory event. Only
+// the single, explicit player pickup shape is recoverable, and only when both
+// the player's action and completed prose independently name the same item.
+// Everything else still fails the unscoped-mutation audit below.
+function recoverActorScopedWorldPickup(world, sess, receipt, context) {
+    const proposals = receipt.state_updates?.inventory_add;
+    if (!Array.isArray(proposals) || proposals.length !== 1) return;
+    const proposal = proposals[0];
+    if (!isPlainObject(proposal) || Object.keys(proposal).some(key => !['actor_id', 'item'].includes(key))
+        || String(proposal.actor_id || '').trim().toLowerCase() !== 'player'
+        || typeof proposal.item !== 'string' || !proposal.item.trim()) return;
+    const item = proposal.item.trim().slice(0, 160);
+    if (!worldPickupItemCorroborated(item, world, sess, context)) return;
+    const alreadyRecorded = receipt.events.some(event => event?.type === 'inventory'
+        && String(event.actor_id || '').toLowerCase() === 'player'
+        && ['add', 'gain', 'take'].includes(String(event.action || '').toLowerCase())
+        && String(event.item || '').toLowerCase() === item.toLowerCase());
+    if (!alreadyRecorded) receipt.events.push({
+        type: 'inventory', actor_id: 'player', status: 'completed', action: 'add', item,
+        evidence: worldCompletedPlayerPickupSentence(context.narrativeText, item).slice(0, 400)
+    });
+    delete receipt.state_updates.inventory_add;
+}
+
+// Some compatible models omit only the type of a plainly completed rope-cut
+// event. Do not turn arbitrary untyped actions into state: this narrow repair
+// requires a named, present captive; matching player intent; a narrated rope
+// break; and an ending activity that no longer describes the NPC as bound.
+function recoverWorldRestraintRelease(world, sess, receipt, context) {
+    if (receipt.events.length !== 1) return;
+    const event = receipt.events[0];
+    if (!isPlainObject(event) || event.type || event.status !== 'completed'
+        || String(event.actor_id || '').toLowerCase() !== 'player'
+        || !/^(?:cut|slice|sever)\s+(?:(?:the|his|her|their|binding)\s+)?(?:ropes?|bindings?|bonds?|restraints?)$/i.test(String(event.action || '').trim())
+        || Object.keys(event).some(key => !['action', 'actor_id', 'cause', 'evidence', 'status', 'target_id'].includes(key))) return;
+    const targetId = resolveWorldActorId(world, sess, event.target_id);
+    const target = sessionNpcs(world, sess).find(npc => npc.id === targetId);
+    const targetState = sess.entityStates?.[targetId];
+    const targetPatch = receipt.entity_updates.find(patch =>
+        resolveWorldActorId(world, sess, patch?.entity_id || patch?.actor_id) === targetId);
+    if (!target || !targetState || targetState.location !== sess.playerLocation
+        || !/\b(?:bound|tied|restrained|captive)\b/i.test(String(targetState.currentActivity || ''))
+        || !targetPatch?.activity || /\b(?:bound|tied|restrained|captive)\b/i.test(targetPatch.activity)) return;
+    const input = String(context.playerInput || '');
+    const narrative = String(context.narrativeText || '');
+    const ropeBreak = worldNarrativeSentences(narrative).find(sentence =>
+        /\b(?:ropes?|bindings?|bonds?|restraints?)\b[^.!?]{0,100}\b(?:snap|snaps|snapped|break|breaks|broke|fall|falls|fell|sever|severed|cut|release|released)\b/i.test(sentence)
+        && !worldNegatedActionClaim(sentence)
+        && !/\b(?:try|tried|attempt|attempted|could|would|might|should|if)\b/i.test(sentence));
+    if (!input.toLowerCase().includes(String(target.name || '').toLowerCase().split(/\s+/)[0])
+        || !/\b(?:cut|slice|sever)\b[^.!?]{0,90}\b(?:ropes?|bindings?|bonds?|restraints?)\b/i.test(input)
+        || !narrative.toLowerCase().includes(String(target.name || '').toLowerCase())
+        || !ropeBreak) return;
+    receipt.events[0] = { ...event, type: 'interaction', participants: [targetId],
+        evidence: ropeBreak.slice(0, 400) };
+
+    // Agreement is not implied by freeing a captive or asking them to come.
+    // Only their own named, direct reply may create a durable escort join.
+    if (!/\b(?:ask|offer)\b[^.!?]{0,120}\b(?:follow|accompany|come with)\b/i.test(input)) return;
+    const speaker = String(target.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const dialogue = narrative.match(new RegExp(`(?:^|\\n)\\s*${speaker}:\\s*[“\"]([^”\"\\n]{1,180})[”\"]`, 'i'))?.[1] || '';
+    if (!/\bi(?:['’]?ll|\s+will)\s+follow\s+you\b/i.test(dialogue)) return;
+    receipt.events.push({ type: 'escort', actor_id: targetId, target_id: 'player',
+        action: 'join', status: 'completed', participants: ['player'],
+        evidence: `${target.name}: “${dialogue}”`.slice(0, 400) });
+}
+
+// An escort does not end merely because the party reaches a destination or
+// talks to someone there. Compatible models can, however, omit the escort
+// leave event after an explicit handoff. Recover only when the player's named
+// transfer, a co-located named recipient, the escorted NPC's recipient-scoped
+// activity, and the completed ledger all agree. No state is inferred from a
+// room description or a quest update alone.
+function recoverWorldEscortHandoff(world, sess, receipt, context) {
+    const input = String(context.playerInput || '');
+    const ledger = String(receipt.state_updates?.ledger_update || receipt.summary || '');
+    if (!input || !ledger || !Array.isArray(receipt.entity_updates)) return;
+    const escapeName = name => String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const present = sessionNpcs(world, sess).filter(npc => sess.entityStates?.[npc.id]?.location === sess.playerLocation
+        && isNpcActive(sess.entityStates?.[npc.id]));
+    present.filter(npc => sess.entityStates?.[npc.id]?.followingPlayer === true).forEach(npc => {
+        if (receipt.events.some(event => event?.type === 'escort'
+            && resolveWorldActorId(world, sess, event.actor_id) === npc.id)) return;
+        const escortedName = escapeName(npc.name);
+        const patch = receipt.entity_updates.find(update =>
+            resolveWorldActorId(world, sess, update?.entity_id || update?.actor_id) === npc.id);
+        if (!patch || patch.location_id && patch.location_id !== sess.playerLocation
+            || !Array.isArray(patch.interacting_with)
+            || patch.interacting_with.some(ref => resolveWorldActorId(world, sess, ref) === 'player')) return;
+        present.filter(recipient => recipient.id !== npc.id).forEach(recipient => {
+            const recipientName = escapeName(recipient.name);
+            const handoff = new RegExp(`\\bI\\s+(?:bring|brought|return|returned|deliver|delivered|hand\\s+over|handed\\s+over|leave|left)\\s+${escortedName}\\s+(?:back\\s+)?(?:to|with)\\s+${recipientName}\\b`, 'i');
+            const committed = new RegExp(`\\b(?:brought|returned|delivered|handed\\s+over|left)\\s+${escortedName}\\s+(?:back\\s+)?(?:to|with)\\s+${recipientName}\\b`, 'i');
+            if (!handoff.test(input) || !committed.test(ledger)
+                || !patch.interacting_with.some(ref => resolveWorldActorId(world, sess, ref) === recipient.id)
+                || !new RegExp(`\\b${recipientName}\\b`, 'i').test(String(patch.activity || ''))) return;
+            receipt.events.push({ type: 'escort', actor_id: npc.id, target_id: 'player',
+                action: 'leave', status: 'completed', participants: ['player', recipient.id],
+                evidence: ledger.slice(0, 400) });
+        });
+    });
+}
+
 function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
     const receipt = normalizeWorldTurnReceipt(world, sess, rawReceipt);
+    // Exit-button travel is already an atomic engine receipt before the
+    // arrival look. Some models echo that just-completed leg in their look
+    // receipt, which would otherwise force a second model repair call and can
+    // stall the scene. Strip only the exact duplicate from the immediately
+    // preceding engine_travel checkpoint; never forgive a different route.
+    const priorArrival = context.precommittedArrival;
+    if (priorArrival?.to === sess.playerLocation
+        && receipt.scene.player_location_id === sess.playerLocation) {
+        const playerMoves = receipt.events.filter(event => event?.type === 'movement'
+            && event?.status === 'completed' && String(event.actor_id || '').toLowerCase() === 'player');
+        const exactEcho = playerMoves.length === 1
+            && getLocationRef(world, playerMoves[0].from_location_id || playerMoves[0].from)?.id === priorArrival.from
+            && getLocationRef(world, playerMoves[0].to_location_id || playerMoves[0].to || playerMoves[0].location_id)?.id === priorArrival.to;
+        if (!playerMoves.length || exactEcho) {
+            if (exactEcho) receipt.events = receipt.events.filter(event => event !== playerMoves[0]);
+            receipt.scene.player_location_changed = false;
+        }
+    }
+    recoverActorScopedWorldPickup(world, sess, receipt, context);
+    recoverWorldRestraintRelease(world, sess, receipt, context);
+    recoverWorldEscortHandoff(world, sess, receipt, context);
     const acceptedEvents = [];
     const rejectedEvents = [];
     const informationalEvents = [];
     const entityPatches = [];
     const legacyArgs = { ...receipt.state_updates };
+    // A provider can return syntactically valid JSON containing invented
+    // fields (for example player_health or inventory_updates). Ignoring those
+    // fields while accepting its prose makes a completed action appear to
+    // persist when it did not. Treat unhandled mutations as a rejected receipt
+    // so the caller can repair or stop the turn visibly.
+    const knownStateKeys = new Set(ENGINE_STATE_KEYS);
+    const arrayStateKeys = new Set([
+        'location_introduced', 'location_state_updates', 'npc_moves', 'capability_progress',
+        'transactions', 'checks', 'player_condition_updates', 'inventory_add',
+        'inventory_remove', 'npc_observations', 'npc_introduced', 'npc_goal_updates',
+        'npc_disposition_changes', 'npc_relationship_updates', 'npc_status_changes',
+        'schedule_updates', 'world_events', 'faction_updates', 'economy_updates',
+        'player_preference_updates', 'threads_update', 'quests_update'
+    ]);
+    const objectStateKeys = new Set(['stat_changes', 'player_identity_update']);
+    Object.entries(legacyArgs).forEach(([key, value]) => {
+        if (!knownStateKeys.has(key)) {
+            rejectedEvents.push({ index: -1, type: 'state_update', reason: 'unsupported_state_update',
+                actor_id: '', detail: key.slice(0, 120) });
+        } else if ((arrayStateKeys.has(key) && !Array.isArray(value))
+            || (objectStateKeys.has(key) && !isPlainObject(value))) {
+            rejectedEvents.push({ index: -1, type: 'state_update', reason: 'invalid_state_update_shape',
+                actor_id: '', detail: key.slice(0, 120) });
+        }
+    });
+    const receiptRoot = isPlainObject(rawReceipt?.receipt) ? rawReceipt.receipt : rawReceipt;
+    const allowedRootKeys = new Set(['receipt', 'version', 'turn_id', 'turn_summary', 'summary',
+        'scene', 'events', 'entity_updates', 'state_updates', ...ENGINE_STATE_KEYS]);
+    if (isPlainObject(receiptRoot)) Object.keys(receiptRoot).forEach(key => {
+        if (!allowedRootKeys.has(key)) rejectedEvents.push({ index: -1, type: 'receipt',
+            reason: 'unsupported_receipt_field', actor_id: '', detail: key.slice(0, 120) });
+    });
+    const introducedActors = prepareWorldIntroducedActors(world, sess, legacyArgs.npc_introduced, receipt.turn_id);
+    if (Array.isArray(legacyArgs.npc_introduced)) legacyArgs.npc_introduced = introducedActors;
+    const resolveReceiptActor = ref => {
+        const existing = resolveWorldActorId(world, sess, ref);
+        if (existing) return existing;
+        const key = String(ref || '').toLowerCase().replace(/^(?:npc|ent)[_-]/, '')
+            .replace(/[^a-z0-9]/g, '');
+        if (!key) return null;
+        const matches = introducedActors.filter(npc => {
+            const id = npc.id.toLowerCase().replace(/^(?:npc|ent)[_-]/, '').replace(/[^a-z0-9]/g, '');
+            const name = npc.name.toLowerCase().replace(/^(?:agent|officer|dr|doctor|mr|mrs|ms)\.?\s+/, '')
+                .replace(/[^a-z0-9]/g, '');
+            return key === id || key === name;
+        });
+        return matches.length === 1 ? matches[0].id : null;
+    };
     const modules = normalizeWorldGameRules(world).modules;
     // A naked location_id was the source of actor confusion. It is never
     // committed; only an accepted player movement event may set this field.
+    for (const field of ['location_id', 'npc_moves', 'outfit_update',
+        'inventory_add', 'inventory_remove', 'player_condition_updates']) {
+        if (legacyArgs[field] !== undefined && legacyArgs[field] !== null
+            && (!Array.isArray(legacyArgs[field]) || legacyArgs[field].length > 0)) {
+            rejectedEvents.push({ index: -1, type: 'state_update',
+                reason: 'unscoped_actor_mutation', actor_id: '', detail: field });
+        }
+    }
     delete legacyArgs.location_id;
     delete legacyArgs.npc_moves;
     // These mutate the player but carry no actor in the legacy shape. Require
@@ -9417,8 +10184,17 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
     sessionNpcs(world, sess).forEach(npc => {
         projectedLocations.set(npc.id, String(sess.entityStates?.[npc.id]?.location || ''));
     });
+    introducedActors.forEach(npc => projectedLocations.set(npc.id, String(sess.playerLocation || '')));
     const playerStart = String(context.playerStartLocationId || currentFrame.player_location_id);
     const committedDestination = String(context.committedPlayerDestinationId || '');
+    const authorizedRoute = context.playerMovementAuthorized && context.authorizedPlayerDestinationId
+        ? findWorldTravelPath(typeof worldForSession === 'function' ? worldForSession(world, sess) : world,
+            playerStart, context.authorizedPlayerDestinationId, { session: sess }) || [] : [];
+    const authorizedWaypoints = new Set(Array.isArray(context.authorizedPlayerWaypointIds)
+        ? context.authorizedPlayerWaypointIds : []);
+    // A precommitted player route may still be described as individual legs
+    // in the model receipt; validate those legs against the original start.
+    let projectedPlayerRouteLocation = committedDestination ? playerStart : sess.playerLocation;
     const introducedLocations = (Array.isArray(legacyArgs.location_introduced)
         ? legacyArgs.location_introduced : []).map((item, index) => ({
         id: String(item?.id || `loc_turn_${Math.max(1, parseInt(sess.turnCount) || 1)}_${index + 1}`)
@@ -9439,19 +10215,66 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
         return proposed ? { location: proposed, introduced: true } : { location: null, introduced: false };
     };
 
+    // Compatible models commonly turn a display name such as "Marsh Causeway"
+    // into a guessed id like "marsh_causeway". Accept that only when it maps
+    // to one unambiguous location, then store the canonical id. An unknown
+    // target must fail the whole receipt, not silently discard a narrated
+    // lasting hazard while showing the player that it happened.
+    const resolveUpdateLocation = ref => {
+        const direct = resolveProposedLocation(ref).location;
+        if (direct) return direct;
+        const slug = value => String(value || '').trim().toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+        const query = slug(ref);
+        if (!query) return null;
+        const visible = (typeof worldForSession === 'function' ? worldForSession(world, sess) : world).locations || [];
+        const matches = [...visible, ...introducedLocations].filter(location =>
+            slug(location.id) === query || slug(location.name) === query);
+        return matches.length === 1 ? matches[0] : null;
+    };
+    (Array.isArray(legacyArgs.location_state_updates) ? legacyArgs.location_state_updates : [])
+        .forEach((update, index) => {
+            const location = resolveUpdateLocation(update?.location_id);
+            if (!location) reject(index, update, 'unknown_location_state_target', update?.location_id || '(missing)');
+            else update.location_id = location.id;
+        });
+    (Array.isArray(legacyArgs.world_events) ? legacyArgs.world_events : [])
+        .forEach((update, index) => {
+            if (!update?.location_id) {
+                if (update?.condition_on_trigger) reject(index, update,
+                    'condition_requires_location', update.title || update.id || '(unnamed event)');
+                return;
+            }
+            const location = resolveUpdateLocation(update.location_id);
+            if (!location) reject(index, update, 'unknown_world_event_location', update.location_id);
+            else update.location_id = location.id;
+        });
+
     receipt.events.forEach((rawEvent, index) => {
         const event = isPlainObject(rawEvent) ? rawEvent : {};
         const type = WORLD_TURN_EVENT_TYPES.includes(event.type) ? event.type : 'other';
-        const actorId = resolveWorldActorId(world, sess, event.actor_id);
-        const status = ['intended', 'attempted', 'in_progress', 'completed', 'cancelled', 'failed']
-            .includes(event.status) ? event.status : 'completed';
+        if (!WORLD_TURN_EVENT_TYPES.includes(event.type)) {
+            reject(index, event, 'unsupported_event_type', event.type || '(missing type)');
+            return;
+        }
+        if (!['intended', 'attempted', 'in_progress', 'completed', 'cancelled', 'failed'].includes(event.status)) {
+            reject(index, event, 'invalid_event_status', event.status || '(missing status)');
+            return;
+        }
+        if (type === 'other' && /\b(?:pick\s*up|collect|gain|consume|drink|heal|hurt|injur|pay|receive|escort|free|rescue)\b/i
+            .test(String(event.action || ''))) {
+            reject(index, event, 'durable_action_requires_typed_event', event.action);
+            return;
+        }
+        const actorId = resolveReceiptActor(event.actor_id);
+        const status = event.status;
         const base = {
             id: String(event.id || `${receipt.turn_id}_event_${index + 1}`).slice(0, 120),
             type, actor_id: actorId, status,
             participants: (Array.isArray(event.participants) ? event.participants : [])
-                .map(ref => resolveWorldActorId(world, sess, ref)).filter(Boolean).slice(0, 20),
+                .map(ref => resolveReceiptActor(ref)).filter(Boolean).slice(0, 20),
             witnessed_by: (Array.isArray(event.witnessed_by) ? event.witnessed_by : [])
-                .map(ref => resolveWorldActorId(world, sess, ref)).filter(Boolean).slice(0, 40),
+                .map(ref => resolveReceiptActor(ref)).filter(Boolean).slice(0, 40),
             evidence: String(event.evidence || '').slice(0, 400),
             cause: String(event.cause || event.reason || '').slice(0, 300)
         };
@@ -9480,10 +10303,22 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
                 informationalEvents.push(movement);
                 return;
             }
+            if (introducedActors.some(npc => npc.id === actorId)) {
+                // A newly named stranger has no prior entity state. Their
+                // introduction already anchors them in the current scene;
+                // a model's separate "arrived from the road" movement event
+                // is redundant, not evidence of an existing actor teleporting.
+                // Keep strict movement validation for every known NPC.
+                if (toLoc.id !== sess.playerLocation) {
+                    reject(index, event, 'introduced_actor_outside_scene', toLoc.id);
+                }
+                return;
+            }
             if (actorId === 'player') {
                 const alreadyCommitted = !!committedDestination && toLoc.id === committedDestination;
                 const playerIntentMatch = !!context.playerMovementAuthorized
-                    && (!context.authorizedPlayerDestinationId || toLoc.id === context.authorizedPlayerDestinationId);
+                    && (!context.authorizedPlayerDestinationId || authorizedRoute.includes(toLoc.id)
+                        || authorizedWaypoints.has(toLoc.id));
                 const forced = movement.movement_mode !== 'voluntary'
                     && movement.caused_by_actor_id && movement.cause;
                 if (!alreadyCommitted && !playerIntentMatch && !forced) {
@@ -9491,13 +10326,18 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
                         'No matching player movement intent or explicit forced-movement cause.');
                     return;
                 }
-                const routeOrigin = alreadyCommitted ? playerStart : sess.playerLocation;
-                if (!proposedDestination.introduced && routeOrigin !== toLoc.id && !findWorldTravelPath(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, routeOrigin, toLoc.id)
+                const routeOrigin = projectedPlayerRouteLocation;
+                if (fromLoc && fromLoc.id !== routeOrigin) {
+                    reject(index, event, 'player_origin_mismatch', `${routeOrigin} ≠ ${fromLoc.id}`);
+                    return;
+                }
+                if (!proposedDestination.introduced && routeOrigin !== toLoc.id && !findWorldTravelPath(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, routeOrigin, toLoc.id, { session: sess })
                     && movement.movement_mode !== 'teleport') {
                     reject(index, event, 'unreachable_player_destination', `${routeOrigin} → ${toLoc.id}`);
                     return;
                 }
-                if (!alreadyCommitted && sess.playerLocation !== toLoc.id) legacyArgs.location_id = toLoc.id;
+                if (!committedDestination && sess.playerLocation !== toLoc.id) legacyArgs.location_id = toLoc.id;
+                projectedPlayerRouteLocation = toLoc.id;
                 projectedLocations.set('player', toLoc.id);
                 acceptedEvents.push(movement);
                 return;
@@ -9546,6 +10386,37 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
             return;
         }
 
+        if (type === 'escort') {
+            const action = String(event.action || '').toLowerCase();
+            const npcState = sess.entityStates?.[actorId];
+            if (actorId === 'player' || !npcState || !isNpcActive(npcState)) {
+                reject(index, event, 'invalid_escort_actor', event.actor_id);
+                return;
+            }
+            if (!['join', 'leave', 'stop'].includes(action)
+                || (resolveReceiptActor(event.target_id) !== 'player' && !base.participants.includes('player'))) {
+                reject(index, event, 'invalid_escort_event', 'Name the NPC actor, player target, and join/leave action.');
+                return;
+            }
+            if (status !== 'completed') {
+                informationalEvents.push({ ...base, action });
+                return;
+            }
+            if (action === 'join' && (npcState.location !== sess.playerLocation || npcState.journey)) {
+                reject(index, event, 'escort_actor_not_present', actorId);
+                return;
+            }
+            if (!base.evidence) {
+                reject(index, event, 'missing_escort_evidence', 'The NPC must explicitly agree or stop accompanying the player.');
+                return;
+            }
+            entityPatches.push({ entity_id: actorId, hasFollowingPlayer: true,
+                followingPlayer: action === 'join' });
+            acceptedEvents.push({ ...base, action: action === 'stop' ? 'leave' : action,
+                target_id: 'player' });
+            return;
+        }
+
         if (status !== 'completed') {
             informationalEvents.push(base);
             return;
@@ -9585,6 +10456,15 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
             const action = String(event.action || '').toLowerCase();
             if (!item || !['add', 'gain', 'take', 'remove', 'lose', 'consume', 'give', 'drop'].includes(action)) {
                 reject(index, event, 'invalid_inventory_event');
+                return;
+            }
+            if (['add', 'gain', 'take'].includes(action)
+                && typeof context.narrativeText === 'string' && context.narrativeText.trim()
+                && (worldPlayerRefusedItem(context.playerInput, item)
+                    || !worldCompletedPlayerInventoryGain(context.narrativeText, item,
+                        context.playerInput, world, sess))) {
+                reject(index, event, 'inventory_gain_not_completed',
+                    'An offer or held-out item is not in the player’s inventory until a completed transfer is narrated.');
                 return;
             }
             const key = ['add', 'gain', 'take'].includes(action) ? 'inventory_add' : 'inventory_remove';
@@ -9676,6 +10556,8 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
             }
             legacyArgs.npc_status_changes = [...(Array.isArray(legacyArgs.npc_status_changes) ? legacyArgs.npc_status_changes : []),
                 { npc_id: actorId, status: nextStatus, cause: base.cause }];
+            if (nextStatus !== 'alive') entityPatches.push({ entity_id: actorId,
+                hasFollowingPlayer: true, followingPlayer: false });
             acceptedEvents.push({ ...base, next_status: nextStatus });
             return;
         }
@@ -9686,7 +10568,14 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
 
     receipt.entity_updates.forEach((rawPatch, index) => {
         const patch = isPlainObject(rawPatch) ? rawPatch : {};
-        const actorId = resolveWorldActorId(world, sess, patch.entity_id || patch.actor_id);
+        const allowedPatchKeys = new Set(['entity_id', 'actor_id', 'location_id', 'activity',
+            'interacting_with', 'outfit', 'conditions']);
+        Object.keys(patch).forEach(key => {
+            if (!allowedPatchKeys.has(key)) rejectedEvents.push({ index, type: 'entity_update',
+                reason: 'unsupported_entity_update', actor_id: String(patch.entity_id || patch.actor_id || ''),
+                detail: key.slice(0, 120) });
+        });
+        const actorId = resolveReceiptActor(patch.entity_id || patch.actor_id);
         if (!actorId) {
             rejectedEvents.push({ index, type: 'entity_update', reason: 'unknown_actor', actor_id: String(patch.entity_id || '') });
             return;
@@ -9703,7 +10592,7 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
             entity_id: actorId,
             activity: String(patch.activity || '').slice(0, 180),
             interacting_with: (Array.isArray(patch.interacting_with) ? patch.interacting_with : [])
-                .map(ref => resolveWorldActorId(world, sess, ref)).filter(Boolean).slice(0, 20),
+                .map(ref => resolveReceiptActor(ref)).filter(Boolean).slice(0, 20),
             outfit: String(patch.outfit || '').slice(0, 240),
             conditions: (Array.isArray(patch.conditions) ? patch.conditions : [])
                 .map(value => String(value || '').slice(0, 120)).filter(Boolean).slice(0, 30),
@@ -9732,6 +10621,55 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
         }
     }
 
+    // A well-formed no-op receipt is still invalid if the accompanying prose
+    // unambiguously spends a tracked consumable or injures the player. This is
+    // deliberately narrow: questions, dialogue, intentions and descriptions
+    // of somebody else's wounds are not authority to mutate state. They also
+    // must not be allowed to *pretend* a mutation occurred without a matching
+    // canonical event or stat update.
+    const narratedText = String(context.narrativeText || '');
+    if (narratedText) {
+        const sentences = worldNarrativeSentences(narratedText);
+        const playerConsumption = sentences.some(worldPlayerConsumptionClaim);
+        if (playerConsumption && modules.inventory) {
+            const inventoryNames = (Array.isArray(sess.inventory) ? sess.inventory : [])
+                .map(item => String(globalThis.HordeRpgMechanics?.itemName(item) || item?.name || item || '').trim())
+                .filter(name => name && /\b(?:draught|potion|elixir|medicine|ration|food|drink|meal|pill|dose|water|bread|fruit)\b/i.test(name));
+            inventoryNames.forEach(name => {
+                if (!sentences.some(sentence => worldPlayerConsumptionClaim(sentence)
+                    && worldConsumptionMentionsItem(sentence, name, inventoryNames))) return;
+                const consumed = acceptedEvents.some(event => event.type === 'inventory'
+                    && event.actor_id === 'player'
+                    && ['remove', 'lose', 'consume', 'give', 'drop'].includes(event.action)
+                    && event.item.toLowerCase() === name.toLowerCase());
+                if (!consumed) rejectedEvents.push({ index: -1, type: 'narrative',
+                    reason: 'uncommitted_consumable_use', actor_id: 'player', detail: name.slice(0, 120) });
+            });
+        }
+        if (modules.inventory) {
+            const itemWord = worldPickupIntentObjectWord(context.playerInput, world, sess);
+            const confirmedPickup = itemWord
+                && narratedText.toLowerCase().includes(itemWord)
+                && worldCompletedPlayerPickupSentence(narratedText, itemWord);
+            if (confirmedPickup && !acceptedEvents.some(event => event.type === 'inventory'
+                && event.actor_id === 'player' && ['add', 'gain', 'take'].includes(event.action)
+                && event.item.toLowerCase().includes(itemWord))) {
+                rejectedEvents.push({ index: -1, type: 'narrative', reason: 'uncommitted_item_pickup',
+                    actor_id: 'player', detail: itemWord.slice(0, 120) });
+            }
+        }
+        const directInjury = sentences.some(worldPlayerInjuryClaim);
+        if (directInjury && (modules.health || modules.conditions)) {
+            const vitalStat = String(normalizeWorldGameRules(world)?.vitalStatId || 'hp');
+            const stats = isPlainObject(legacyArgs.stat_changes) ? legacyArgs.stat_changes : {};
+            const hpDamage = Number(stats[vitalStat] ?? stats.hp ?? 0) < 0;
+            const lastingCondition = acceptedEvents.some(event => event.type === 'condition'
+                && event.actor_id === 'player' && event.action === 'add');
+            if (!hpDamage && !lastingCondition) rejectedEvents.push({ index: -1, type: 'narrative',
+                reason: 'uncommitted_player_injury', actor_id: 'player', detail: 'No damage or condition accompanied narrated injury.' });
+        }
+    }
+
     return {
         receipt, legacyArgs, acceptedEvents, informationalEvents, rejectedEvents, entityPatches,
         sceneAssertion: receipt.scene,
@@ -9756,6 +10694,13 @@ function applyWorldEntityPatches(world, sess, patches) {
             entState.interactingWith = [...patch.interacting_with];
         }
         if (patch.outfit) entState.outfit = patch.outfit;
+        if (patch.hasFollowingPlayer) {
+            entState.followingPlayer = patch.followingPlayer === true;
+            if (entState.followingPlayer) {
+                entState.pinnedUntilTurn = Math.max(Number(entState.pinnedUntilTurn) || 0,
+                    (sess.turnCount || 1) + 6);
+            }
+        }
         if (patch.has_conditions) entState.conditions = [...patch.conditions];
         applied.push(patch.entity_id);
     });
@@ -9826,7 +10771,11 @@ function recordWorldTurnCommit(world, sess, validation, actionResult, source = '
                 absoluteMinute: worldTime.absolute_minute
             });
         });
-        if (['condition', 'relationship', 'status', 'inventory', 'discovery'].includes(event.type)) {
+        // Ownership is already durable in inventory and the event ledger. A
+        // routine pickup is not an unresolved story consequence that should
+        // keep resurfacing in the DM's context. A genuinely consequential find
+        // can still carry a separate, explicit discovery/status event.
+        if (['condition', 'relationship', 'status', 'discovery'].includes(event.type)) {
             const severity = event.type === 'condition' ? 65 : event.type === 'relationship' ? 45 : 35;
             createWorldConsequence(world, sess, {
                 type: event.type,
@@ -9873,6 +10822,7 @@ function recordWorldTurnCommit(world, sess, validation, actionResult, source = '
         scene: resultingFrame,
         cast_checksum_match: !castMismatch,
         movement: actionResult?.movementResult || null,
+        deadline_corrections: validation.deadlineCorrections || [],
         timestamp: Date.now()
     };
     sess.lastTurnAudit = audit;
@@ -9886,8 +10836,79 @@ function recordWorldTurnCommit(world, sess, validation, actionResult, source = '
     return audit;
 }
 
+function attachObservedWorldDeadlineOutcome(world, sess, validation) {
+    // A reported warning is a prediction, not proof of its threatened harm.
+    // Show an observed action only when the warned speaker is identified and
+    // has exactly one reached warning this turn. A later resolution needs a
+    // specifically linked, accepted event; free text cannot clear the HUD.
+    const updates = (Array.isArray(validation.legacyArgs?.world_events) ? validation.legacyArgs.world_events : [])
+        .filter(update => update?.status === 'cancelled');
+    const observedNow = (sess.scheduledEvents || []).filter(event => event.reportedWarning
+        && event.lastTriggeredTurn === (sess.turnCount || 1)
+        && !updates.some(update => String(update.id || '') === event.id))
+        .map(event => ({ id: event.id, status: 'observed' }));
+    [...updates, ...observedNow].forEach(update => {
+            const id = String(update.id || '');
+            const warning = (sess.scheduledEvents || []).find(event => event.id === id
+                && event.reportedWarning && event.lastTriggeredTurn > 0);
+            if (!warning) return;
+            const consequence = (sess.consequences || []).find(item => item.type === 'deadline'
+                && item.state !== 'resolved' && String(item.sourceEventId || '').startsWith(`deadline_${id}_`));
+            if (!consequence) return;
+            const speaker = String(warning.reportedWarningSpeaker || '').trim().toLowerCase();
+            const speakerMatches = sessionNpcs(world, sess).filter(npc =>
+                String(npc.name || '').trim().toLowerCase() === speaker);
+            const speakerId = speakerMatches.length === 1 ? speakerMatches[0].id : '';
+            if (warning.lastTriggeredTurn !== (sess.turnCount || 1)) {
+                const resolution = String(update.resolution || '').trim().slice(0, 300);
+                const evidenceId = String(update.resolution_event_id || '').trim();
+                const proof = evidenceId && validation.acceptedEvents.find(event => event.id === evidenceId
+                    && event.status === 'completed' && String(event.evidence || '').trim().length >= 12
+                    && (!speakerId || event.actor_id === speakerId));
+                if (!proof || resolution.length < 12) return;
+                const speakerWords = new Set(speaker.match(/[a-z]{5,}/g) || []);
+                const contentWords = value => new Set((String(value || '').toLowerCase().match(/[a-z]{5,}/g) || [])
+                    .filter(word => !speakerWords.has(word)
+                        && !['about', 'after', 'before', 'their', 'there', 'where', 'which', 'would', 'could', 'should'].includes(word)));
+                const observedWords = contentWords(proof.evidence);
+                if ([...contentWords(resolution)].filter(word => observedWords.has(word)).length < 2) return;
+                consequence.state = 'resolved';
+                consequence.updatedTurn = sess.turnCount || 1;
+                consequence.resolvedTurn = sess.turnCount || 1;
+                consequence.detail = `Observed resolution — ${resolution}`;
+                consequence.evidence = String(proof.evidence).slice(0, 300);
+                consequence.actorIds = proof.actor_id ? [proof.actor_id] : [];
+                return;
+            }
+            if (!speakerId || (sess.scheduledEvents || []).filter(event => event.reportedWarning
+                && event.lastTriggeredTurn === warning.lastTriggeredTurn
+                && String(event.reportedWarningSpeaker || '').trim().toLowerCase() === speaker).length !== 1) return;
+            const actionPattern = /\b(?:dispatch|send|signal|blow|report|warn|order|mobiliz|call|close|block|open|rescu|evacuat|search|march|depart|travel|lead)\w*\b/i;
+            const patchedActivity = String(validation.entityPatches.find(patch => patch.entity_id === speakerId
+                && patch.activity)?.activity || '').trim();
+            const observed = validation.acceptedEvents.find(event =>
+                event.status === 'completed' && event.actor_id === speakerId
+                && ['activity', 'interaction'].includes(event.type)
+                && actionPattern.test(String(event.activity || event.evidence || '')));
+            const observedMove = validation.acceptedEvents.find(event => event.type === 'movement'
+                && event.status === 'completed' && event.actor_id === speakerId
+                && event.from_location_id === sess.playerLocation && event.to_location_id !== sess.playerLocation
+                && /\b(?:march|depart|travel|leav|head)\w*\b/i.test(String(event.evidence || '')));
+            const destination = observedMove && getLocationRef(world, observedMove.to_location_id)?.name;
+            const activity = (actionPattern.test(patchedActivity) ? patchedActivity
+                : String(observed?.activity || observed?.evidence || (destination && `departed for ${destination}`) || '').trim()).slice(0, 160);
+            if (!actionPattern.test(activity)) return;
+            const actor = speakerMatches[0];
+            consequence.detail = `At the deadline, observed ${actor.name}: ${activity}. The wider warned harm is not yet confirmed.`.slice(0, 500);
+            consequence.evidence = String(observed?.evidence || observedMove?.evidence || activity).slice(0, 300);
+            consequence.actorIds = [speakerId];
+        });
+}
+
 function commitWorldTurnReceipt(world, sess, rawReceipt, context = {}, source = 'tool_call') {
     const validation = validateWorldTurnReceipt(world, sess, rawReceipt, context);
+    validation.deadlineCorrections = reconcileNarratedWorldDeadlines(world, sess,
+        validation.receipt, validation.legacyArgs, context.narrativeText, context.playerInput);
     const hasConditionalCheck = Array.isArray(validation.legacyArgs?.checks) && validation.legacyArgs.checks.length > 0;
     if (hasConditionalCheck) {
         // An unresolved check cannot coexist with already-completed event or
@@ -9914,6 +10935,7 @@ function commitWorldTurnReceipt(world, sess, rawReceipt, context = {}, source = 
     }
     const previousLocation = sess.playerLocation;
     const actionResult = processStructuredActions(validation.legacyArgs, world, sess, {
+        deferFeedback: context.deferFeedback === true,
         completedNpcMoves: validation.acceptedEvents.filter(event => event.type === 'movement'
             && event.actor_id !== 'player').map(event => event.actor_id),
         teleportNpcMoves: validation.acceptedEvents.filter(event => event.type === 'movement'
@@ -9969,6 +10991,19 @@ function commitWorldTurnReceipt(world, sess, rawReceipt, context = {}, source = 
             present_character_ids: resolvedFrame.present_character_ids
         };
     }
+    if (source === 'engine_wait_fallback') {
+        // Clock catch-up can change the scheduled cast during an explicit
+        // player wait. This is an engine-owned receipt, so assert the actual
+        // post-wait frame rather than the pre-wait frame used for validation.
+        const settledFrame = buildWorldSceneFrame(world, sess);
+        validation.sceneAssertion = {
+            player_location_id: settledFrame.player_location_id,
+            player_location_changed: settledFrame.player_location_id !== previousLocation,
+            present_character_ids: settledFrame.present_character_ids
+        };
+        validation.receipt.scene = validation.sceneAssertion;
+    }
+    attachObservedWorldDeadlineOutcome(world, sess, validation);
     const audit = recordWorldTurnCommit(world, sess, validation, actionResult, source);
     return { validation, actionResult, audit };
 }
@@ -9993,13 +11028,41 @@ function commitEngineWorldNoOp(world, sess, source = 'engine', summary = 'Engine
     }, { playerStartLocationId: sess.playerLocation }, source);
 }
 
+// A failed DM receipt must not erase a player-controlled, explicit wait. The
+// receipt contains only elapsed time; no model-authored injury, NPC action or
+// claimed outcome is allowed through this fallback.
+function commitEngineWorldWait(world, sess, minutes) {
+    const elapsed = Math.max(0, Math.min(1440, parseInt(minutes) || 0));
+    if (!elapsed) return null;
+    const frame = buildWorldSceneFrame(world, sess);
+    const attempt = attemptWorldStateMutation(world, sess, () => commitWorldTurnReceipt(world, sess, {
+        summary: `Player explicitly waited ${elapsed} minutes; the DM account was unverified.`,
+        scene: {
+            player_location_id: frame.player_location_id,
+            player_location_changed: false,
+            present_character_ids: frame.present_character_ids
+        },
+        events: [{ type: 'time', actor_id: 'player', status: 'completed',
+            minutes_elapsed: elapsed, witnessed_by: ['player'],
+            evidence: `Player explicitly waited ${elapsed} minutes.` }],
+        entity_updates: [], state_updates: {}
+    }, { playerStartLocationId: frame.player_location_id, narrativeText: '', deferFeedback: true },
+    'engine_wait_fallback'), result => (result?.audit?.rejected || []).length === 0);
+    if (!attempt.accepted) return null;
+    attempt.commit();
+    return attempt.result;
+}
+
 function extractInlineWorldTurnReceipt(text) {
     const source = String(text || '');
     const tagged = source.match(/<world_turn_receipt>\s*([\s\S]*?)\s*<\/world_turn_receipt>/i);
     if (tagged) {
-        const parsed = safeParseJSONRepair(tagged[1]);
+        const parsed = unwrapWorldTurnReceipt(tagged[1]);
         if (isPlainObject(parsed)) return parsed;
     }
+    const bare = unwrapWorldTurnReceipt(source.trim()
+        .replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''));
+    if (bare) return bare;
     const legacy = extractInlineWorldStatePayload(source);
     if (legacy) return {
         scene: {},
@@ -10008,6 +11071,20 @@ function extractInlineWorldTurnReceipt(text) {
         state_updates: legacy,
         summary: 'Legacy state payload recovered.'
     };
+    return null;
+}
+
+/** Compatible providers sometimes wrap a JSON receipt in a named call object. */
+function unwrapWorldTurnReceipt(value) {
+    let parsed = typeof value === 'string' ? safeParseJSONRepair(value) : value;
+    for (let depth = 0; depth < 3 && isPlainObject(parsed); depth++) {
+        if (isPlainObject(parsed.scene) && Array.isArray(parsed.events)
+            && Array.isArray(parsed.entity_updates)) return parsed;
+        const nested = parsed.commit_world_turn ?? parsed.receipt
+            ?? parsed.arguments ?? parsed.parameters ?? parsed.args;
+        if (!nested || nested === parsed) break;
+        parsed = typeof nested === 'string' ? safeParseJSONRepair(nested) : nested;
+    }
     return null;
 }
 
@@ -10020,11 +11097,25 @@ function scrubNarrativeArtifacts(text) {
     // The explicit tool-free state channel: applied by the engine, never shown.
     t = t.replace(/<world_turn_receipt>[\s\S]*?(?:<\/world_turn_receipt>|$)/gi, '')
          .replace(/<world_state_json>[\s\S]*?(?:<\/world_state_json>|$)/gi, '');
+    // A few providers print their tool channel as visible content, e.g.
+    // <|tool_call>call:checks{...}. This is never player-facing prose. Drop
+    // the entire tail, not just the marker, so multiline arguments cannot leak.
+    t = t.replace(/<\|tool_call\|?>[\s\S]*$/gi, '')
+         .replace(/\bcall\s*:\s*[a-z_]\w*\s*(?:\{|\()[\s\S]*$/gi, '');
     // XML-ish tool-call wrappers various providers emit as visible text
     t = t.replace(/<\|?\/?tool[_-]?calls?\|?>/gi, '')
          .replace(/<function(_call)?[^>]*>[\s\S]*?(<\/function(_call)?>|$)/gi, '');
+    // Some compatible providers expose channel markers and a pseudo-Python
+    // function call in content rather than a tool delta. Neither is story.
+    t = t.replace(/<\|channel>thought[\s\S]*?(?=<\|channel>final|$)/gi, '')
+         .replace(/<\|channel>final|<\|(?:im_start|im_end|eot_id)\|>/gi, '')
+         .replace(/(?:^|\n)\s*(?:assistant\s+to=)?commit_world_turn\s*\([\s\S]*?\)\s*;?\s*(?=\n|$)/gi, '');
+    // Some models print a JavaScript-shaped "call commit_world_turn { ... }"
+    // block as a tail. It is not story text and must never enter the transcript.
+    t = t.replace(/(?:^|\n)\s*call\s+commit_world_turn\b[\s\S]*$/gi, '');
     // Fenced JSON blocks that are clearly engine payloads
     t = t.replace(new RegExp('```(?:json)?[^`]*?(?:' + KEY_ALT + ')[\\s\\S]*?(?:```|$)', 'gi'), '');
+    t = t.replace(/(?:^|\n)\s*\{\s*"(?:scene|commit_world_turn)"\s*:[\s\S]*$/gi, '');
     // Bare JSON object lines carrying engine keys
     t = t.replace(new RegExp('^\\s*\\{[^\\n]*"(?:' + KEY_ALT + ')"[^\\n]*\\}?\\s*$', 'gim'), '');
     // Pseudo function-call lines printed as prose
@@ -10033,7 +11124,661 @@ function scrubNarrativeArtifacts(text) {
     t = t.replace(/\[(?:STATEUPDATE|LEDGERUPDATE)[^\]]*\]/gi, '')
          .replace(/^\s*\[(?:ENGINE EVENTS?|MANDATE|FINAL MANDATE|SYSTEM)[^\]]*\]\s*$/gim, '');
     // Collapse the gaps scrubbing leaves behind
-    return t.replace(/\n{3,}/g, '\n\n').trim();
+    return t.replace(/\n{3,}/g, '\n\n')
+        .replace(/(?:^|\n)\s*(?:\*{3,}|-{3,}|_{3,})\s*$/, '')
+        .trim();
+}
+
+function trimDanglingWorldDialogue(text) {
+    const source = String(text || '').trimEnd();
+    const opens = (source.match(/“/g) || []).length;
+    const closes = (source.match(/”/g) || []).length;
+    if (opens <= closes) return source;
+    const openAt = source.lastIndexOf('“');
+    const lineAt = source.lastIndexOf('\n', openAt) + 1;
+    if (openAt < lineAt || source.length - openAt > 120 || lineAt < source.length - 180) return source;
+    // Some providers report finish_reason=stop in the middle of a quoted
+    // sentence. Keep the completed scene and discard only the dangling final
+    // speaker line; never show a visibly broken "Go..." as a finished reply.
+    const linePrefix = source.slice(lineAt, openAt);
+    const cutAt = /^[\p{L}\p{N} ._'’-]{1,80}:\s*$/u.test(linePrefix) ? lineAt : openAt;
+    const complete = source.slice(0, cutAt).trimEnd();
+    return complete.length >= 60 ? complete : source;
+}
+
+function hasReadableWorldNarrative(text) {
+    const visible = String(stripWorldLedgerDirective(scrubNarrativeArtifacts(text || '')) || '').trim();
+    return !!visible && !unwrapWorldTurnReceipt(visible);
+}
+
+function worldCheckScaffoldStart(text) {
+    const prose = String(text || '');
+    const headings = [
+        /(?:^|\n)\s*\*{0,2}\s*check\s+required\s*(?:\*{0,2}\s*:|:\s*\*{0,2})/im,
+        // Models commonly replace "Check Required" with a stat-first block.
+        // Require a following numeric difficulty so ordinary prose about a
+        // "safety check" is not mistaken for a pending game mechanic.
+        /(?:^|\n)\s*\*{0,2}\s*[\p{L}][\p{L}\p{N}' -]{0,40}\s+check\s*:[^\n]{0,120}\n\s*\*{0,2}\s*(?:difficulty|dc)\s*\*{0,2}\s*:\s*\*{0,2}\s*\d{1,2}\b/imu
+    ];
+    const starts = headings.map(pattern => pattern.exec(prose)?.index).filter(Number.isInteger);
+    return starts.length ? Math.min(...starts) : -1;
+}
+
+function worldImperativeCheckRequestStart(text) {
+    const prose = String(text || '');
+    const request = /(^|[.!?]\s+|\n)(\s*(?:(?:please|kindly)\s+|you\s+(?:must|need to|should)\s+|can you\s+)?(?:provide|make|roll|perform|take)\s+(?:a|an)\s+(?:[\p{L}\p{N}'-]+\s+){0,3}check\b)/imu.exec(prose);
+    return request ? request.index + request[1].length : -1;
+}
+
+function worldNarrativeRequestsCheck(text) {
+    const prose = String(scrubNarrativeArtifacts(text || '') || '');
+    return worldCheckScaffoldStart(prose) >= 0
+        || worldImperativeCheckRequestStart(prose) >= 0
+        || /\b(?:requires|needs|calls for)\s+(?:a|an)\s+(?:[\p{L}\p{N}'-]+\s+){0,3}check\b/iu
+            .test(stripSpokenDialogue(prose));
+}
+
+function stripWorldCheckScaffolding(text) {
+    const source = String(text || '');
+    const scaffoldAt = worldCheckScaffoldStart(source);
+    const imperativeAt = worldImperativeCheckRequestStart(source);
+    const cutAt = [scaffoldAt, imperativeAt].filter(index => index >= 0);
+    const visible = (cutAt.length ? source.slice(0, Math.min(...cutAt)) : source)
+        .replace(/(?:^|\n)\s*(?:\*{3,}|-{3,}|_{3,})\s*$/, '').trim();
+    return `${visible ? `${visible}\n\n` : ''}A check is ready. Use the 🎲 Check button to roll before continuing.`;
+}
+
+function worldUnverifiedTurnNotice() {
+    return 'The DM reply could not be verified against the world state, so its story text was discarded. No unverified events from that reply became canon. Check the current World state, then Reroll this response to try again.';
+}
+
+function parseExplicitWorldWaitMinutes(input, currentTotalMinutes = null) {
+    const source = String(input || '').slice(0, 1200)
+        .replace(/[“"][^”"]*[”"]/g, ' ');
+    const numbers = { one: 1, two: 2, three: 3, four: 4, five: 5,
+        six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11,
+        twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15,
+        sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+        twenty: 20, 'twenty-four': 24 };
+    const durations = [];
+    for (const sentence of source.match(/[^.!?\n]+[.!?]?/g) || []) {
+        const clause = sentence.trim();
+        if (!/^(?:i|we)\b/i.test(clause) || clause.endsWith('?')) continue;
+        const match = clause.match(/^\s*(?:i|we)\b([^.!?]{0,120}?)\bwait\s+(?:for\s+)?(\d{1,3}|twenty-four|twenty|nineteen|eighteen|seventeen|sixteen|fifteen|fourteen|thirteen|twelve|eleven|ten|nine|eight|seven|six|five|four|three|two|one)\s*(hours?|minutes?)\b/i);
+        if (!match) continue;
+        const lead = String(match[1] || '').replace(/[’]/g, "'");
+        if (/\b(?:if|unless|might|may|could|would|should|consider|ask|tell|say|said|imagine|pretend|plan|try|tried|attempt|want|hope)\b|\b(?:do not|don't|never|will not|won't)\s*$/i.test(lead)) continue;
+        const amount = Number(match[2]) || numbers[match[2].toLowerCase()] || 0;
+        const minutes = amount * (/^hour/i.test(match[3]) ? 60 : 1);
+        if (minutes >= 1 && minutes <= 1440) durations.push(minutes);
+    }
+    // Multiple waits or a hypothetical/question do not authorize the engine
+    // to guess how much time the player really spent.
+    if (durations.length) return durations.length === 1 ? durations[0] : null;
+    if (!Number.isFinite(currentTotalMinutes) || currentTotalMinutes < 0) return null;
+    const namedWaits = [];
+    for (const sentence of source.match(/[^.!?\n]+[.!?]?/g) || []) {
+        const clause = sentence.trim();
+        if (!/^(?:i|we)\b/i.test(clause) || clause.endsWith('?')) continue;
+        const match = clause.match(/^\s*(?:i|we)\b([^.!?]{0,120}?)\bwait\b([^.!?]{0,120}?)\buntil\s+(?:(just|shortly|immediately)\s+after\s+)?(?:the\s+)?(?:(?:next|following)\s+)?(dawn|daybreak|sunrise|first\s+light)\b/i);
+        if (!match) continue;
+        const lead = String(match[1] || '').replace(/[’]/g, "'");
+        if (/\b(?:if|unless|might|may|could|would|should|consider|ask|tell|say|said|imagine|pretend|plan|try|tried|attempt|want|hope)\b|\b(?:do not|don't|never|will not|won't)\s*$/i.test(lead)) continue;
+        const beforeUntil = String(match[2] || '');
+        if (/\b(?:if|unless|might|may|could|would|should)\b/i.test(beforeUntil)) continue;
+        // The clock's existing dawn/daybreak/sunrise convention is 06:00.
+        // "Just after" has no numeric minute in the player's wording; one
+        // five-minute clock tick reaches the first deterministic point after it.
+        const targetToday = Math.floor(currentTotalMinutes / 1440) * 1440
+            + 360 + (match[3] ? 5 : 0);
+        const target = targetToday > currentTotalMinutes ? targetToday : targetToday + 1440;
+        const minutes = Math.ceil(target - currentTotalMinutes);
+        if (minutes >= 1 && minutes <= 1440) namedWaits.push(minutes);
+    }
+    return namedWaits.length === 1 ? namedWaits[0] : null;
+}
+
+function worldNarrativeCompletesExplicitWait(narrative) {
+    const prose = String(narrative || '').slice(0, 12000);
+    return /\b(?:you|the player)\s+(?:spend|spent|wait(?:ed)?)\s+(?:(?:through|for|until)\s+)?(?:the\s+)?(?:night|hours?|morning|dawn)\b/i.test(prose)
+        || /\b(?:you|the player)\s+wait(?:ed)?\b[^.!?\n]{0,100}\b(?:until|through|past)\s+(?:just\s+after\s+)?(?:dawn|first\s+light|daybreak|morning)\b/i.test(prose)
+        || /\bfor\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+hours?\s*,?\s+(?:you|the player)\s+(?:remain|stay|wait|stand|sit)\b/i.test(prose)
+        || /\b(?:hours?\s+(?:pass|passed|later)|after\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+hours?|(?:as\s+)?(?:the\s+)?first\s+(?:grey|gray|morning)\s+light\s+of\s+dawn|as\s+(?:the\s+)?first\s+(?:grey|gray|morning)\s+light|when\s+dawn\s+(?:breaks|comes)|by\s+(?:the\s+)?(?:next\s+)?(?:dawn|morning))\b/i.test(prose);
+}
+
+// A witnessed, present player cannot also be the person a nearby speaker
+// reports as missing or dead in the same settled scene. This narrow check is
+// for explicit waits, where an otherwise valid time receipt could make that
+// internally contradictory account permanent.
+function worldWaitNarrativeContradictsPlayerPresence(world, sess, input, narrative, currentTotalMinutes) {
+    if (!parseExplicitWorldWaitMinutes(input, currentTotalMinutes)
+        || !worldNarrativeCompletesExplicitWait(narrative)) return false;
+    const role = String(sess.playerIdentity?.role
+        || (world.startingLives || []).find(life => life.id === sess.originId)?.role || '');
+    const roleWord = (role.toLowerCase().match(/[a-z]{4,}/g) || []).at(-1);
+    if (!roleWord || !/\b(?:watch(?:es|ed|ing)?|glanc(?:es|ed|ing)?)\s+(?:at\s+)?you\b/i
+        .test(stripSpokenDialogue(narrative))) return false;
+    const spoken = [...String(narrative || '').matchAll(/(?:^|\n)\s*[^\n:]{2,80}:\s*[“"]([^”"\n]{1,500})[”"]/g)]
+        .map(match => match[1]);
+    return spoken.some(line => new RegExp(`\\bthe\\s+${roleWord}\\s*(?:['’]s|is|has)?\\s+(?:gone\\s+missing|missing|dead|died)\\b`, 'i')
+        .test(line));
+}
+
+function worldUnmetConditionalSearchClaims(world, sess, validation, narrative) {
+    const unmet = (sess.scheduledEvents || []).filter(event => event.conditionResolution === 'player_present'
+        && event.conditionResolvedTurn === (sess.turnCount || 1)
+        && event.playerAbsentCondition?.action === 'search_party');
+    if (!unmet.length) return [];
+    const mobilizes = text => /\b(?:organiz|assembl|gather|mobiliz|dispatch|send|summon|call|lead|march|pull)\w*\b[^.!?\n]{0,110}\b(?:search|party|watch|men|guards|scouts)\b/i.test(text)
+        || /\b(?:search\s+party|watchmen|men|guards|scouts)\b[^.!?\n]{0,90}\b(?:assembl|gather|mobiliz|depart|march)\w*\b/i.test(text)
+        || /\b(?:arriv|appear|form|muster|show(?:ed)?\s+up)\w*\b[^.!?\n]{0,90}\bsearch\s+party\b/i.test(text);
+    const plannedOnly = text => /\b(?:if|would|could|might|may|planned?|planning|promised?|intended?|cancelled|called\s+off|never|no|not|didn['’]?t|hasn['’]?t|won['’]?t)\b/i.test(text);
+    const assertedMobilization = text => worldNarrativeSentences(text)
+        .some(sentence => mobilizes(sentence) && !plannedOnly(sentence));
+    const visible = String(stripWorldLedgerDirective(scrubNarrativeArtifacts(narrative || ''))).slice(0, 12000);
+    const narrativeClaim = /\b(?:search\s+party|search\s+(?:the|for)|search\s+tower)\b/i.test(visible)
+        && worldNarrativeSentences(stripSpokenDialogue(visible)).some(sentence =>
+            mobilizes(sentence) && !plannedOnly(sentence));
+    return unmet.flatMap(event => {
+        const promisorId = event.playerAbsentCondition.promisorId;
+        const patched = (validation.entityPatches || []).some(patch =>
+            patch.entity_id === promisorId && assertedMobilization(String(patch.activity || '')));
+        const completed = (validation.acceptedEvents || []).some(action => action.actor_id === promisorId
+            && action.status === 'completed'
+            && assertedMobilization(`${action.action || ''} ${action.activity || ''} ${action.evidence || ''}`));
+        const summarySentences = worldNarrativeSentences(validation.receipt?.summary || '');
+        const summaryClaim = summarySentences.some(sentence => assertedMobilization(sentence));
+        const ledgerClaim = assertedMobilization(validation.legacyArgs?.ledger_update || '');
+        if (!(patched || completed || summaryClaim || ledgerClaim || narrativeClaim)) return [];
+        return [{ reason: 'conditional_deadline_not_met', detail: event.id,
+            ...(summaryClaim && !patched && !completed && !ledgerClaim && !narrativeClaim
+                ? { summaryOnly: true, safeSummary: summarySentences
+                    .filter(sentence => !assertedMobilization(sentence)).join(' ').trim().slice(0, 300) }
+                : {}) }];
+    });
+}
+
+// A named route becoming unavailable is a durable change, not atmospheric
+// prose. Only inspect decisive narration near an unambiguous location name:
+// warnings, hypotheticals and NPC reports are not enough to close a route.
+// Check the *resulting* state so a triggered scheduled event can satisfy the
+// claim as well as a receipt update. Use the same travel-block rule as exits;
+// a vague "flooded" condition must not satisfy this audit while travel stays on.
+function worldNarratedUncommittedRouteClosures(world, sess, narrative) {
+    const locations = ((typeof worldForSession === 'function' ? worldForSession(world, sess) : world)
+        .locations || []).filter(location => String(location?.name || '').trim().length >= 4);
+    const nameCounts = new Map();
+    locations.forEach(location => {
+        const name = String(location.name).trim().toLowerCase();
+        nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+    });
+    const namedLocations = locations.filter(location =>
+        nameCounts.get(String(location.name).trim().toLowerCase()) === 1);
+    const closureTerms = /\b(?:impassable|inaccessible|unreachable|sealed(?:\s+off)?|blocked|closed(?:\s+off)?|cut\s+off|severed|washed\s+(?:out|away)|obliterat(?:ed|es|ing)|vanish(?:ed|es|ing)|erased?|gone|no\s+longer\s+(?:passable|there)|(?:just\s+)?stops?\s+(?:in|at)\s+(?:the\s+)?water)\b/gi;
+    const missing = new Map();
+    const source = String(narrative || '').slice(0, 12000);
+    // A quoted speaker can be followed by a separate narrator assertion on
+    // the same line. Remove the attributed quote *with its speaker label* so
+    // that later narrator prose is audited instead of skipped as dialogue.
+    const withoutLeadingSpeech = source.replace(/(^|\n)\s*(?:[\w.'’-]+\s+){0,4}[\w.'’-]+\s*:\s*[“"][^”"]*[”"]/g,
+        '$1');
+    const prose = typeof stripSpokenDialogue === 'function'
+        ? stripSpokenDialogue(withoutLeadingSpeech) : withoutLeadingSpeech;
+    for (const sentence of prose.split(/(?<=[.!?])\s+|\n+/).filter(Boolean)) {
+        const lower = sentence.toLowerCase();
+        if (sentence.trim().endsWith('?')) continue;
+        // Unquoted lines and indirect reports are still character testimony,
+        // not an omniscient assertion. The player may investigate or try the
+        // route; only an observed narrator fact or accepted state can seal it.
+        if (/^\s*(?:[\w.'’-]+\s+){0,4}[\w.'’-]+\s*:\s*\S/.test(sentence)
+            || /\b(?:according\s+to|reports?|reported|claims?|claimed|says?|said|warns?|warned|insists?|insisted|rumou?rs?)\b/i.test(sentence)) continue;
+        if (!/\b(?:road|route|path|bridge|crossing|causeway|entrance|passage|access)\b/i.test(sentence)) continue;
+        const mentions = namedLocations.flatMap(location => {
+            const name = String(location.name).trim();
+            const pattern = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
+            return [...sentence.matchAll(pattern)].map(match => ({ location, start: match.index,
+                end: match.index + match[0].length }));
+        });
+        if (!mentions.length) continue;
+        for (const term of sentence.matchAll(closureTerms)) {
+            const local = lower.slice(Math.max(0, term.index - 60), term.index + term[0].length + 60);
+            if (!/\b(?:road|route|path|bridge|crossing|causeway|entrance|passage|access)\b/.test(local)) continue;
+            const before = lower.slice(Math.max(0, term.index - 75), term.index);
+            const after = lower.slice(term.index + term[0].length, term.index + term[0].length + 100);
+            if (/\b(?:if|might|may|could|would|will|perhaps|possibly|rumou?r|fear|predict|threaten|risk|seem|seemed|appears?|appeared)\b/.test(before)
+                || /\b(?:if|unless|reopen(?:s|ed)?|open again|passable now|cleared|restored)\b/.test(after)
+                || /\b(?:not|never)\s+$/.test(before)) continue;
+            const nearest = mentions.map(mention => ({ ...mention,
+                gap: Math.max(0, mention.start - (term.index + term[0].length), term.index - mention.end) }))
+                .sort((a, b) => a.gap - b.gap)[0];
+            if (!nearest || nearest.gap > 110) continue;
+            const active = !!worldLocationTravelBlock(sess, nearest.location.id);
+            if (!active) missing.set(nearest.location.id, nearest.location.name);
+        }
+    }
+    return [...missing].map(([id, name]) => ({ id, name }));
+}
+
+function worldRouteClosureReceiptRepairInstruction(world, sess, narrative) {
+    const missing = worldNarratedUncommittedRouteClosures(world, sess, narrative);
+    if (!missing.length) return '';
+    return `\nCRITICAL ROUTE STATE: The authoritative narrator says ${missing.map(location =>
+        `${location.name} (id:${location.id})`).join(', ')} became impassable. If that is a completed, physical closure, add state_updates.location_state_updates with the exact location_id and add_conditions:["impassable"]. A summary, ledger sentence, generic "flooded" hazard, or NPC report alone cannot disable travel. Do not convert a quoted or attributed character claim into a physical closure without independent narrated evidence.`;
+}
+
+function worldWaitReceiptRepairInstruction(input, narrative, currentTotalMinutes = null) {
+    const minutes = parseExplicitWorldWaitMinutes(input, currentTotalMinutes);
+    if (!minutes || !worldNarrativeCompletesExplicitWait(narrative)) return '';
+    return `\nCRITICAL: The scene says the player's explicit ${minutes}-minute wait completed. An empty state_updates:{} and events:[] receipt is invalid. Record exactly one completed time event in events with type:"time" (not "time_event"), actor_id:"player", status:"completed", minutes_elapsed:${minutes}. Do not cancel a scheduled deadline just because its time passed; the engine fires it. If the scene says a named route became impassable, sealed, or cut off, record state_updates.location_state_updates with that exact location_id and add_conditions:["impassable"] (or another explicit route-blocking condition). A ledger sentence or summary alone does not close the route. Do not invent an unobserved injury or death.`;
+}
+
+// Receipt-only repair sometimes records an observed NPC departure but omits
+// the wait that the player explicitly requested and the narration completed.
+// That makes a legitimate multi-edge NPC journey appear instantaneous. Add
+// only the independently authorized clock event; never repair a conflicting
+// time claim or a merely intended/interrupted wait.
+function restoreExplicitWorldWaitOnReceiptRepair(receipt, input, narrative, currentTotalMinutes = null) {
+    const minutes = parseExplicitWorldWaitMinutes(input, currentTotalMinutes);
+    if (!minutes || !worldNarrativeCompletesExplicitWait(narrative)
+        || !isPlainObject(receipt) || !Array.isArray(receipt.events)
+        || !isPlainObject(receipt.state_updates)) return receipt;
+    const narratedDurations = [
+        ...String(narrative).matchAll(/\b(?:you|the player)\s+(?:wait(?:ed)?|spend|spent)\s+(?:for\s+)?(\d{1,3}|[a-z-]+)\s*(hours?|minutes?)\b/gi),
+        ...String(narrative).matchAll(/\bfor\s+(\d{1,3}|[a-z-]+)\s*(hours?|minutes?)\s*,?\s+(?:you|the player)\s+(?:remain|stay|wait|stand|sit)\b/gi)
+    ];
+    if (narratedDurations.some(match => {
+        const claimed = parseExplicitWorldWaitMinutes(`I wait ${match[1]} ${match[2]}.`);
+        return claimed && claimed !== minutes;
+    })) return receipt;
+    if (receipt.events.some(event => event?.type === 'time')
+        || Number(receipt.state_updates.time_skip_minutes) > 0) return receipt;
+    return {
+        ...receipt,
+        events: [{ type: 'time', actor_id: 'player', status: 'completed',
+            minutes_elapsed: minutes, witnessed_by: ['player'],
+            evidence: `Player explicitly waited ${minutes} minutes.` }, ...receipt.events]
+    };
+}
+
+// A repair model may turn an anonymous crowd into numbered, persistent people
+// absent from the prose. Such placeholders are not newly named characters.
+// Remove only unreferenced placeholders; any other unsupported proposal still
+// reaches the normal validator and rejects the complete receipt.
+function omitUnnamedWorldRepairCrowd(receipt, narrative) {
+    const introduced = receipt?.state_updates?.npc_introduced;
+    if (!Array.isArray(introduced) || !introduced.length) return receipt;
+    const otherFields = JSON.stringify({ ...receipt,
+        state_updates: { ...receipt.state_updates, npc_introduced: undefined } }).toLowerCase();
+    let unsupportedReference = false;
+    const remaining = introduced.filter(person => {
+        const name = String(person?.name || '').trim();
+        const id = String(person?.id || '').trim();
+        const placeholder = /^(?:villager|guard|townsperson|local|person|stranger|watchman)\s+[1-9]\d?$/i.test(name)
+            && id.toLowerCase() === name.toLowerCase().replace(/\s+/g, '_');
+        if (!placeholder) return true;
+        const namedInStory = String(narrative || '').toLowerCase().includes(name.toLowerCase());
+        const referencedElsewhere = otherFields.includes(`"${id.toLowerCase()}"`);
+        if (referencedElsewhere && !namedInStory) unsupportedReference = true;
+        return namedInStory || referencedElsewhere;
+    });
+    // A fake named actor that participates in the scene or an event cannot
+    // be safely erased. Reject that repair rather than canonizing the actor.
+    if (unsupportedReference) return null;
+    if (remaining.length === introduced.length) return receipt;
+    const stateUpdates = { ...receipt.state_updates };
+    if (remaining.length) stateUpdates.npc_introduced = remaining;
+    else delete stateUpdates.npc_introduced;
+    return { ...receipt, state_updates: stateUpdates };
+}
+
+function worldUnverifiedWaitNotice(world, sess, minutes, replyFailed = false) {
+    const clock = getWorldTimeData(world, sess);
+    const hour = clock.hours24 % 12 || 12;
+    const when = `Day ${clock.days}, ${hour}:${String(clock.mins).padStart(2, '0')} ${clock.hours24 >= 12 ? 'PM' : 'AM'}`;
+    const duration = minutes % 60 === 0 ? `${minutes / 60} hour${minutes === 60 ? '' : 's'}`
+        : minutes < 60 ? `${minutes} minutes` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    const due = (sess.scheduledEvents || []).filter(event => event.urgent === true
+        && event.status === 'triggered' && event.lastTriggeredTurn === sess.turnCount
+        && (event.reportedWarning || !event.locationId || event.locationId === sess.playerLocation));
+    const aftermath = due.length
+        ? ` ${due.slice(0, 2).map(event => `Deadline reached: ${event.title}. ${event.reportedWarning
+            ? 'The warned harm is not confirmed.' : 'Check the World state for its consequence.'}`).join(' ')}` : '';
+    const unmet = (sess.scheduledEvents || []).filter(event => event.conditionResolution === 'player_present'
+        && event.conditionResolvedTurn === sess.turnCount).slice(0, 2);
+    const avoided = unmet.length ? ` ${unmet.map(event => {
+        const place = getLocationRef(world, event.playerAbsentCondition?.returnLocationId)?.name || 'the meeting place';
+        return `You remained at ${place}; the condition for ${event.title} was not met, so that promised search did not start.`;
+    }).join(' ')}` : '';
+    return `You waited ${duration}. The world clock is now ${when}.${aftermath}${avoided} ${replyFailed
+        ? 'The DM reply failed, but your wait was saved. Continue from here.'
+        : "The DM's unverified story was discarded; no unverified outcome became canon. Continue or Reroll for a new scene."}`;
+}
+
+function worldMissingCheckNotice() {
+    return 'The DM asked for a check but did not register one, so no roll or outcome was applied. Use the 🎲 Check button to create the roll yourself, or Reroll this response.';
+}
+
+function worldChecksDisabledNotice() {
+    return 'The DM asked for a check, but this World has checks disabled. No roll or check outcome was applied. Change the World rules to enable checks, or Reroll this response.';
+}
+
+function worldResolvedCheckNotice(result) {
+    const label = String(result?.label || 'The check').trim().slice(0, 120);
+    const total = Number(result?.total);
+    const difficulty = Number(result?.difficulty);
+    const comparison = Number.isFinite(total) && Number.isFinite(difficulty)
+        ? ` (${total} vs ${difficulty})` : '';
+    return `${label} ${result?.success ? 'succeeded' : 'failed'}${comparison}. The engine saved the result, but the DM did not provide a settled scene. Review the current World state, then Continue or Reroll this response.`;
+}
+
+function worldConflictingNarrativeNotice() {
+    return 'The DM’s final scene conflicted with the saved world state, so its story text was discarded. The verified state changes remain; check the current World state, then Reroll this response if needed.';
+}
+
+function worldInventoryUnits(session, query, exact = true) {
+    const target = String(query || '').trim().toLowerCase();
+    if (!target) return 0;
+    return (Array.isArray(session?.inventory) ? session.inventory : []).reduce((total, item) => {
+        const name = String(globalThis.HordeRpgMechanics?.itemName(item) || item?.name || item || '')
+            .trim().toLowerCase();
+        if (!(exact ? name === target : name.includes(target))) return total;
+        const quantity = typeof item === 'object' && item !== null ? Number(item.quantity) : 1;
+        return total + (Number.isFinite(quantity) && quantity > 0 ? quantity : 1);
+    }, 0);
+}
+
+function worldLockedExitClaimConflict(world, sess, text) {
+    const view = typeof worldForSession === 'function' ? worldForSession(world, sess) : world;
+    const current = getLocationRef(view, sess.playerLocation);
+    if (!current) return null;
+    const locked = (current.exits || []).filter(exit => exit && typeof exit === 'object'
+        && (exit.allowCheckUnlock === true || String(exit.requiredItem || '').trim())
+        && !worldExitRequirement(sess, exit, current.id).ok);
+    if (!locked.length) return null;
+    const sentences = worldNarrativeSentences(stripSpokenDialogue(String(text || '')));
+    const claim = sentences.find(sentence => {
+        if (worldNegatedActionClaim(sentence)
+            || /\b(?:try|tried|attempt|attempted|could|would|might|should|if|before|not yet|ask|asks|asked)\b/i.test(sentence)) return false;
+        const saysOpen = /\b(?:you|player)\b[^.!?]{0,60}\b(?:successfully\s+)?(?:unlocked|opened|picked)\b[^.!?]{0,40}\b(?:gate|door|barrier|lock|latch)\b/i.test(sentence)
+            || /\b(?:gate|door|barrier|lock|bolt|latch|way|passage|entrance)\b[^.!?]{0,70}\b(?:swings?|slides?|clicks?|snaps?|is|was|stands?|lies?|has|had|gives?|opens?|unlocks?)\b[^.!?]{0,20}\b(?:open|unlocked|wide|back|free|way)\b/i.test(sentence);
+        if (!saysOpen) return false;
+        if (locked.length === 1) return true;
+        return locked.some(exit => {
+            const target = resolveWorldExitTarget(view, exit);
+            return target && String(sentence).toLowerCase().includes(String(target.name).toLowerCase());
+        });
+    });
+    return claim ? { reason: 'uncommitted_exit_unlock_claim', detail: current.id } : null;
+}
+
+// The facilitator sees every location and absent character, but an NPC does
+// not. Check only an attributed, unhedged claim that puts a *specific absent
+// person* at their actual hidden location. Place names alone, proposed search
+// routes and explicit speculation are not censored. Authored NPC knowledge,
+// provenance-backed observations and statements heard from the player count
+// as evidence; the DM prompt and other characters' profiles do not.
+function worldAbsentLocationAliases(world, location) {
+    const full = String(location?.name || '').trim();
+    if (!full) return [];
+    const last = full.match(/[\p{L}\p{N}]{5,}$/u)?.[0] || '';
+    const sameLast = last && (world.locations || []).filter(candidate =>
+        String(candidate.name || '').toLocaleLowerCase().match(/[\p{L}\p{N}]{5,}$/u)?.[0] === last.toLocaleLowerCase());
+    return [...new Set([full, sameLast?.length === 1 ? last : ''].filter(Boolean))];
+}
+
+function worldAbsentPersonRefs(npc) {
+    const variants = npcReferenceVariants(npc).filter(value => value.length >= 3);
+    const role = String(npc?.description || '').match(/^\s*(?:a|an|the)?\s*(?:missing|lost|captured|trapped)\s+([\p{L}]{4,})\b/iu)?.[1] || '';
+    return [...new Set([...variants, role].filter(Boolean))];
+}
+
+function worldAbsentNpcIsSearchFocus(sess, npc) {
+    if (/^\s*(?:a|an|the)?\s*(?:missing|lost|captured|trapped)\b/i.test(String(npc?.description || ''))) return true;
+    const names = npcReferenceVariants(npc).filter(value => value.length >= 3);
+    return (sess.quests || []).some(quest => {
+        if (quest.status !== 'active') return false;
+        const source = `${quest.title || ''} ${quest.description || ''} ${(quest.objectives || []).map(item => item.text || '').join(' ')}`;
+        return /\b(?:find|locate|search|rescue|missing|fate|captive|captured)\b/i.test(source)
+            && names.some(name => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(source));
+    });
+}
+
+function worldNpcHasWhereaboutsEvidence(world, sess, speaker, target, location) {
+    if (sess.entityStates?.[speaker.id]?.location === location.id) return true;
+    const escapedRefs = worldAbsentPersonRefs(target).map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const escapedLocations = worldAbsentLocationAliases(world, location)
+        .map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    if (!escapedRefs.length || !escapedLocations.length) return false;
+    const person = new RegExp(`\\b(?:${escapedRefs.join('|')})\\b`, 'i');
+    const place = new RegExp(`\\b(?:${escapedLocations.join('|')})\\b`, 'i');
+    const own = [speaker.description, speaker.persona,
+        ...(sess.entityStates?.[speaker.id]?.observations || [])
+            .filter(item => typeof item === 'string' || (item?.contradicted !== true
+                && !['suspected', 'believed', 'inferred'].includes(String(item?.sourceType || item?.source || '').toLowerCase())))
+            .map(item => typeof item === 'string' ? item : item?.text || item?.observation || '')];
+    const heard = (sess.history || []).slice(-60).filter(message => message.role === 'user'
+        && Array.isArray(message.witnesses) && message.witnesses.includes(speaker.id))
+        .map(message => canonicalMsgText(message));
+    return [...own, ...heard].some(source => {
+        const text = String(source || '').slice(0, 3000);
+        const people = [...text.matchAll(new RegExp(person.source, 'ig'))].slice(0, 12);
+        const places = [...text.matchAll(new RegExp(place.source, 'ig'))].slice(0, 12);
+        return people.some(personMatch => places.some(placeMatch =>
+            Math.abs((personMatch.index || 0) - (placeMatch.index || 0)) <= 160));
+    });
+}
+
+function worldAttributedNpcQuotes(world, narrative) {
+    const quotes = [];
+    let carried = null;
+    for (const paragraph of String(narrative || '').split(/\n{2,}/).slice(0, 80)) {
+        const screenplay = /^\s*(?:\*\*)?([^:*\n]{2,60})(?:\*\*)?:\s+([\s\S]+)$/.exec(paragraph);
+        if (screenplay) {
+            const speaker = worldSpeakerAliases(world).find(alias =>
+                alias.value.toLocaleLowerCase() === screenplay[1].trim().toLocaleLowerCase())?.entity;
+            if (speaker) { quotes.push({ speaker, text: screenplay[2] }); carried = speaker; continue; }
+        }
+        for (const match of paragraph.matchAll(/“([^”\n]+)”|"([^"\n]+)"/g)) {
+            const start = match.index || 0;
+            const speaker = worldDialogueSpeaker(world, paragraph, start, start + match[0].length, carried);
+            if (speaker) { quotes.push({ speaker, text: match[1] || match[2] }); carried = speaker; }
+        }
+        if (!/“[^”\n]+”|"[^"\n]+"/.test(paragraph)) carried = worldNarrativeFocus(world, paragraph, carried);
+    }
+    return quotes.slice(0, 80);
+}
+
+function worldUnprovenNpcWhereaboutsClaims(world, sess, narrative, playerInput = '') {
+    if (!world || !sess) return [];
+    const inputTargets = findReferencedWorldNpcs(world, sess, playerInput)
+        .filter(npc => sess.entityStates?.[npc.id]?.location !== sess.playerLocation);
+    const focusedInputTargets = inputTargets.filter(npc => worldAbsentNpcIsSearchFocus(sess, npc));
+    const claims = [];
+    for (const { speaker, text } of worldAttributedNpcQuotes(world, narrative)) {
+        if (sess.entityStates?.[speaker.id]?.location !== sess.playerLocation) continue;
+        const targets = findReferencedWorldNpcs(world, sess, text)
+            .concat(inputTargets).filter((npc, index, all) => all.findIndex(other => other.id === npc.id) === index)
+            .filter(npc => npc.id !== speaker.id && sess.entityStates?.[npc.id]?.location !== sess.playerLocation)
+            .slice(0, 8);
+        for (const target of targets) {
+            const location = getLocationRef(world, sess.entityStates?.[target.id]?.location);
+            if (!location || worldNpcHasWhereaboutsEvidence(world, sess, speaker, target, location)) continue;
+            const places = worldAbsentLocationAliases(world, location)
+                .map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+            const locationClaim = new RegExp(`\\b(?:in|inside|at|beneath|under|within)\\s+(?:(?:the|that|this|a|an)\\s+)?(?:${places.join('|')})\\b`, 'ig');
+            const refs = worldAbsentPersonRefs(target)
+                .map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+            const namedPerson = new RegExp(`\\b(?:${refs.join('|')})\\b`, 'i');
+            const soleInputTarget = (inputTargets.length === 1 && inputTargets[0].id === target.id)
+                || (focusedInputTargets.length === 1 && focusedInputTargets[0].id === target.id);
+            for (const placeMatch of text.matchAll(locationClaim)) {
+                const placeAt = placeMatch.index || 0;
+                const sentenceStart = Math.max(text.lastIndexOf('.', placeAt), text.lastIndexOf('!', placeAt),
+                    text.lastIndexOf('?', placeAt)) + 1;
+                const beforePlace = text.slice(sentenceStart, placeAt);
+                const subject = beforePlace.slice(-120);
+                const personTiedToPlace = namedPerson.test(subject)
+                    || (soleInputTarget && /\b(?:he|she|they|him|her|them|citizen|person|someone|prisoner|captive)\b/i.test(subject));
+                if (!personTiedToPlace) continue;
+                const clauseStart = Math.max(beforePlace.lastIndexOf(','), beforePlace.lastIndexOf(';')) + 1;
+                const assertionClause = beforePlace.slice(clauseStart);
+                if (/\b(?:if|perhaps|maybe|possibly|suspect|guess|wonder|think|believe|rumou?r|heard|seems?|appears?|likely|probably)\b/i.test(assertionClause)
+                    || /\b(?:might|may|could)\s+(?:still\s+|actually\s+|possibly\s+)?(?:be|have\s+been)\b/i.test(assertionClause)) continue;
+                claims.push({ reason: 'npc_unproven_absent_whereabouts',
+                    detail: `${speaker.name} stated ${target.name}'s unproven location (${location.id}).`,
+                    quote: text, locationPhrase: placeMatch[0], targetName: target.name });
+                break;
+            }
+        }
+    }
+    return claims;
+}
+
+function worldRedactUnprovenNpcWhereabouts(world, sess, narrative, playerInput = '') {
+    let safeText = String(narrative || '');
+    const redacted = [];
+    for (let pass = 0; pass < 8; pass++) {
+        const claim = worldUnprovenNpcWhereaboutsClaims(world, sess, safeText, playerInput)[0];
+        if (!claim) break;
+        const sentenceAt = claim.quote.indexOf(claim.locationPhrase);
+        if (sentenceAt < 0) break;
+        const sentenceStart = Math.max(claim.quote.lastIndexOf('.', sentenceAt),
+            claim.quote.lastIndexOf('!', sentenceAt), claim.quote.lastIndexOf('?', sentenceAt)) + 1;
+        const endOffsets = ['.', '!', '?'].map(mark => claim.quote.indexOf(mark, sentenceAt)).filter(value => value >= 0);
+        const sentenceEnd = endOffsets.length ? Math.min(...endOffsets) + 1 : claim.quote.length;
+        const sentence = claim.quote.slice(sentenceStart, sentenceEnd);
+        const directLocationClaim = /\b(?:is|was|remains?|stays?|lies?|sits?|has been|had been)\s*$/i
+            .test(claim.quote.slice(sentenceStart, sentenceAt).trim());
+        const unverifiedCondition = /\b(?:dead|alive|captive|captured|restrained|imprisoned|trapped|held hostage)\b/i
+            .test(sentence);
+        const replacement = directLocationClaim || unverifiedCondition
+            ? ` I don't yet know where ${claim.targetName} is.`
+            : sentence.replace(claim.locationPhrase, 'out there');
+        const revisedQuote = claim.quote.slice(0, sentenceStart) + replacement
+            + claim.quote.slice(sentenceEnd);
+        if (revisedQuote === claim.quote || !safeText.includes(claim.quote)) break;
+        safeText = safeText.replace(claim.quote, revisedQuote);
+        redacted.push(claim);
+    }
+    return { text: safeText, claims: redacted };
+}
+
+function worldWithoutUnprovenNpcObservations(world, sess, rawReceipt, playerInput = '') {
+    if (!rawReceipt || typeof rawReceipt !== 'object') return { receipt: rawReceipt, dropped: 0 };
+    if (!Array.isArray(rawReceipt.npc_observations)
+        && !Array.isArray(rawReceipt.state_updates?.npc_observations)
+        && !(Array.isArray(rawReceipt.events) && rawReceipt.events.some(event => event?.type === 'observation')))
+        return { receipt: rawReceipt, dropped: 0 };
+    const receipt = structuredClone(rawReceipt);
+    let dropped = 0;
+    const unsupported = (npcRef, observation) => {
+        const npcId = resolveNpcId(world, npcRef, sess);
+        const speaker = sessionNpcs(world, sess).find(npc => npc.id === npcId);
+        if (!speaker || !observation) return false;
+        const attributed = `${speaker.name}: “${String(observation).replace(/[“”]/g, '')}”`;
+        return worldUnprovenNpcWhereaboutsClaims(world, sess, attributed, playerInput).length > 0;
+    };
+    const filterObservations = values => (Array.isArray(values) ? values.filter(item => {
+        const remove = unsupported(item?.npc_id, item?.observation);
+        if (remove) dropped++;
+        return !remove;
+    }) : values);
+    if (Array.isArray(receipt.npc_observations))
+        receipt.npc_observations = filterObservations(receipt.npc_observations);
+    if (Array.isArray(receipt.state_updates?.npc_observations))
+        receipt.state_updates.npc_observations = filterObservations(receipt.state_updates.npc_observations);
+    if (Array.isArray(receipt.events)) receipt.events = receipt.events.filter(event => {
+        if (event?.type !== 'observation') return true;
+        const remove = unsupported(event.actor_id, event.observation || event.fact);
+        if (remove) dropped++;
+        return !remove;
+    });
+    return { receipt, dropped };
+}
+
+// The mandatory receipt may be accepted before a tool-only response receives
+// its final prose. Compare that *final* text with the pre-turn and committed
+// state, without replaying the receipt or giving prose mutation authority.
+function worldFinalNarrativeConflicts(world, beforeSession, afterSession, narrative, playerInput = '') {
+    if (!beforeSession || !afterSession) return [];
+    const modules = normalizeWorldGameRules(world).modules;
+    const sentences = worldNarrativeSentences(scrubNarrativeArtifacts(narrative));
+    const conflicts = [];
+    conflicts.push(...worldUnmetConditionalSearchClaims(world, afterSession, {
+        receipt: {}, legacyArgs: {}, entityPatches: [], acceptedEvents: []
+    }, narrative));
+    const lockedExitClaim = worldLockedExitClaimConflict(world, afterSession, narrative);
+    if (lockedExitClaim) conflicts.push(lockedExitClaim);
+    worldNarratedUncommittedRouteClosures(world, afterSession, narrative)
+        .forEach(location => conflicts.push({ reason: 'uncommitted_route_closure', detail: location.id }));
+    const committedEvents = (Array.isArray(afterSession.turnEvents) ? afterSession.turnEvents : [])
+        .filter(event => event?.committed === true
+            && event.world_state_version === afterSession.worldStateVersion);
+    if (modules.inventory) {
+        const ownedConsumables = (Array.isArray(beforeSession.inventory) ? beforeSession.inventory : [])
+            .map(item => String(globalThis.HordeRpgMechanics?.itemName(item) || item?.name || item || '').trim())
+            .filter(name => name && /\b(?:draught|potion|elixir|medicine|ration|food|drink|meal|pill|dose|water|bread|fruit)\b/i.test(name));
+        [...new Set(ownedConsumables)].forEach(name => {
+            if (!sentences.some(sentence => worldPlayerConsumptionClaim(sentence)
+                && worldConsumptionMentionsItem(sentence, name, ownedConsumables))) return;
+            const typedConsumption = committedEvents.some(event => event.type === 'inventory'
+                && event.actor_id === 'player'
+                && ['remove', 'lose', 'consume', 'give', 'drop'].includes(event.action)
+                && worldItemReferenceMatches(event.item, name, ownedConsumables));
+            if (worldInventoryUnits(afterSession, name) >= worldInventoryUnits(beforeSession, name)
+                && !typedConsumption) {
+                conflicts.push({ reason: 'uncommitted_consumable_use', detail: name.slice(0, 120) });
+            }
+        });
+        const itemWord = worldPickupIntentWord(playerInput, world, afterSession);
+        const confirmedPickup = itemWord
+            && sentences.some(sentence => sentence.toLowerCase().includes(itemWord)
+                && /\b(?:you|your)\b[^.!?]{0,100}\b(?:tuck|pocket|stash|collect|take|pick\s*up|carry|hold)\b/i.test(sentence)
+                && !worldNegatedActionClaim(sentence)
+                && !/\b(?:try|tried|attempt|attempted|could|would|might|should|can't|cannot|refus(?:e|es|ed)|stops?)\b/i.test(sentence));
+        const typedPickup = committedEvents.some(event => event.type === 'inventory'
+            && event.actor_id === 'player' && ['add', 'gain', 'take'].includes(event.action)
+            && String(event.item || '').toLowerCase().includes(itemWord));
+        if (confirmedPickup && worldInventoryUnits(afterSession, itemWord, false)
+            <= worldInventoryUnits(beforeSession, itemWord, false) && !typedPickup) {
+            conflicts.push({ reason: 'uncommitted_item_pickup', detail: itemWord.slice(0, 120) });
+        }
+    }
+    if ((modules.health || modules.conditions) && sentences.some(worldPlayerInjuryClaim)) {
+        const vitalStat = String(normalizeWorldGameRules(world).vitalStatId || 'hp');
+        const defaultVital = (world.hudConfig?.stats || []).find(stat => stat.id === vitalStat)?.value;
+        const beforeVital = Number(beforeSession.playerStats?.[vitalStat] ?? defaultVital);
+        const afterVital = Number(afterSession.playerStats?.[vitalStat] ?? defaultVital);
+        const damaged = Number.isFinite(beforeVital) && Number.isFinite(afterVital) && afterVital < beforeVital;
+        const previousConditions = new Set((beforeSession.playerState?.conditions || [])
+            .map(value => String(value).toLowerCase()));
+        const newCondition = (afterSession.playerState?.conditions || [])
+            .some(value => !previousConditions.has(String(value).toLowerCase()));
+        const typedInjury = committedEvents.some(event => event.type === 'condition'
+            && event.actor_id === 'player' && event.action === 'add');
+        if (!damaged && !newCondition && !typedInjury) conflicts.push({ reason: 'uncommitted_player_injury',
+            detail: 'No damage or condition accompanied narrated injury.' });
+    }
+    const opening = stripSpokenDialogue(narrative).slice(0, 700);
+    const completedTravel = opening.match(/\byou\b[^.!?\n]{0,15}\b(?:go|walk|head|move|run|ride|climb|return|enter|step|cross|duck|slip|arrive)(?:s|ed|ped)?\b\s*(?:(?:to|into|inside|through|across|up|down|in)\s+)?([^.!?;,\n]{1,80})/i);
+    if (completedTravel && !/\b(?:try|attempt|could|would|might|but|before|stop|halt|blocked|refused)\b/i.test(completedTravel[0])) {
+        const phrase = String(completedTravel[1] || '').split(/\s+(?:and|then|while|as|where)\s+/i)[0].trim();
+        const destination = findFuzzyLocation(phrase, sessionLocations(world, afterSession));
+        if (destination && destination.id !== afterSession.playerLocation) {
+            conflicts.push({ reason: 'uncommitted_player_location_claim', detail: destination.id });
+        }
+    }
+    const presentNpcs = sessionNpcs(world, afterSession);
+    const visibleProse = stripSpokenDialogue(narrative);
+    presentNpcs.forEach(npc => {
+        const npcState = afterSession.entityStates?.[npc.id];
+        if (!npcState || npcState.followingPlayer === true) return;
+        const escorted = narratedNpcNameVariants(world, afterSession, npc).some(variant =>
+            new RegExp(`\\b${variant}\\b[^.!?\\n]{0,60}\\b(?:follows? you (?:to|into|through|out|down|up)|agrees? to (?:come|go|leave) with you)\\b`, 'i')
+                .test(visibleProse));
+        if (escorted) conflicts.push({ reason: 'uncommitted_npc_escort', detail: npc.id });
+    });
+    return conflicts;
 }
 
 /**
@@ -10332,14 +12077,11 @@ function buildLocalNarrativeLedgerFallback(userInput, narrative) {
 
 function shouldRepairMissingWorldReceipt(world, command, userInput, narrative) {
     const kernel = normalizeWorldKernelConfig(world);
-    if (!kernel.enabled) return true;
-    if (kernel.repairMode === 'always') return true;
-    if (kernel.repairMode === 'never') return false;
-    if (['init', 'look', 'continue'].includes(command)) return false;
-    const source = `${String(userInput || '')}\n${String(narrative || '')}`.slice(0, 9000);
-    // Repair only when prose plausibly established durable canon. Small talk,
-    // description and ordinary reactions safely receive a local no-op receipt.
-    return /\b(?:buy|bought|sell|sold|pay|paid|give|gave|take|took|steal|stole|drop|dropped|wear|wore|change[sd]? clothes|attack|hit|hurt|injur|heal|kill|died|dead|destroy|break|broke|discover|reveal|learned|promise|swore|join|betray|arrest|escape|quest|mission|objective|relationship|trust|reputation|faction|schedule|arriv|depart|enter|leave|left|travel|move[sd]?|time pass|waited|slept|day later|hour later|condition|poison|disease|fire|flood|collapse)\b/i.test(source);
+    // Every response promises a receipt. A keyword classifier cannot prove
+    // that a scene is consequence-free: a "look" or "continue" can introduce
+    // a person, injury or clue. Repair all missing receipts unless the creator
+    // explicitly disabled repair; the failure boundary below remains honest.
+    return !kernel.enabled || kernel.repairMode !== 'never';
 }
 
 /**
@@ -10347,8 +12089,12 @@ function shouldRepairMissingWorldReceipt(world, command, userInput, narrative) {
  * Ask a tiny, tool-free classifier only in that failure case so meaningful
  * developments are still recorded without filling the ledger with small talk.
  */
-async function recoverWorldLedgerEntry(modelId, userInput, narrative, signal) {
+async function recoverWorldLedgerEntry(modelId, userInput, narrative, signal, onDiagnostics = null) {
     if (!narrative || !String(narrative).trim()) return '';
+    const startedAt = performance.now();
+    let status = 0;
+    let usage = null;
+    let outcome = 'network_error';
     try {
         const response = await fetch(apiBase() + '/chat/completions', {
             method: 'POST',
@@ -10378,16 +12124,21 @@ async function recoverWorldLedgerEntry(modelId, userInput, narrative, signal) {
                 ])
             })
         });
+        status = response.status;
         if (!response.ok) {
+            outcome = 'http_error';
             console.warn(`Horde Engine: Chronicle classifier unavailable (${response.status}); using local recovery.`);
             return '';
         }
         const data = await response.json();
+        usage = data.usage || null;
+        outcome = 'ok';
         const message = data.choices?.[0]?.message;
         let result = message?.content || '';
         if (Array.isArray(result)) result = result.map(part => part?.text || '').join(' ');
         result = String(result).trim();
         if (!result) {
+            outcome = 'empty_output';
             // Content empty but the model clearly worked: it spent the whole
             // budget reasoning. Say so rather than failing invisibly.
             console.warn(`Horde Engine: chronicle classifier returned no content${
@@ -10400,8 +12151,12 @@ async function recoverWorldLedgerEntry(modelId, userInput, narrative, signal) {
         if (/^NO[_\s-]?MEMORY\b/i.test(result)) return '';
         return extractWorldLedgerEntry(result) || normalizeWorldLedgerEntry(result.split('\n').find(Boolean) || '');
     } catch (err) {
+        outcome = err?.name === 'AbortError' ? 'aborted'
+            : status >= 200 && status < 300 ? 'invalid_response' : 'network_error';
         if (err?.name !== 'AbortError') console.warn('Horde Engine: Chronicle recovery failed', err);
         return '';
+    } finally {
+        if (typeof onDiagnostics === 'function') onDiagnostics({ startedAt, status, usage, outcome });
     }
 }
 
@@ -10466,24 +12221,46 @@ async function impersonateUser() {
     }
 }
 
-async function getEmbedding(text) {
+async function getEmbedding(text, onDiagnostics = null) {
     if (!hasEmbeddingCredentials()) throw new Error('Embedding provider is not configured');
-    const response = await fetch(embeddingApiBase() + '/embeddings', {
-        method: 'POST',
-        headers: {
-            ...embeddingAuthHeaders(),
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            input: text,
-            model: state.globalSettings.embeddingModel || 'openai/text-embedding-3-small'
-        })
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error?.message || 'Embedding failed');
-    const vector = data?.data?.[0]?.embedding;
-    if (!Array.isArray(vector) || !vector.length) throw new Error('Embedding server returned no vector');
-    return vector;
+    const model = state.globalSettings.embeddingModel || 'openai/text-embedding-3-small';
+    const startedAt = performance.now();
+    let status = 0;
+    let usage = null;
+    let outcome = 'network_error';
+    try {
+        const response = await fetch(embeddingApiBase() + '/embeddings', {
+            method: 'POST',
+            headers: {
+                ...embeddingAuthHeaders(),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ input: text, model })
+        });
+        status = response.status;
+        const data = await response.json();
+        usage = data?.usage || null;
+        if (!response.ok) {
+            outcome = 'http_error';
+            throw new Error(data.error?.message || 'Embedding failed');
+        }
+        const vector = data?.data?.[0]?.embedding;
+        if (!Array.isArray(vector) || !vector.length) {
+            outcome = 'empty_vector';
+            throw new Error('Embedding server returned no vector');
+        }
+        outcome = 'ok';
+        return vector;
+    } catch (error) {
+        if (error?.name === 'AbortError') outcome = 'aborted';
+        else if (status >= 200 && status < 300 && outcome === 'network_error') outcome = 'invalid_response';
+        throw error;
+    } finally {
+        if (typeof onDiagnostics === 'function') onDiagnostics({
+            model, provider: state.globalSettings?.embeddingBaseUrl ? 'separate embedding endpoint' : state.globalSettings?.apiProvider,
+            status, outcome, usage, durationMs: performance.now() - startedAt
+        });
+    }
 }
 
 function cosineSimilarity(vecA, vecB) {
@@ -11787,7 +13564,19 @@ function portableCompanionTimelineState(source) {
     return copy;
 }
 
+async function assertBackupSourceRevision(expected, label) {
+    const saved = await HordeDB.get('stateRevision');
+    const actual = Number.isSafeInteger(saved) ? saved : 0;
+    if (HordeDB.revision !== expected || actual !== expected) {
+        throw new Error(`${label} changed in another tab or during export. Reload this tab, then export again. No stale file was downloaded.`);
+    }
+}
+
 async function exportFullBackup() {
+    // A full backup must never serialize a half-committed World turn.
+    if (worldTurnInProgress) throw new Error("A World turn is still generating. Stop or finish it before exporting a full backup.");
+    const startingRevision = HordeDB.revision;
+    await assertBackupSourceRevision(startingRevision, 'Saved data');
     (state.companions || []).forEach(companion => persistCompanionRuntime(companion));
     const companionVideoAssets = {};
     const assetIds = new Set((state.companions || []).flatMap(companion => [
@@ -11796,7 +13585,7 @@ async function exportFullBackup() {
     ].map(job => String(job.assetId || '')).filter(Boolean)));
     for (const assetId of assetIds) {
         const blob = await HordeDB.get(`companionVideoAsset:${assetId}`).catch(() => null);
-        if (blob instanceof Blob) companionVideoAssets[assetId] = await blobAsDataUrl(blob);
+        if (blob instanceof Blob) companionVideoAssets[assetId] = blob;
     }
     const chatAssets = {};
     const chatAssetIds = new Set(Object.values(state.chats || {}).flatMap(sessions =>
@@ -11806,7 +13595,7 @@ async function exportFullBackup() {
                     .map(attachment => String(attachment?.id || '')).filter(Boolean)))));
     for (const assetId of chatAssetIds) {
         const blob = await HordeDB.get(`chatAsset:${assetId}`).catch(() => null);
-        if (blob instanceof Blob) chatAssets[assetId] = await blobAsDataUrl(blob);
+        if (blob instanceof Blob) chatAssets[assetId] = blob;
     }
     const vh2ServiceArchives=[];
     const vh2Worlds=new Set(Object.values(state.companionTimelines||{}).flatMap(store=>(store.sessions||[]).map(t=>t.vh2?.worldId).filter(Boolean)));
@@ -11838,6 +13627,7 @@ async function exportFullBackup() {
             regexScripts: state.regexScripts,
         worlds: state.worlds,
         worldInstances: state.worldInstances,
+        worldRecoverySnapshots: state.worldRecoverySnapshots,
         activeWorldId: state.activeWorldId,
         videoWorlds: state.videoWorlds,
         videoWorldSessions: state.videoWorldSessions,
@@ -11849,30 +13639,45 @@ async function exportFullBackup() {
         companionVideoAssets,
         chatAssets
     };
-    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    if (worldTurnInProgress) throw new Error("A World turn is still generating. Stop or finish it before exporting a full backup.");
+    const blob = await HordeLargeArchive.pack(payload, 'full-backup');
+    await assertBackupSourceRevision(startingRevision, 'Saved data');
+    if (worldTurnInProgress) throw new Error("A World turn is still generating. Stop or finish it before exporting a full backup.");
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `horde_backup_${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `horde_backup_${new Date().toISOString().slice(0, 10)}.hordebackup`;
     a.click();
-    URL.revokeObjectURL(a.href);
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     showToast('Full backup exported!', 'success');
 }
 
-function importFullBackup(file) {
-    // Visual worlds legitimately carry many embedded room backgrounds and NPC
-    // portraits. Keep a defensive ceiling, but do not reject complete worlds at
-    // the old text-only 50 MB limit.
-    if (file.size > 512 * 1024 * 1024) {
-        showToast('Restore failed: backup is larger than 512 MB.', 'error');
+async function importFullBackup(file) {
+    if (worldTurnInProgress) {
+        showToast('A World turn is still generating. Stop or finish it before restoring a backup.', 'error');
         return;
     }
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-        try {
-            const data = validateBackupData(JSON.parse(e.target.result));
+    try {
+        const magic = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+        const isZip = magic[0] === 80 && magic[1] === 75 && magic[2] === 3 && magic[3] === 4;
+        if (!isZip && file.size > 512 * 1024 * 1024) {
+            throw new Error('Legacy JSON backup is larger than 512 MB. Restore a portable ZIP backup.');
+        }
+        const data = validateBackupData(isZip
+            ? await HordeLargeArchive.unpack(file, 'full-backup')
+            : JSON.parse(await file.text()));
+        const recoverableWorldCount = Object.keys(data.worldRecoverySnapshots || {}).length;
             showConfirmModal('Restore Backup',
-                `This will REPLACE all current data with the backup from ${data._exportedAt ? data._exportedAt.slice(0, 10) : 'unknown date'} (${(data.characters || []).length} chat characters, ${(data.companions || []).length} virtual humans, ${(data.worlds || []).length} worlds). Continue?`,
+                `This will REPLACE all current data with the backup from ${data._exportedAt ? data._exportedAt.slice(0, 10) : 'unknown date'} (${(data.characters || []).length} chat characters, ${(data.companions || []).length} virtual humans, ${(data.worlds || []).length} worlds, ${recoverableWorldCount} recoverable World${recoverableWorldCount === 1 ? '' : 's'}). Continue?`,
                 async () => {
+                    try {
+                    const savedRevision = await HordeDB.get('stateRevision');
+                    if ((Number.isSafeInteger(savedRevision) ? savedRevision : 0) !== HordeDB.revision || HordeDB.conflicted) {
+                        throw new Error('Another tab changed saved data. Reload this tab before restoring.');
+                    }
+                    if (worldTurnInProgress) {
+                        showToast('A World turn is still generating. Stop or finish it before restoring a backup.', 'error');
+                        return;
+                    }
                     if(data.vh2ServiceArchives?.length){
                         try{const response=await fetch(mcpBridgeBase()+'/vh2/workspace/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data.vh2ServiceArchives)});if(!response.ok)throw Error((await response.json()).error||'Service restore failed.');}
                         catch(error){showToast('Restore stopped before changing browser data: '+error.message,'error');return;}
@@ -11885,34 +13690,47 @@ function importFullBackup(file) {
                     if (data.videoWorlds === undefined) data.videoWorlds = [];
                     if (data.videoWorldSessions === undefined) data.videoWorldSessions = {};
                     if (data.activeVideoWorldId === undefined) data.activeVideoWorldId = null;
+                    if (data.worldRecoverySnapshots === undefined) data.worldRecoverySnapshots = {};
                     if (data.globalSettings) data.globalSettings = redactGlobalSettingsCredentials(data.globalSettings);
                     if (data.chatContinuities === undefined) data.chatContinuities = {};
                     const keys = ['globalSettings', 'characters', 'chats', 'chatContinuities', 'activeSessionId',
                         'personas', 'activePersonaId', 'rooms', 'theme', 'systemPresets', 'regexScripts',
-                        'worlds', 'worldInstances', 'activeWorldId', 'companions',
+                        'worlds', 'worldInstances', 'worldRecoverySnapshots', 'activeWorldId', 'companions',
                         'companionThreads', 'companionTimelines', 'activeCompanionId',
                         'videoWorlds', 'videoWorldSessions', 'activeVideoWorldId'];
-                    keys.forEach(k => { if (data[k] !== undefined) state[k] = data[k]; });
+                    const assetRecords = {};
                     for (const [assetId, source] of Object.entries(data.companionVideoAssets || {})) {
-                        if (!/^data:video\/[a-z0-9.+-]+;base64,/i.test(source)) continue;
-                        const blob = await fetch(source).then(response => response.blob());
-                        await HordeDB.set(`companionVideoAsset:${assetId}`, blob);
+                        assetRecords[`companionVideoAsset:${assetId}`] = source instanceof Blob
+                            ? source : await fetch(source).then(response => response.blob());
                     }
                     for (const [assetId, source] of Object.entries(data.chatAssets || {})) {
-                        if (!/^data:(?:image|video|audio|application\/pdf)/i.test(source)) continue;
-                        const blob = await fetch(source).then(response => response.blob());
-                        await HordeDB.set(`chatAsset:${assetId}`, blob);
+                        assetRecords[`chatAsset:${assetId}`] = source instanceof Blob
+                            ? source : await fetch(source).then(response => response.blob());
                     }
-                    worldMediaDirty = true;
-                    await saveState();
+                    if (worldTurnInProgress) {
+                        showToast('A World turn started during backup restore. Existing browser data was kept.', 'error');
+                        return;
+                    }
+                    const previous = Object.fromEntries(keys.map(key => [key, state[key]]));
+                    const previousMediaDirty = worldMediaDirty;
+                    try {
+                        keys.forEach(key => { if (data[key] !== undefined) state[key] = data[key]; });
+                        worldMediaDirty = true;
+                        await saveState({ allWorldInstances: true, replaceWorldLibrary: true, assetRecords });
+                    } catch (error) {
+                        keys.forEach(key => { state[key] = previous[key]; });
+                        worldMediaDirty = previousMediaDirty;
+                        throw error;
+                    }
                     showToast('Backup restored! Reloading...', 'success');
                     setTimeout(() => window.location.reload(), 800);
+                    } catch (error) {
+                        showToast('Restore failed; existing data was kept: ' + error.message, 'error');
+                    }
                 }, 'Restore & Reload', 'Cancel');
-        } catch (err) {
-            showToast('Restore failed: ' + err.message, 'error');
-        }
-    };
-    reader.readAsText(file);
+    } catch (err) {
+        showToast('Restore failed: ' + err.message, 'error');
+    }
 }
 
 function purgeAllData() {
@@ -12843,6 +14661,7 @@ function createNewWorld() {
         }],
         entities: [],
         lorebook: [],
+        startingQuests: [],
         authorNote: '',
         // Blank means "inherit Settings". A World pins a model only when its
         // creator explicitly chooses one in AI Configuration.
@@ -12854,9 +14673,10 @@ function createNewWorld() {
         freqPenalty: 0.0,
         presPenalty: 0.0,
         repPenalty: 1.0,
-        maxTokens: 2048,
+        maxTokens: 4096,
         reasoning: false,
         reasoningEffort: 'auto',
+        contextSize: 32768,
         hudConfig: {
             showClock: true,
             showQuests: true,
@@ -12922,6 +14742,7 @@ function renderWorldStudioPanel(target) {
         'w-factions': renderWorldFactions,
         'w-sandbox': renderWorldSandboxStudio,
         'w-lore': renderWorldLore,
+        'w-hud': renderWorldStudioStartingQuests,
         'w-visual-map': renderWorldArchitectMap,
         'w-architect-agent': renderWorldArchitectAgent
     };
@@ -12940,8 +14761,7 @@ function setupWorldStudioLogic() {
     document.getElementById('close-world-studio-btn').onclick = () => switchView('worlds');
     document.getElementById('save-world-btn').onclick = saveWorld;
     document.getElementById('save-play-world-btn').onclick = async () => {
-        await saveWorld();
-        if (state.editingWorld?.id) enterWorld(state.editingWorld.id);
+        if (await saveWorld() !== false && state.editingWorld?.id) enterWorld(state.editingWorld.id);
     };
     document.getElementById('delete-world-btn').onclick = deleteWorld;
     
@@ -12990,6 +14810,11 @@ function setupWorldStudioLogic() {
     
     document.getElementById('export-world-btn').onclick = () => {
         if (!state.editingWorld) return;
+        if (!validateWorldStartingQuestDrafts(state.editingWorld)) return;
+        if (worldTurnInProgress && state.editingWorld.id === state.activeWorldId) {
+            showToast('A World turn is still generating. Stop or finish it before exporting this World.', 'error');
+            return;
+        }
         // Never hand someone a world carrying references to things that are gone.
         normalizeAuthoredWorld(state.editingWorld);
         const exportedWorld = safeJsonClone(state.editingWorld);
@@ -13010,7 +14835,51 @@ function setupWorldStudioLogic() {
         a.download = `${state.editingWorld.name.replace(/\s+/g, '_')}.horde_world`;
         a.click();
         URL.revokeObjectURL(url);
-        showToast(`World exported with ${media.count} embedded media asset${media.count === 1 ? '' : 's'} (${formatByteSize(media.bytes)}).`, 'success');
+        showToast(`World template exported with ${media.count} embedded media asset${media.count === 1 ? '' : 's'} (${formatByteSize(media.bytes)}). Played timelines are not included.`, 'success');
+    };
+    document.getElementById('export-world-campaign-btn').onclick = async (event) => {
+        if (worldTurnInProgress) {
+            showToast('A World turn is still generating. Stop or finish it before exporting a campaign.', 'error');
+            return;
+        }
+        const sourceWorld = state.editingWorld;
+        if (!sourceWorld) return;
+        const instance = state.worldInstances?.[sourceWorld.id];
+        if (!Array.isArray(instance?.sessions) || !instance.sessions.length) {
+            showToast('No played timeline exists yet. Use Export world template for this unplayed world.', 'info');
+            return;
+        }
+        const button = event.currentTarget;
+        if (button.disabled) return;
+        const label = button.textContent;
+        button.disabled = true;
+        try {
+            await Promise.all([saveStateInFlight, worldSaveInFlight].filter(Boolean));
+            const startingRevision = HordeDB.revision;
+            await assertBackupSourceRevision(startingRevision, 'Campaign');
+            if (worldTurnInProgress) throw new Error('A World turn started during export. Try again when it finishes.');
+            // A playable archive keeps historical images referenced by old
+            // snapshots, even when the current template no longer uses them.
+            const payload = { _format: 'horde-world-campaign', _version: 2,
+                exportedAt: new Date().toISOString(), world: sourceWorld, instance };
+            const blob = await HordeLargeArchive.pack(payload, 'world-campaign', message => {
+                button.textContent = message;
+            });
+            await assertBackupSourceRevision(startingRevision, 'Campaign');
+            if (worldTurnInProgress) throw new Error('A World turn started during export. Try again when it finishes.');
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = `${String(sourceWorld.name || 'world').replace(/[^a-z0-9_-]+/gi, '_')}.horde_campaign`;
+            anchor.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            showToast(`Playable campaign exported with ${instance.sessions.length} timeline${instance.sessions.length === 1 ? '' : 's'} (${formatByteSize(blob.size)}).`, 'success');
+        } catch (error) {
+            showToast('Campaign export failed: ' + error.message, 'error');
+        } finally {
+            button.disabled = false;
+            button.textContent = label;
+        }
     };
     document.getElementById('add-location-btn')?.addEventListener('click', () => addWorldLocation('top'));
     document.getElementById('add-location-btn-bottom')?.addEventListener('click', () => addWorldLocation('bottom'));
@@ -13026,6 +14895,8 @@ function setupWorldStudioLogic() {
     document.getElementById('add-world-origin-btn').onclick = addWorldStartingLife;
     document.getElementById('add-w-lore-btn').onclick = () => { addWorldLore(); updateWorldTokenCount(); };
     document.getElementById('add-world-stat-btn').onclick = addWorldStat;
+    document.getElementById('add-world-starting-quest-btn').onclick = addWorldStartingQuest;
+    document.querySelector('[data-rule-module="quests"]')?.addEventListener('change', renderWorldStudioStartingQuests);
     document.getElementById('w-fetch-model-btn').onclick = fetchWorldModelSettings;
 
     const sandboxBindings = {
@@ -13239,18 +15110,64 @@ function setupWorldImport() {
     btn.onclick = () => {
         const input = document.createElement('input');
         input.type = 'file';
-        input.accept = '.horde_world,.json';
-        input.onchange = (e) => {
+        input.accept = '.horde_world,.horde_campaign,.json';
+        input.onchange = async (e) => {
             const file = e.target.files[0];
             if (!file) return;
-            if (file.size > 512 * 1024 * 1024) {
-                showToast('Import failed: the portable world is larger than 512 MB.', 'error');
-                return;
-            }
-            const reader = new FileReader();
-            reader.onload = async (ev) => {
-                try {
-                    const rawWorld = JSON.parse(ev.target.result);
+            try {
+                    const magic = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+                    const isZip = magic[0] === 80 && magic[1] === 75 && magic[2] === 3 && magic[3] === 4;
+                    if (!isZip && file.size > 512 * 1024 * 1024) {
+                        throw new Error('Legacy JSON campaigns over 512 MB cannot be imported. Export a ZIP campaign from the original installation.');
+                    }
+                    const rawWorld = isZip
+                        ? await HordeLargeArchive.unpack(file, 'world-campaign')
+                        : JSON.parse(await file.text());
+                    if (isZip && (rawWorld?._format !== 'horde-world-campaign' || rawWorld._version !== 2)) {
+                        throw new Error('This ZIP is not a playable World campaign.');
+                    }
+                    if (rawWorld?._format === 'horde-world-campaign') {
+                        if (![1, 2].includes(rawWorld._version)) throw new Error('Unsupported playable campaign version.');
+                        const world = validateWorldData(rawWorld.world, 'Campaign world', { clone: false });
+                        const instance = rawWorld.instance;
+                        requirePlainObject(instance, 'Campaign timelines');
+                        requireArray(instance.sessions, 'Campaign timelines', { max: 5000 });
+                        if (!instance.sessions.length) throw new Error('The campaign has no playable timeline.');
+                        const sessionIds = new Set();
+                        instance.sessions.forEach((session, index) => {
+                            requirePlainObject(session, `Timeline ${index + 1}`);
+                            requireSafeId(session.id, `Timeline ${index + 1} id`);
+                            requireArray(session.history, `Timeline ${index + 1} history`, { max: 250000 });
+                            if (sessionIds.has(session.id)) throw new Error('Campaign contains duplicate timeline IDs.');
+                            sessionIds.add(session.id);
+                            session.history.forEach((message, messageIndex) => {
+                                requirePlainObject(message, `Timeline ${index + 1} message ${messageIndex + 1}`);
+                                if (!['user', 'dm', 'system'].includes(message.role)) {
+                                    throw new Error(`Timeline ${index + 1} has an unsupported message role.`);
+                                }
+                                requireSafeId(message.id, `Timeline ${index + 1} message ${messageIndex + 1} id`, { optional: true });
+                                requireString(message.text, `Timeline ${index + 1} message ${messageIndex + 1} text`, { optional: true, max: 2_000_000 });
+                            });
+                        });
+                        requireSafeId(instance.activeSessionId, 'Active timeline id');
+                        if (!sessionIds.has(instance.activeSessionId)) throw new Error('Active timeline is missing from the campaign.');
+                        world.id = `world_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+                        normalizeAuthoredWorld(world);
+                        const importedInstance = normalizeMigratedWorldInstance(world, instance);
+                        importedInstance.sessions.forEach(session => normalizeLivingWorldState(world, session));
+                        state.worlds.push(world);
+                        state.worldInstances[world.id] = importedInstance;
+                        worldMediaDirty = true;
+                        try { await saveState(); }
+                        catch (error) {
+                            state.worlds = state.worlds.filter(item => item !== world);
+                            delete state.worldInstances[world.id];
+                            throw error;
+                        }
+                        renderWorlds();
+                        showToast(`Imported playable campaign "${world.name}" with ${instance.sessions.length} timeline${instance.sessions.length === 1 ? '' : 's'}.`, 'success');
+                        return;
+                    }
 
                     // Shrink oversized images BEFORE validation — genAI-sized
                     // banners (1024px+) must be resized, not rejected
@@ -13296,11 +15213,9 @@ function setupWorldImport() {
                     renderWorlds();
                     const recovered = world.id === originalId && hasOrphanedRuntime;
                     showToast(`${recovered ? 'Recovered' : 'Imported'} "${world.name}"${recovered ? ' and reconnected its existing sessions' : ''} with ${importedMedia.count} media asset${importedMedia.count === 1 ? '' : 's'}.`, 'success');
-                } catch (err) {
-                    showToast('Failed to import world: ' + err.message, 'error');
-                }
-            };
-            reader.readAsText(file);
+            } catch (err) {
+                showToast('Failed to import world: ' + err.message, 'error');
+            }
         };
         input.click();
     };
@@ -13321,6 +15236,7 @@ function openWorldStudio(worldId = null) {
     }
 
     const w = state.editingWorld;
+    normalizeWorldStartingQuests(w);
     document.getElementById('w-studio-name').value = w.name || '';
     document.getElementById('w-studio-desc').value = w.description || '';
     document.getElementById('w-studio-dm-prompt').value = w.dmPrompt || '';
@@ -13363,12 +15279,12 @@ function openWorldStudio(worldId = null) {
     document.getElementById('w-studio-freq-penalty').value = w.freqPenalty ?? 0.0;
     document.getElementById('w-studio-pres-penalty').value = w.presPenalty ?? 0.0;
     document.getElementById('w-studio-rep-penalty').value = w.repPenalty ?? 1.0;
-    document.getElementById('w-studio-max-tokens').value = w.maxTokens ?? 2048;
+    document.getElementById('w-studio-max-tokens').value = w.maxTokens ?? 4096;
     
     const contextSizeInput = document.getElementById('w-studio-context-size');
     if (contextSizeInput) {
         configureContextSliderForModel('w-studio-context-size', w.model || state.globalSettings.defaultModel);
-        contextSizeInput.value = w.contextSize ?? 8192;
+        contextSizeInput.value = w.contextSize ?? 32768;
         updateContextSliderUI('w-studio-context-size', 'w-studio-context-size-val', 'w-studio-context-size-badge');
     }
 
@@ -13413,6 +15329,7 @@ function openWorldStudio(worldId = null) {
 async function saveWorld() {
     const w = state.editingWorld;
     if (!w) return;
+    if (!validateWorldStartingQuestDrafts(w)) return false;
 
     w.name = document.getElementById('w-studio-name').value.trim();
     w.description = document.getElementById('w-studio-desc').value.trim();
@@ -13434,15 +15351,16 @@ async function saveWorld() {
         repairMode: document.getElementById('w-kernel-repair-mode').value,
         compactTools: document.getElementById('w-kernel-compact-tools').checked
     } });
-    w.temp = parseFloat(document.getElementById('w-studio-temp').value) || 0.9;
+    const requestedTemperature = parseFloat(document.getElementById('w-studio-temp').value);
+    w.temp = Number.isFinite(requestedTemperature) ? requestedTemperature : 0.9;
     w.minP = parseFloat(document.getElementById('w-studio-min-p').value) || 0.0;
     w.topP = parseFloat(document.getElementById('w-studio-top-p').value) || 1.0;
     w.topK = parseInt(document.getElementById('w-studio-top-k').value) || 0;
     w.freqPenalty = parseFloat(document.getElementById('w-studio-freq-penalty').value) || 0.0;
     w.presPenalty = parseFloat(document.getElementById('w-studio-pres-penalty').value) || 0.0;
     w.repPenalty = parseFloat(document.getElementById('w-studio-rep-penalty').value) || 1.0;
-    w.maxTokens = parseInt(document.getElementById('w-studio-max-tokens').value) || 2048;
-    w.contextSize = parseInt(document.getElementById('w-studio-context-size').value) || 8192;
+    w.maxTokens = parseInt(document.getElementById('w-studio-max-tokens').value) || 4096;
+    w.contextSize = parseInt(document.getElementById('w-studio-context-size').value) || 32768;
     w.reasoning = document.getElementById('w-studio-reasoning').checked;
     w.reasoningEffort = document.getElementById('w-studio-reasoning-effort').value;
     w.activePresetId = document.getElementById('w-studio-system-preset').value;
@@ -13486,6 +15404,7 @@ async function saveWorld() {
     }
     showToast('World Saved!', 'success');
     renderWorlds();
+    return true;
 }
 
 async function deleteWorld() {
@@ -13694,6 +15613,45 @@ function resolveWorldExitTarget(world, exit) {
     return null;
 }
 
+function worldExitUnlockKey(fromLocationId, toLocationId) {
+    const from = String(fromLocationId || '').trim().toLowerCase();
+    const to = String(toLocationId || '').trim().toLowerCase();
+    return from && to ? `${from}::${to}` : '';
+}
+
+function worldExitRequirement(sess, exit, fromLocationId = '') {
+    const requiredItem = typeof exit === 'object'
+        ? String(exit?.requiredItem || '').trim().slice(0, 160) : '';
+    const allowCheckUnlock = typeof exit === 'object' && exit?.allowCheckUnlock === true;
+    const unlockKey = worldExitUnlockKey(fromLocationId,
+        typeof exit === 'object' ? (exit?.targetLocationId || getExitTargetName(exit)) : getExitTargetName(exit));
+    const unlocked = !!(allowCheckUnlock && unlockKey && sess?.unlockedExits?.[unlockKey] === true);
+    if (unlocked) return { ok: true, requiredItem, allowCheckUnlock, unlocked: true };
+    if (!requiredItem && !allowCheckUnlock) return { ok: true, requiredItem: '', allowCheckUnlock: false };
+    const key = questTextKey(requiredItem);
+    const held = !!requiredItem && Array.isArray(sess?.inventory) && sess.inventory.some(item => {
+        const name = globalThis.HordeRpgMechanics?.itemName(item) || String(item || '');
+        return questTextKey(name) === key && (typeof item !== 'object' || Number(item.quantity ?? 1) > 0);
+    });
+    return { ok: !!held, requiredItem, allowCheckUnlock, unlocked: false,
+        reason: held ? '' : requiredItem ? 'required_item' : 'locked_exit' };
+}
+
+function worldLocationTravelBlock(sess, locationId) {
+    const turn = Math.max(1, Number(sess?.turnCount) || 1);
+    return (sess?.locationStates?.[locationId]?.conditions || []).find(condition => {
+        const item = typeof condition === 'string' ? { label: condition } : condition;
+        if (!item || (item.expiresTurn != null && Number(item.expiresTurn) <= turn)) return false;
+        if (item.blocksTravel === true) return true;
+        const label = String(item.label || '').trim();
+        if (/\bimpassable\b/i.test(label)) return true;
+        if (/^(?:sealed|washed[ -]?out|cut[ -]?off)$/i.test(label)) return true;
+        const passage = '(?:route|road|path|trail|bridge|causeway|passage|gate|entrance|exit|crossing|way)';
+        const closure = '(?:blocked|closed|sealed|washed[ -]?out|cut[ -]?off|severed|gone|vanished|obliterated|destroyed|collapsed|(?:just[ -]?)?stops?[ -]?(?:in|at)[ -]?(?:the[ -]?)?water)';
+        return new RegExp(`\\b${passage}\\b[^.!?]{0,30}\\b${closure}\\b|\\b${closure}\\b[^.!?]{0,30}\\b${passage}\\b`, 'i').test(label);
+    }) || null;
+}
+
 function resolveWorldContainmentParent(world, location) {
     if (!world || !location || !Array.isArray(world.locations)) return null;
     const resolveExact = ref => {
@@ -13717,7 +15675,7 @@ function resolveWorldContainmentParent(world, location) {
     return null;
 }
 
-function findWorldTravelPath(world, fromLocationId, toLocationId) {
+function findWorldTravelPath(world, fromLocationId, toLocationId, options = {}) {
     if (!world || !Array.isArray(world.locations)) return null;
     const locationById = new Map();
     const locationsByName = new Map();
@@ -13809,6 +15767,7 @@ function findWorldTravelPath(world, fromLocationId, toLocationId) {
         if (!current) continue;
         const neighbors = new Map();
         for (const exit of current.exits || []) {
+            if (!options.ignoreRequirements && !worldExitRequirement(options.session, exit, current.id).ok) continue;
             const key = String(getExitTargetName(exit) || '').trim().toLowerCase();
             const target = locationById.has(key) ? locationById.get(key) : locationsByName.get(key);
             if (!target) continue;
@@ -13821,9 +15780,19 @@ function findWorldTravelPath(world, fromLocationId, toLocationId) {
         // to explicit traversal edges. An authored edge keeps its own duration.
         const parent = parentOf(current);
         for (const target of [parent, ...(childrenOf.get(current.id) || [])].filter(Boolean)) {
+            // Legacy containment supplies implicit doors, but must not create
+            // an invisible shortcut around an explicitly guarded door.
+            if (!options.ignoreRequirements && (
+                (current.exits || []).some(exit =>
+                    resolveWorldExitTarget(world, exit)?.id === target.id
+                    && !worldExitRequirement(options.session, exit, current.id).ok)
+                || (target.exits || []).some(exit =>
+                    resolveWorldExitTarget(world, exit)?.id === current.id
+                    && !worldExitRequirement(options.session, exit, target.id).ok))) continue;
             if (!neighbors.has(target.id)) neighbors.set(target.id, { target, minutes: 0 });
         }
         for (const { target, minutes } of neighbors.values()) {
+            if (!options.ignoreRequirements && worldLocationTravelBlock(options.session, target.id)) continue;
             const candidate = { minutes: step.minutes + minutes, hops: step.hops + 1 };
             const old = best.get(target.id);
             if (old && (old.minutes < candidate.minutes
@@ -13836,7 +15805,7 @@ function findWorldTravelPath(world, fromLocationId, toLocationId) {
     return null;
 }
 
-function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPrefixRetry = true) {
+function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPrefixRetry = true, session = null) {
     if (!world || !targetPhrase) return null;
     const fromKey = String(fromLocationId || '').trim().toLowerCase();
     const from = world.locations.find(location =>
@@ -13851,11 +15820,12 @@ function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPr
     const isPureDirection = /^(?:north|south|east|west|northeast|northwest|southeast|southwest|up|down|upstairs|downstairs|inside|outside|in|out|enter|exit|leave)$/.test(query);
     if (!isPureDirection) {
         const authoredDirectTarget = findFuzzyLocation(targetPhrase, (from.exits || [])
+            .filter(exit => worldExitRequirement(session, exit, from.id).ok)
             .map(exit => resolveWorldExitTarget(world, exit)).filter(Boolean));
         if (authoredDirectTarget) return authoredDirectTarget;
         const authoredGlobalTarget = findFuzzyLocation(targetPhrase, world.locations);
         if (authoredGlobalTarget && authoredGlobalTarget.id !== from.id
-            && findWorldTravelPath(world, from.id, authoredGlobalTarget.id)) {
+            && findWorldTravelPath(world, from.id, authoredGlobalTarget.id, { session })) {
             return authoredGlobalTarget;
         }
     }
@@ -13872,10 +15842,12 @@ function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPr
                 candidates.push(location);
             }
         };
-        (from.exits || []).forEach(exit => add(resolveWorldExitTarget(world, exit)));
+        (from.exits || []).filter(exit => worldExitRequirement(session, exit, from.id).ok)
+            .forEach(exit => add(resolveWorldExitTarget(world, exit)));
         (world.locations || []).forEach(location => {
             const parent = resolveWorldContainmentParent(world, location);
-            if (parent?.id === from.id) add(location);
+            if (parent?.id === from.id
+                && findWorldTravelPath(world, from.id, location.id, { session })) add(location);
         });
         return candidates;
     })();
@@ -13945,7 +15917,8 @@ function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPr
             if (query === 'downstairs') return direction === 'down';
             if (isOutwardQuery) return outwardAliases.has(direction);
             return false;
-        }).map(exit => resolveWorldExitTarget(world, exit)).filter(Boolean);
+        }).filter(exit => worldExitRequirement(session, exit, from.id).ok)
+            .map(exit => resolveWorldExitTarget(world, exit)).filter(Boolean);
         if (matches.length === 1) return matches[0];
         if (matches.length > 1) return null;
 
@@ -13957,6 +15930,7 @@ function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPr
             // direction or hierarchy metadata. A sole valid exit is safe and
             // deterministic; multiple exits remain intentionally ambiguous.
             const soleTargets = [...new Map((from.exits || [])
+                .filter(exit => worldExitRequirement(session, exit, from.id).ok)
                 .map(exit => resolveWorldExitTarget(world, exit))
                 .filter(Boolean)
                 .map(location => [location.id, location])).values()];
@@ -13968,6 +15942,7 @@ function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPr
     // Prefer direct neighbors for short/partial descriptions, then allow a
     // unique reachable destination elsewhere in the graph.
     const directTargets = [...new Map((from.exits || [])
+        .filter(exit => worldExitRequirement(session, exit, from.id).ok)
         .map(exit => resolveWorldExitTarget(world, exit))
         .filter(Boolean)
         .map(location => [location.id, location])).values()];
@@ -13978,7 +15953,8 @@ function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPr
         if (!direction || !query.startsWith(`${direction} `)) return false;
         const rest = query.slice(direction.length).trim();
         return /^(?:and|then|door|exit|way|path|passage|stairs)\b/.test(rest);
-    }).map(exit => resolveWorldExitTarget(world, exit)).filter(Boolean);
+    }).filter(exit => worldExitRequirement(session, exit, from.id).ok)
+        .map(exit => resolveWorldExitTarget(world, exit)).filter(Boolean);
     if (directionalMatches.length === 1) return directionalMatches[0];
     const global = findFuzzyLocation(targetPhrase, world.locations);
     // "I leave the taproom" names the place being LEFT, not a destination:
@@ -13988,12 +15964,13 @@ function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPr
         const parent = resolveWorldContainmentParent(world, from);
         if (parent) return parent;
         const soleTargets = [...new Map((from.exits || [])
+            .filter(exit => worldExitRequirement(session, exit, from.id).ok)
             .map(exit => resolveWorldExitTarget(world, exit))
             .filter(Boolean)
             .map(location => [location.id, location])).values()];
         return soleTargets.length === 1 ? soleTargets[0] : null;
     }
-    if (global && findWorldTravelPath(world, from.id, global.id)) return global;
+    if (global && findWorldTravelPath(world, from.id, global.id, { session })) return global;
 
     // Trailing words the trimmer could not know were noise ("the bathroom on
     // the left", "the hall past the stairs"). Fall back to the longest leading
@@ -14004,7 +15981,7 @@ function resolveWorldMovementTarget(world, fromLocationId, targetPhrase, allowPr
         // seconds of blocked UI for a match that could never be there.
         const words = query.split(' ').filter(Boolean).slice(0, 12);
         for (let length = words.length - 1; length >= 1; length--) {
-            const candidate = resolveWorldMovementTarget(world, fromLocationId, words.slice(0, length).join(' '), false);
+            const candidate = resolveWorldMovementTarget(world, fromLocationId, words.slice(0, length).join(' '), false, session);
             if (candidate) return candidate;
         }
     }
@@ -14211,6 +16188,8 @@ function syncExitConnection(sourceLoc, exitText, isOneWay, travelTime, isDeleted
             mode: normalizeWorldTravelMode(sourceExit?.mode),
             routeName: String(sourceExit?.routeName || '').slice(0, 160),
             cost: String(sourceExit?.cost || '').slice(0, 120),
+            requiredItem: String(sourceExit?.requiredItem || '').trim().slice(0, 160),
+            allowCheckUnlock: sourceExit?.allowCheckUnlock === true,
             isOneWay: false
         };
         
@@ -14226,6 +16205,8 @@ function syncExitConnection(sourceLoc, exitText, isOneWay, travelTime, isDeleted
                 targetLoc.exits[existingIndex].mode = reverseExitObj.mode;
                 targetLoc.exits[existingIndex].routeName = reverseExitObj.routeName;
                 targetLoc.exits[existingIndex].cost = reverseExitObj.cost;
+                targetLoc.exits[existingIndex].requiredItem = reverseExitObj.requiredItem;
+                targetLoc.exits[existingIndex].allowCheckUnlock = reverseExitObj.allowCheckUnlock;
             }
         }
     }
@@ -14628,6 +16609,8 @@ function upgradeWorldSchemaData(sourceWorld, { source = 'manual' } = {}) {
             record.travelTime = Math.max(0, Math.min(100000, Number(record.travelTime ?? record.minutes ?? record.duration) || 0));
             record.routeName = String(record.routeName || record.route || '').slice(0, 160);
             record.cost = String(record.cost || record.fare || '').slice(0, 120);
+            record.requiredItem = String(record.requiredItem || '').trim().slice(0, 160);
+            record.allowCheckUnlock = record.allowCheckUnlock === true;
             record.isOneWay = record.isOneWay === true || record.oneWay === true;
             return record;
         });
@@ -14739,6 +16722,8 @@ function normalizeWorldDirectoryData(world) {
             record.travelTime = Math.max(0, Math.min(100000, Number(record.travelTime) || 0));
             record.routeName = String(record.routeName || '').slice(0, 160);
             record.cost = String(record.cost || '').slice(0, 120);
+            record.requiredItem = String(record.requiredItem || '').trim().slice(0, 160);
+            record.allowCheckUnlock = record.allowCheckUnlock === true;
             record.isOneWay = record.isOneWay === true;
             return record;
         });
@@ -15169,6 +17154,10 @@ function upsertWorldTravelConnection(world, origin, target, details = {}) {
         direction: '', mode, travelTime,
         routeName: String(details.routeName || '').slice(0, 160),
         cost: String(details.cost || '').slice(0, 120),
+        ...(details.requiredItem !== undefined
+            ? { requiredItem: String(details.requiredItem || '').trim().slice(0, 160) } : {}),
+        ...(details.allowCheckUnlock !== undefined
+            ? { allowCheckUnlock: details.allowCheckUnlock === true } : {}),
         isOneWay: details.isOneWay === true
     });
     const existing = (origin.exits || []).find(exit => getLocationRef(world, exit?.targetLocationId || getExitTargetName(exit))?.id === target.id);
@@ -15602,6 +17591,8 @@ function renderWorldLocations() {
                             const mode = isString ? 'walk' : (ex.mode || 'walk');
                             const routeName = isString ? '' : (ex.routeName || '');
                             const cost = isString ? '' : (ex.cost || '');
+                            const requiredItem = isString ? '' : (ex.requiredItem || '');
+                            const allowCheckUnlock = !isString && ex.allowCheckUnlock === true;
 
                             return `
                                 <div class="world-exit-row">
@@ -15620,7 +17611,7 @@ function renderWorldLocations() {
                                     </div>
                                     <button class="tool-btn del-exit" data-idx="${exIdx}">✕</button>
                                 </div>
-                                <div class="world-exit-details"><input class="form-input exit-route" data-idx="${exIdx}" value="${escapeHTML(routeName)}" placeholder="Route or service name (optional)"><input class="form-input exit-cost" data-idx="${exIdx}" value="${escapeHTML(cost)}" placeholder="Cost (optional)"></div>
+                                <div class="world-exit-details"><input class="form-input exit-route" data-idx="${exIdx}" value="${escapeHTML(routeName)}" placeholder="Route or service name (optional)"><input class="form-input exit-cost" data-idx="${exIdx}" value="${escapeHTML(cost)}" placeholder="Cost (optional)"><input class="form-input exit-required-item" data-idx="${exIdx}" value="${escapeHTML(requiredItem)}" aria-label="Item required to use this exit" placeholder="Requires item (e.g. tower key; optional)"><label class="world-exit-check-gate" style="display:flex;align-items:center;gap:6px;min-height:34px;font-size:11px;color:var(--text-2);"><input type="checkbox" class="exit-check-unlock" data-idx="${exIdx}" ${allowCheckUnlock ? 'checked' : ''}> Locked; a successful check can open it</label></div>
                                 <span class="ref-hint ${checkExitTarget(val) ? 'valid' : 'invalid'}" style="margin-top:-6px; margin-bottom:4px; display:block;">${checkExitTarget(val) ? '✓ Verified Connection' : (isExitFormat(val) ? '⚠ Broken Connection' : 'Hint: Use \"Direction to Location\"')}</span>
                             `;
                         }).join('')}
@@ -16045,6 +18036,26 @@ function renderWorldLocations() {
                     if (typeof loc.exits[index] === 'string') loc.exits[index] = { text: loc.exits[index] };
                     loc.exits[index].cost = event.target.value.slice(0, 120);
                     syncExitConnection(loc, loc.exits[index].text, loc.exits[index].isOneWay, loc.exits[index].travelTime, false);
+                };
+            });
+            div.querySelectorAll('.exit-required-item').forEach(input => {
+                input.onchange = event => {
+                    const index = Number(event.target.dataset.idx);
+                    if (typeof loc.exits[index] === 'string') loc.exits[index] = { text: loc.exits[index] };
+                    loc.exits[index].requiredItem = event.target.value.trim().slice(0, 160);
+                    syncExitConnection(loc, loc.exits[index].text,
+                        loc.exits[index].isOneWay, loc.exits[index].travelTime, false);
+                    renderWorldLocations();
+                };
+            });
+            div.querySelectorAll('.exit-check-unlock').forEach(input => {
+                input.onchange = event => {
+                    const index = Number(event.target.dataset.idx);
+                    if (typeof loc.exits[index] === 'string') loc.exits[index] = { text: loc.exits[index] };
+                    loc.exits[index].allowCheckUnlock = event.target.checked;
+                    syncExitConnection(loc, loc.exits[index].text,
+                        loc.exits[index].isOneWay, loc.exits[index].travelTime, false);
+                    renderWorldLocations();
                 };
             });
             div.querySelectorAll('.exit-oneway').forEach(inp => {
@@ -18353,6 +20364,171 @@ function addWorldStat() {
     loadWorldGameRuleControls(w);
 }
 
+function parseWorldStartingQuestStatRewards(value) {
+    const stats = {};
+    const invalid = [];
+    String(value || '').split(/[\n,]+/).map(line => line.trim()).filter(Boolean).forEach(line => {
+        const match = line.match(/^([^:]+):\s*([+-]?(?:\d+\.?\d*|\.\d+))$/);
+        if (!match || !Number.isFinite(Number(match[2])) || !Number(match[2])) {
+            invalid.push(line);
+            return;
+        }
+        stats[match[1].trim()] = Number(match[2]);
+    });
+    return { stats, invalid };
+}
+
+function validateWorldStartingQuestDrafts(world) {
+    const quests = Array.isArray(world?.startingQuests) ? world.startingQuests : [];
+    const statIds = new Set((world?.hudConfig?.stats || []).map(stat => String(stat?.id || '').trim()));
+    for (const [index, quest] of quests.entries()) {
+        if (!String(quest.title || '').trim()) {
+            showToast(`Starting quest ${index + 1} needs a title.`, 'error');
+            document.querySelector('.world-studio-tab[data-tab="w-hud"]')?.click();
+            document.querySelectorAll('#w-starting-quests-list .world-starting-quest-title')[index]?.focus();
+            return false;
+        }
+        if (!Array.isArray(quest.objectives) || !quest.objectives.length
+            || quest.objectives.some(objective => !String(objective.text || '').trim())) {
+            showToast(`Starting quest ${index + 1} needs at least one written objective.`, 'error');
+            document.querySelector('.world-studio-tab[data-tab="w-hud"]')?.click();
+            return false;
+        }
+        if (quest.objectives.some(objective => objective.type !== 'manual' && !String(objective.target || '').trim())) {
+            showToast(`Starting quest ${index + 1} has an automatic objective without a target.`, 'error');
+            document.querySelector('.world-studio-tab[data-tab="w-hud"]')?.click();
+            return false;
+        }
+        if (quest.objectives.some(objective => objective.type === 'stat'
+            && !statIds.has(String(objective.target || '').trim()))) {
+            showToast(`Starting quest ${index + 1} uses a stat target not defined above.`, 'error');
+            document.querySelector('.world-studio-tab[data-tab="w-hud"]')?.click();
+            return false;
+        }
+        if (parseWorldStartingQuestStatRewards(quest._rewardStatsDraft || '').invalid.length) {
+            showToast(`Starting quest ${index + 1} has an invalid stat reward. Use stat ID: amount.`, 'error');
+            document.querySelector('.world-studio-tab[data-tab="w-hud"]')?.click();
+            return false;
+        }
+        if (Object.keys(quest.rewards?.stats || {}).some(id => !statIds.has(id))) {
+            showToast(`Starting quest ${index + 1} rewards a stat not defined above.`, 'error');
+            document.querySelector('.world-studio-tab[data-tab="w-hud"]')?.click();
+            return false;
+        }
+    }
+    return true;
+}
+
+function addWorldStartingQuest() {
+    const world = state.editingWorld;
+    if (!world) return;
+    if (!Array.isArray(world.startingQuests)) world.startingQuests = [];
+    if (world.startingQuests.length >= 100) return showToast('A World supports up to 100 starting quests.', 'error');
+    world.startingQuests.push({
+        id: `quest_start_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+        title: '', description: '', giver: '',
+        objectives: [{ id: `obj_start_${Date.now()}`, text: '', type: 'manual', target: '', expected: '', required: 1, optional: false }],
+        rewards: { items: [], stats: {}, factionReputation: [] }
+    });
+    renderWorldStudioStartingQuests();
+    document.querySelector('#w-starting-quests-list .world-starting-quest-card:last-child .world-starting-quest-title')?.focus();
+}
+
+function renderWorldStudioStartingQuests() {
+    const world = state.editingWorld;
+    const container = document.getElementById('w-starting-quests-list');
+    if (!world || !container) return;
+    if (!Array.isArray(world.startingQuests)) world.startingQuests = [];
+    const warning = document.getElementById('w-starting-quests-warning');
+    const questToggle = document.querySelector('[data-rule-module="quests"]');
+    const questsEnabled = questToggle ? questToggle.checked : normalizeWorldGameRules(world).modules.quests;
+    warning.classList.toggle('hidden', !!questsEnabled || !world.startingQuests.length);
+    warning.textContent = 'Quest engine is off. Enable “Quest engine” under Authoritative Game Rules to track these objectives and grant rewards.';
+    if (!world.startingQuests.length) {
+        container.innerHTML = '<div class="world-starting-quests-empty">No starting quests yet. Add one if every new player should begin with a tracked goal.</div>';
+        return;
+    }
+    container.innerHTML = '';
+    world.startingQuests.forEach((quest, questIndex) => {
+        quest.rewards = isPlainObject(quest.rewards) ? quest.rewards : { items: [], stats: {}, factionReputation: [] };
+        quest.objectives = Array.isArray(quest.objectives) ? quest.objectives : [];
+        const card = document.createElement('div');
+        card.className = 'studio-card world-starting-quest-card';
+        const rewardsText = quest._rewardStatsDraft ?? Object.entries(quest.rewards.stats || {})
+            .map(([id, amount]) => `${id}: ${amount}`).join('\n');
+        card.innerHTML = `
+            <div class="world-starting-quest-card-heading"><strong>Starting quest ${questIndex + 1}</strong><button type="button" class="tool-btn tool-btn-danger world-starting-quest-delete" aria-label="Remove starting quest ${questIndex + 1}">Remove quest</button></div>
+            <div class="world-starting-quest-fields">
+                <label>Title <input class="form-input world-starting-quest-title" value="${escapeHTML(quest.title || '')}" placeholder="A specific goal, such as Find the missing courier"></label>
+                <label>Quest giver <input class="form-input world-starting-quest-giver" value="${escapeHTML(quest.giver || '')}" placeholder="Optional person or faction"></label>
+            </div>
+            <label>Description <textarea class="form-textarea world-starting-quest-description" rows="2" placeholder="Why does this goal matter?">${escapeHTML(quest.description || '')}</textarea></label>
+            <div class="world-starting-quest-card-heading"><strong>Objectives</strong><button type="button" class="tool-btn world-starting-quest-add-objective">+ Add objective</button></div>
+            <div class="world-starting-quest-objectives"></div>
+            <div class="world-starting-quest-rewards">
+                <label>Reward items <textarea class="form-textarea world-starting-quest-reward-items" rows="2" placeholder="One item name per line; optional">${escapeHTML((quest.rewards.items || []).join('\n'))}</textarea></label>
+                <label>Stat rewards <textarea class="form-textarea world-starting-quest-reward-stats" rows="2" placeholder="gold: 25&#10;reputation: 2">${escapeHTML(rewardsText)}</textarea></label>
+            </div>
+            <small class="form-hint">Rewards pay once when every required objective is complete. Use stat IDs defined above.</small>`;
+        const bind = (selector, field) => card.querySelector(selector).oninput = event => { quest[field] = event.target.value; };
+        bind('.world-starting-quest-title', 'title');
+        bind('.world-starting-quest-giver', 'giver');
+        bind('.world-starting-quest-description', 'description');
+        card.querySelector('.world-starting-quest-reward-items').oninput = event => {
+            quest.rewards.items = event.target.value.split(/[\n,]+/).map(item => item.trim()).filter(Boolean);
+        };
+        card.querySelector('.world-starting-quest-reward-stats').oninput = event => {
+            quest._rewardStatsDraft = event.target.value;
+            quest.rewards.stats = parseWorldStartingQuestStatRewards(event.target.value).stats;
+        };
+        card.querySelector('.world-starting-quest-delete').onclick = () => {
+            world.startingQuests.splice(questIndex, 1);
+            renderWorldStudioStartingQuests();
+        };
+        card.querySelector('.world-starting-quest-add-objective').onclick = () => {
+            if (quest.objectives.length >= 100) return showToast('A quest supports up to 100 objectives.', 'error');
+            quest.objectives.push({ id: `obj_start_${Date.now()}_${quest.objectives.length}`, text: '', type: 'manual', target: '', expected: '', required: 1, optional: false });
+            renderWorldStudioStartingQuests();
+            const inputs = document.querySelectorAll('#w-starting-quests-list .world-starting-quest-card')[questIndex]
+                ?.querySelectorAll('.world-starting-quest-objective-text');
+            inputs?.[inputs.length - 1]?.focus();
+        };
+        const objectiveList = card.querySelector('.world-starting-quest-objectives');
+        quest.objectives.forEach((objective, objectiveIndex) => {
+            const row = document.createElement('div');
+            row.className = 'world-starting-quest-objective';
+            row.innerHTML = `
+                <label>What must happen? <input class="form-input world-starting-quest-objective-text" value="${escapeHTML(objective.text || '')}" placeholder="Describe a concrete, observable goal"></label>
+                <label>How is it tracked? <select class="form-select world-starting-quest-objective-type">
+                    <option value="manual">Manual / story progress</option><option value="location">Reach a location</option><option value="inventory">Own an item</option><option value="stat">Reach a stat value</option><option value="secret">Discover a secret</option><option value="npc_status">NPC changes status</option><option value="thread">Resolve a story thread</option>
+                </select></label>
+                <label class="world-starting-quest-objective-target-wrap${objective.type === 'manual' ? ' hidden' : ''}">Target <input class="form-input world-starting-quest-objective-target" value="${escapeHTML(objective.target || '')}" placeholder="Exact location, item, stat ID, secret, NPC or thread"></label>
+                <label class="world-starting-quest-objective-expected-wrap${objective.type === 'npc_status' ? '' : ' hidden'}">NPC status <input class="form-input world-starting-quest-objective-expected" value="${escapeHTML(objective.expected || '')}" placeholder="dead, gone, alive…"></label>
+                <label class="world-starting-quest-objective-required-wrap${['manual', 'inventory', 'stat'].includes(objective.type) ? '' : ' hidden'}">Count / threshold <input type="number" min="1" class="form-input world-starting-quest-objective-required" value="${escapeHTML(String(objective.required || 1))}"></label>
+                <label class="world-starting-quest-objective-optional"><input type="checkbox" ${objective.optional ? 'checked' : ''}> Optional</label>
+                <button type="button" class="tool-btn tool-btn-danger world-starting-quest-objective-delete" aria-label="Remove objective ${objectiveIndex + 1}">Remove</button>`;
+            row.querySelector('.world-starting-quest-objective-type').value = QUEST_OBJECTIVE_TYPES.has(objective.type) ? objective.type : 'manual';
+            row.querySelector('.world-starting-quest-objective-text').oninput = event => { objective.text = event.target.value; };
+            row.querySelector('.world-starting-quest-objective-type').onchange = event => {
+                objective.type = event.target.value;
+                row.querySelector('.world-starting-quest-objective-target-wrap').classList.toggle('hidden', objective.type === 'manual');
+                row.querySelector('.world-starting-quest-objective-expected-wrap').classList.toggle('hidden', objective.type !== 'npc_status');
+                row.querySelector('.world-starting-quest-objective-required-wrap').classList.toggle('hidden', !['manual', 'inventory', 'stat'].includes(objective.type));
+            };
+            row.querySelector('.world-starting-quest-objective-target').oninput = event => { objective.target = event.target.value; };
+            row.querySelector('.world-starting-quest-objective-expected').oninput = event => { objective.expected = event.target.value; };
+            row.querySelector('.world-starting-quest-objective-required').oninput = event => { objective.required = Math.max(1, Number(event.target.value) || 1); };
+            row.querySelector('.world-starting-quest-objective-optional input').onchange = event => { objective.optional = event.target.checked; };
+            row.querySelector('.world-starting-quest-objective-delete').onclick = () => {
+                quest.objectives.splice(objectiveIndex, 1);
+                renderWorldStudioStartingQuests();
+            };
+            objectiveList.appendChild(row);
+        });
+        container.appendChild(card);
+    });
+}
+
 function worldItemModifierLines(item) {
     const modifiers = globalThis.HordeRpgMechanics?.modifiers(item?.modifiers || {}) || {};
     const lines = [];
@@ -18791,7 +20967,7 @@ function rollSecureDie(sides) {
 }
 
 function openWorldCheckModal() {
-    if (worldTurnInProgress) return showToast('The DM is still responding — please wait.', 'info');
+    if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action first.', 'info');
     const world = state.worlds.find(item => item.id === state.activeWorldId);
     const sess = getCurrentWorldSession();
     if (!world || !sess) return;
@@ -18859,6 +21035,30 @@ function worldCheckModifier(world, sess, statId) {
     return Math.max(-10, Math.min(10, Math.trunc(modifier)));
 }
 
+function worldCheckLooksLikeExitUnlock(label) {
+    const words = String(label || '');
+    if (/\b(?:chest|box|container|cabinet|safe|satchel|crate|trunk)\b/i.test(words)) return false;
+    return /\b(?:pick(?:ing|ed)?|lock[ -]?pick(?:ing|ed)?|unlock(?:ing|ed)?|open(?:ing|ed)?|forc(?:e|ing|ed)|break(?:ing)?|bypass(?:ing|ed)?)\b[^.!?]{0,65}\b(?:gate|door|barrier|latch)\b/i.test(words);
+}
+
+// A creator may allow a check to open a specific mapped exit. When the player
+// initiates that check themselves, bind the consequence before rolling only if
+// their label clearly names lock work and exactly one local authored exit fits.
+// This is never a license to open a key-only or distant route.
+function worldManualCheckExitUnlock(world, sess, label) {
+    if (!worldCheckLooksLikeExitUnlock(label)) return null;
+    const view = typeof worldForSession === 'function' ? worldForSession(world, sess) : world;
+    const current = getLocationRef(view, sess.playerLocation);
+    if (!current) return null;
+    const candidates = (current.exits || []).filter(exit => exit && typeof exit === 'object'
+        && exit.allowCheckUnlock === true
+        && !worldExitRequirement(sess, exit, current.id).ok
+        && resolveWorldExitTarget(view, exit));
+    if (candidates.length !== 1) return null;
+    const target = resolveWorldExitTarget(view, candidates[0]);
+    return { exit_unlocks: [{ from_location_id: current.id, to_location_id: target.id }] };
+}
+
 function renderWorldCheckPreview() {
     const world = state.worlds.find(item => item.id === state.activeWorldId);
     const sess = getCurrentWorldSession();
@@ -18871,10 +21071,21 @@ function renderWorldCheckPreview() {
     const difficulty = Math.max(2, Math.min(dice.sides + 10, parseInt(document.getElementById('world-check-difficulty')?.value) || dice.defaultDifficulty));
     const combined = statModifier + situation;
     preview.innerHTML = `Roll <span class="world-check-result-chip">d${dice.sides}${combined ? `${combined > 0 ? '+' : ''}${combined}` : ''}</span> against <span class="world-check-result-chip">${difficulty}</span>. ${dice.criticals ? `Natural 1/${dice.sides} are critical.` : 'No automatic critical results.'}`;
+    const pending = (Array.isArray(sess.pendingChecks) ? sess.pendingChecks[0] : null) || sess.pendingCheck;
+    const outcome = pending?.on_success || (!pending && worldManualCheckExitUnlock(world, sess,
+        document.getElementById('world-check-label')?.value));
+    const opening = outcome?.exit_unlocks?.[0];
+    if (opening) {
+        const view = typeof worldForSession === 'function' ? worldForSession(world, sess) : world;
+        const destination = getLocationRef(view, opening.to_location_id);
+        preview.innerHTML += `<br>On success, this opens the mapped exit to ${escapeHTML(destination?.name || opening.to_location_id)}. On failure, it stays locked.`;
+    } else if (!pending && worldCheckLooksLikeExitUnlock(document.getElementById('world-check-label')?.value)) {
+        preview.innerHTML += '<br>This check has no unambiguous authored exit to open. The mapped route will stay locked even on success.';
+    }
 }
 
 async function resolveWorldCheckFromModal() {
-    if (worldTurnInProgress) return;
+    if (worldTurnInProgress || worldMutationInProgress) return;
     const world = state.worlds.find(item => item.id === state.activeWorldId);
     const sess = getCurrentWorldSession();
     if (!world || !sess) return;
@@ -18882,9 +21093,13 @@ async function resolveWorldCheckFromModal() {
     const label = String(pending?.label || document.getElementById('world-check-label')?.value || 'Unspecified check').trim().slice(0, 120);
     if (!label) return showToast('Describe what is being attempted first.', 'info');
     const dice = normalizeWorldDiceConfig(world);
-    const roll = rollSecureDie(dice.sides);
+    const remembered = sess.uncommittedCheckRoll;
+    const matchingRoll = remembered?.turn === (sess.turnCount || 1)
+        && remembered?.label === label && (!pending || remembered.id === pending.id)
+        && Number.isFinite(Number(remembered.roll));
+    const roll = matchingRoll ? Number(remembered.roll) : rollSecureDie(dice.sides);
     const check = {
-        id: pending?.id || `manual_${Math.max(1, sess.turnCount || 1)}_${Date.now()}`,
+        id: pending?.id || (matchingRoll ? remembered.id : `manual_${Math.max(1, sess.turnCount || 1)}_${Date.now()}`),
         label,
         stat_id: pending?.stat_id || document.getElementById('world-check-stat')?.value || '',
         capability_id: pending?.capability_id || '',
@@ -18894,23 +21109,96 @@ async function resolveWorldCheckFromModal() {
         provided_roll: roll,
         force_resolve: true
     };
-    const result = performAuthoritativeChecks(world, sess, [check])[0];
-    if (!result || result.pending) return showToast('The check could not be resolved.', 'error');
-    const outcome = sanitizeCheckOutcomeActions(result.success ? pending?.on_success : pending?.on_failure);
-    const outcomeResult = outcome ? processStructuredActions(outcome, world, sess) : null;
-    commitEngineWorldNoOp(world, sess, 'engine_check_outcome',
-        `${result.label}: ${result.success ? 'success' : 'failure'} (${result.total} vs ${result.difficulty}).`);
-    sess.pendingChecks = (Array.isArray(sess.pendingChecks) ? sess.pendingChecks : [])
-        .filter(item => item.id !== check.id);
-    sess.pendingCheck = sess.pendingChecks[0] || null;
+    const manualExitOutcome = pending ? null : worldManualCheckExitUnlock(world, sess, label);
+    const rememberRoll = () => {
+        sess.uncommittedCheckRoll = { id: check.id, label, roll, turn: sess.turnCount || 1 };
+    };
+    let attempt;
+    worldMutationInProgress = true;
+    try {
+        attempt = attemptWorldStateMutation(world, sess, () => {
+            const result = performAuthoritativeChecks(world, sess, [check],
+                { allowProvidedRoll: true, silent: true })[0];
+            if (!result || result.pending || result.reason || result.failureCost?.applied === false) {
+                return { ok: false, reason: result?.failureCost?.reason || result?.reason || 'unresolved_check' };
+            }
+            const rawOutcome = result.success ? (pending?.on_success || manualExitOutcome) : pending?.on_failure;
+            if (isPlainObject(rawOutcome) && Object.keys(rawOutcome).some(key =>
+                !CHECK_GUARDED_ACTION_FIELDS.includes(key))) {
+                return { ok: false, reason: 'unsupported_check_outcome_field' };
+            }
+            const outcome = sanitizeCheckOutcomeActions(rawOutcome);
+            const outcomeResult = outcome ? processStructuredActions(outcome, world, sess,
+                { authorizedCheckOutcome: result.success === true, deferFeedback: true }) : null;
+            const failures = [
+                ...(outcomeResult?.moduleRejections || []).map(item => item.reason || 'rejected_update'),
+                ...(outcomeResult?.inventoryFailures || []).map(item => item.reason || 'inventory_update_failed'),
+                ...(outcomeResult?.statResult?.rejected || []).map(item => item.reason || 'stat_update_failed'),
+                ...(outcomeResult?.transactionResults || []).filter(item => !item.success).map(item => item.reason || 'transaction_failed'),
+                ...(outcomeResult?.capabilityProgressResults || []).filter(item => !item.success).map(item => item.reason || 'capability_update_failed'),
+                ...(outcomeResult?.conditionResults || []).filter(item => !item.success).map(item => item.reason || 'condition_update_failed')
+            ];
+            if (outcomeResult?.movementResult && !outcomeResult.movementResult.ok) {
+                failures.push(outcomeResult.movementResult.reason || 'movement_failed');
+            }
+            if (failures.length) return { ok: false, reason: failures[0] };
+            const committed = commitEngineWorldNoOp(world, sess, 'engine_check_outcome',
+                `${result.label}: ${result.success ? 'success' : 'failure'} (${result.total} vs ${result.difficulty}).`);
+            if (committed?.audit?.rejected?.length) {
+                return { ok: false, reason: committed.audit.rejected[0].reason || 'check_receipt_rejected' };
+            }
+            const combinedModifier = result.statModifier + (result.capabilityModifier || 0) + result.situationalModifier;
+            const modifierText = combinedModifier
+                ? ` + modifiers ${combinedModifier >= 0 ? '+' : ''}${combinedModifier}` : '';
+            const openedExit = outcomeResult?.exitUnlockResults?.[0];
+            const exitStatus = openedExit
+                ? ` The mapped exit from ${openedExit.from_location_id} to ${openedExit.to_location_id} is now unlocked.`
+                : worldCheckLooksLikeExitUnlock(label)
+                    ? ' No mapped exit was opened by this result; do not narrate a gate or door as open.'
+                    : '';
+            const consequenceStatus = outcomeResult
+                ? `The selected ${result.success ? 'success' : 'failure'} consequence has been committed`
+                : result.failureCost?.applied === true
+                    ? 'The declared failure cost has been committed'
+                    : 'No persistent consequence was specified';
+            addWorldMessage('system', `[WORLD KERNEL — AUTHORITATIVE CHECK RESULT]\n${result.label}: d${result.sides} rolled ${result.roll}${modifierText} = ${result.total} against difficulty ${result.difficulty}. Result: ${result.success ? 'SUCCESS' : 'FAILURE'}${result.critical ? ` (${result.critical.toUpperCase()} CRITICAL)` : ''}. ${consequenceStatus}${outcomeResult?.ledgerEntry ? `: ${outcomeResult.ledgerEntry}` : ''}.${exitStatus} Narrate this exact outcome now; do not request or invent another roll for this action.`, { location: sess.playerLocation, deferPersist: true });
+            delete sess.uncommittedCheckRoll;
+            return { ok: true, result, outcomeResult };
+        }, value => value?.ok === true);
+        if (!attempt.accepted) {
+            rememberRoll();
+            showToast(`Check not committed (${attempt.result?.reason || 'invalid outcome'}). The roll is held; repair the consequence and retry.`, 'error');
+            renderWorldPlayState();
+            return;
+        }
+        try {
+            await saveWorldsState({ worldId: world.id });
+            attempt.commit();
+            try { flushWorldActionFeedback(attempt.result.outcomeResult); }
+            catch (feedbackError) { console.warn('World check feedback failed after save:', feedbackError); }
+        } catch (error) {
+            attempt.rollback();
+            rememberRoll();
+            showToast('Check was not saved. Nothing was committed; retry after checking storage.', 'error');
+            renderWorldPlayState();
+            return;
+        }
+    } catch (error) {
+        rememberRoll();
+        showToast(`Check could not be committed: ${error?.message || error}`, 'error');
+        renderWorldPlayState();
+        return;
+    } finally {
+        worldMutationInProgress = false;
+    }
+    if (dice.visibility !== 'hidden' && attempt?.result?.result) {
+        const result = attempt.result.result;
+        showToast(`${result.success ? '✓' : '×'} ${result.label}: ${result.roll} → ${result.total} vs ${result.difficulty}`,
+            result.success ? 'success' : 'info');
+    }
     closeWorldCheckModal();
-    const combinedModifier = result.statModifier + (result.capabilityModifier || 0) + result.situationalModifier;
-    const modifierText = combinedModifier
-        ? ` + modifiers ${combinedModifier >= 0 ? '+' : ''}${combinedModifier}` : '';
-    addWorldMessage('system', `[WORLD KERNEL — AUTHORITATIVE CHECK RESULT]\n${result.label}: d${result.sides} rolled ${result.roll}${modifierText} = ${result.total} against difficulty ${result.difficulty}. Result: ${result.success ? 'SUCCESS' : 'FAILURE'}${result.critical ? ` (${result.critical.toUpperCase()} CRITICAL)` : ''}. The selected ${result.success ? 'success' : 'failure'} consequence has already been committed${outcomeResult?.ledgerEntry ? `: ${outcomeResult.ledgerEntry}` : ''}. Narrate this exact outcome now; do not request or invent another roll for this action.`, { location: sess.playerLocation, deferPersist: true });
-    await saveState();
     renderWorldPlayState();
-    executeWorldTurn('continue');
+    void executeWorldTurn('continue');
 }
 
 let multiplayerHubType = 'chat';
@@ -19275,6 +21563,13 @@ function applyMultiplayerSnapshot(context, snapshot, type) {
     const view = document.getElementById('world-play-view');
     if (view?.classList.contains('hidden')) switchView('worldPlay');
     view?.classList.add('multiplayer-guest-view');
+    // A guest snapshot has no authority to reveal the host's private state.
+    // Remove any author-only content left in the DOM from a local play view.
+    setWorldStatusTab('now');
+    document.getElementById('world-director-receipts')?.replaceChildren();
+    document.getElementById('world-director-minds')?.replaceChildren();
+    document.getElementById('world-people-list')?.replaceChildren();
+    document.getElementById('world-history-list')?.replaceChildren();
     const hud = snapshot.hud || {};
     document.getElementById('world-dm-name').textContent = snapshot.worldName || snapshot.experienceName || context?.name || 'Shared World';
     document.getElementById('world-active-name').textContent = 'Shared living world';
@@ -19322,22 +21617,697 @@ async function hardResetActiveWorldTimeline() {
     const world = state.worlds.find(item => item.id === state.activeWorldId);
     if (!sess || !world) return false;
     resetWorldTimeline(world, sess);
-    await saveState();
+    await saveWorldsState();
     renderWorldPlayState();
     openSessionZero(() => executeWorldTurn('init'));
     showToast('Timeline reset. Choose a new starting life.', 'info');
     return true;
 }
 
+let worldStatusTab = 'now';
+let worldHistoryPage = 0;
+const WORLD_HISTORY_PAGE_SIZE = 20;
+const WORLD_MESSAGE_WINDOW_SIZE = 160;
+const WORLD_MESSAGE_WINDOW_MAX = 240;
+const WORLD_MODEL_ATTEMPT_LIMIT = 120;
+let worldMessageWindow = null;
+
+// This is an attempt ledger, not a bill. Providers may omit usage and may
+// charge for failed/aborted requests; never infer a zero-dollar cost from a
+// missing usage object. Prompts, responses and credentials are not recorded.
+function worldReportedModelUsage(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const count = value => value == null || value === '' ? null
+        : Number.isFinite(Number(value)) && Number(value) >= 0 ? Math.round(Number(value)) : null;
+    const dollars = value => value == null || value === '' ? null
+        : Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+    const input = count(raw.prompt_tokens ?? raw.input_tokens);
+    const output = count(raw.completion_tokens ?? raw.output_tokens);
+    const total = count(raw.total_tokens);
+    const costUsd = dollars(raw.cost ?? raw.total_cost ?? raw.cost_usd);
+    return [input, output, total, costUsd].some(value => value !== null)
+        ? { input, output, total, costUsd } : null;
+}
+
+function recordWorldModelAttempt(world, sess, detail, persist = false) {
+    if (!world || !sess || !detail) return null;
+    const usage = worldReportedModelUsage(detail.usage);
+    const status = Number(detail.status) || 0;
+    const entry = {
+        at: Date.now(),
+        kind: String(detail.kind || 'model call').slice(0, 80),
+        provider: String(detail.provider || state.globalSettings?.apiProvider || 'unknown').slice(0, 40),
+        model: String(detail.model || '').slice(0, 150),
+        status,
+        outcome: String(detail.outcome || (status >= 200 && status < 300 ? 'response' : status ? 'http_error' : 'network_error')).slice(0, 40),
+        durationMs: Math.max(0, Math.round(Number(detail.durationMs) || 0)),
+        background: detail.background === true,
+        billing: detail.billing === 'local' ? 'local' : 'unknown',
+        turn: Math.max(0, Number(detail.turn ?? sess.turnCount) || 0),
+        usage
+    };
+    const attempts = Array.isArray(sess.worldModelAttempts) ? sess.worldModelAttempts : [];
+    attempts.push(entry);
+    if (attempts.length > WORLD_MODEL_ATTEMPT_LIMIT) attempts.splice(0, attempts.length - WORLD_MODEL_ATTEMPT_LIMIT);
+    sess.worldModelAttempts = attempts;
+    const totals = sess.worldModelTotals && typeof sess.worldModelTotals === 'object'
+        ? sess.worldModelTotals : {
+            attempts: 0, foreground: 0, background: 0, local: 0,
+            reportedInputTokens: 0, reportedOutputTokens: 0, reportedCostUsd: 0,
+            unpricedProviderAttempts: 0, usageUnknownAttempts: 0
+        };
+    totals.attempts = (Number(totals.attempts) || 0) + 1;
+    totals[entry.background ? 'background' : 'foreground'] =
+        (Number(totals[entry.background ? 'background' : 'foreground']) || 0) + 1;
+    if (entry.billing === 'local') totals.local = (Number(totals.local) || 0) + 1;
+    else if (usage?.costUsd == null) totals.unpricedProviderAttempts = (Number(totals.unpricedProviderAttempts) || 0) + 1;
+    else totals.reportedCostUsd = (Number(totals.reportedCostUsd) || 0) + usage.costUsd;
+    if (usage?.input != null) totals.reportedInputTokens = (Number(totals.reportedInputTokens) || 0) + usage.input;
+    if (usage?.output != null) totals.reportedOutputTokens = (Number(totals.reportedOutputTokens) || 0) + usage.output;
+    if (!usage || [usage.input, usage.output, usage.total].every(value => value == null)) {
+        totals.usageUnknownAttempts = (Number(totals.usageUnknownAttempts) || 0) + 1;
+    }
+    sess.worldModelTotals = totals;
+    if (persist) saveWorldsState({ worldId: world.id })
+        .catch(error => console.warn('World model diagnostic save failed:', error));
+    return entry;
+}
+
+function recordWorldEmbeddingAttempt(world, sess, kind, diagnostic) {
+    if (!diagnostic) return;
+    recordWorldModelAttempt(world, sess, {
+        kind, provider: diagnostic.provider || state.globalSettings?.apiProvider,
+        model: diagnostic.model, status: diagnostic.status,
+        outcome: diagnostic.outcome,
+        durationMs: diagnostic.durationMs, usage: diagnostic.usage,
+        background: kind !== 'semanticSearch'
+    }, true);
+}
+
+function recordWorldLabsResult(world, sess, kind, result, background = false) {
+    if (!result || result.skipped || result.source === 'cache') return;
+    const settings = window.HordeLabs?.currentConfig?.() || {};
+    const runtime = String(settings.runtime || 'unknown');
+    recordWorldModelAttempt(world, sess, {
+        kind, provider: `Labs ${runtime}`, model: settings.model || runtime,
+        status: 0, outcome: result.ok ? 'ok' : 'failed',
+        durationMs: result.latencyMs, background,
+        billing: ['needle', 'embedded'].includes(runtime) ? 'local' : 'unknown'
+    }, background);
+}
+
+async function fetchWorldObservedJSON(world, sess, kind, body, options = {}, background = true) {
+    const provider = state.globalSettings?.apiProvider || 'unknown';
+    let entry = null;
+    const result = await HordeWorldModelClient.json({
+        url: apiBase() + '/chat/completions', body, init: options,
+        onSettled: detail => {
+        entry = recordWorldModelAttempt(world, sess, {
+            kind, provider, model: body?.model, status: detail.status,
+            outcome: detail.outcome, durationMs: detail.durationMs,
+            usage: detail.usage, background
+        }, true);
+        }
+    });
+    return { ...result, diagnostic: () => entry };
+}
+
+function resetWorldInsightFilters() {
+    worldHistoryPage = 0;
+    worldMessageWindow = null;
+    const search = document.getElementById('world-people-search');
+    if (search) search.value = '';
+}
+
+function setWorldStatusTab(tab) {
+    if (!['now', 'people', 'threads', 'history', 'director'].includes(tab)) return;
+    if (['people', 'history', 'director'].includes(tab)
+        && document.getElementById('world-play-view')?.classList.contains('multiplayer-guest-view')) return;
+    worldStatusTab = tab;
+    const sidebar = document.querySelector('#world-play-view .world-status-col');
+    if (!sidebar) return;
+    sidebar.dataset.tab = tab;
+    sidebar.querySelectorAll('[data-world-status-tab]').forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.worldStatusTab === tab));
+    });
+    sidebar.scrollTop = 0;
+    if (tab === 'director') {
+        const world = state.worlds.find(item => item.id === state.activeWorldId);
+        const sess = getCurrentWorldSession();
+        if (world && sess) renderWorldDirectorPanel(world, sess);
+    }
+}
+
+function jumpToWorldMessage(messageId) {
+    const container = document.getElementById('world-messages-container');
+    let target = [...(container?.children || [])].find(node => node.dataset.worldMessageId === String(messageId));
+    if (!target) {
+        const world = state.worlds.find(item => item.id === state.activeWorldId);
+        const sess = getCurrentWorldSession();
+        const index = sess?.history?.findIndex(message => String(message.id) === String(messageId)) ?? -1;
+        if (!world || !sess || index < 0) return false;
+        const presentation = worldPresentationForDisplay(world);
+        const mode = ['classic', 'cinematic'].includes(sess.presentationMode)
+            ? sess.presentationMode : (presentation.enabled ? presentation.mode : 'classic');
+        const start = Math.max(0, index - 20);
+        worldMessageWindow = {
+            key: `${world.id}|${sess.id}|${mode}`,
+            start,
+            end: Math.min(sess.history.length, start + WORLD_MESSAGE_WINDOW_SIZE),
+            total: sess.history.length,
+            forceAnchor: true,
+            followLatest: false,
+            manualBrowse: true,
+            resumeOnBottom: false
+        };
+        reconcileWorldMessages(world, sess, mode);
+        target = [...(container?.children || [])].find(node => node.dataset.worldMessageId === String(messageId));
+    }
+    if (!target) return false;
+    const top = target.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    container.scrollTop += top - 24;
+    target.classList.add('world-message-highlight');
+    setTimeout(() => target.classList.remove('world-message-highlight'), 1500);
+    return true;
+}
+
+function renderWorldPeopleDirectory(world, sess, presentNPCs) {
+    const list = document.getElementById('world-people-list');
+    if (!list) return;
+    const query = String(document.getElementById('world-people-search')?.value || '').trim().toLocaleLowerCase();
+    const presentIds = new Set(presentNPCs.map(npc => npc.id));
+    const encounters = new Map();
+    (sess.history || []).forEach(message => {
+        if (message.role !== 'dm') return;
+        (Array.isArray(message.witnesses) ? message.witnesses : []).forEach(id => {
+            encounters.set(String(id), { messageId: message.id, locationId: message.location });
+        });
+    });
+    const people = sessionNpcs(world, sess)
+        .filter(npc => presentIds.has(npc.id) || encounters.has(npc.id))
+        .filter(npc => String(npc.name || '').toLocaleLowerCase().includes(query))
+        .sort((a, b) => Number(presentIds.has(b.id)) - Number(presentIds.has(a.id))
+            || String(a.name || '').localeCompare(String(b.name || '')));
+    const count = document.getElementById('world-people-count');
+    if (count) count.textContent = String(people.length);
+    list.replaceChildren();
+    if (!people.length) {
+        const empty = document.createElement('p');
+        empty.className = 'world-insight-empty';
+        empty.textContent = query ? 'No encountered people match that name.' : 'People appear here once you meet them in this timeline.';
+        list.appendChild(empty);
+        return;
+    }
+    people.slice(0, 100).forEach(npc => {
+        const here = presentIds.has(npc.id);
+        const encounter = encounters.get(npc.id);
+        const lastLocation = world.locations.find(location => location.id === encounter?.locationId);
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'world-insight-card';
+        card.dataset.personId = npc.id;
+        const name = document.createElement('strong');
+        name.textContent = npc.name || 'Unknown person';
+        const detail = document.createElement('span');
+        detail.textContent = here ? 'Here now · Open dossier' : `Last seen${lastLocation ? ` at ${lastLocation.name}` : ''} · Go to encounter`;
+        const meta = document.createElement('span');
+        meta.className = 'world-insight-meta';
+        meta.textContent = here ? (sess.entityStates?.[npc.id]?.relationshipToPlayer || npc.role || '') : 'Current whereabouts are not disclosed';
+        card.append(name, detail, meta);
+        card.onclick = () => {
+            if (here) openNpcDossier(npc.id);
+            else if (encounter?.messageId) jumpToWorldMessage(encounter.messageId);
+        };
+        list.appendChild(card);
+    });
+    if (people.length > 100) {
+        const more = document.createElement('p');
+        more.className = 'world-insight-empty';
+        more.textContent = `Showing 100 of ${people.length}. Refine the search to find someone else.`;
+        list.appendChild(more);
+    }
+}
+
+function worldWitnessedRelationshipEventsForMessage(sess, message) {
+    const version = Number(message?.worldAudit?.version);
+    const turn = Number(message?.worldAudit?.turn);
+    const eligible = (Array.isArray(sess?.turnEvents) ? sess.turnEvents : []).filter(event =>
+        event?.type === 'relationship' && event.committed
+        && Array.isArray(event.witnessed_by) && event.witnessed_by.includes('player'));
+    const exact = Number.isFinite(version)
+        ? eligible.filter(event => Number(event.world_state_version) === version) : [];
+    if (exact.length) return exact;
+    // Older event records had a turn but no state version. Never fall back to
+    // a different version of the same rerolled turn.
+    return Number.isFinite(turn) ? eligible.filter(event =>
+        !Number.isFinite(Number(event.world_state_version)) && Number(event.turn) === turn) : [];
+}
+
+function worldRelationshipEvidenceLabels(world, events) {
+    return (Array.isArray(events) ? events : []).map(event => {
+        const evidence = String(event.evidence || event.cause || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!evidence) return '';
+        const actor = world.entities?.find(entity => entity.id === event.actor_id)?.name || 'Someone';
+        const target = event.target_id === 'player' ? 'you'
+            : world.entities?.find(entity => entity.id === event.target_id)?.name || 'someone';
+        return `${actor} and ${target}: ${evidence.slice(0, 110)}`;
+    }).filter(Boolean).slice(0, 3);
+}
+
+function worldVisibleTurnChanges(world, message, witnessedRelationshipEvents = []) {
+    const before = message?.turnSnapshot?.session;
+    const selectedVersion = Number.isInteger(message?.currentVersion) ? message.currentVersion
+        : Array.isArray(message?.versionSnapshots) ? message.versionSnapshots.length - 1 : null;
+    const after = (selectedVersion != null ? message.versionSnapshots?.[selectedVersion] : null)?.session
+        || message?.postSnapshot?.session;
+    const changes = before && after ? []
+        : (Array.isArray(message?.visibleStateChanges) ? message.visibleStateChanges.slice(0, 3).map(String) : []);
+    if (before && after && before.playerLocation !== after.playerLocation) {
+        const place = world.locations.find(location => location.id === after.playerLocation);
+        if (place) changes.push(`Moved to ${place.name}`);
+    }
+    if (before && after && worldGameRulesForDisplay(world).modules.quests && world.hudConfig?.showQuests) {
+        const beforeQuests = new Map((Array.isArray(before.quests) ? before.quests : [])
+            .map(quest => [String(quest.id || quest.title), quest]));
+        (Array.isArray(after.quests) ? after.quests : []).forEach(quest => {
+            if (changes.length >= 3) return;
+            const previous = beforeQuests.get(String(quest.id || quest.title));
+            if (!previous && quest.title) changes.push(`Quest started: ${quest.title}`);
+            else if (previous?.status !== quest.status && ['completed', 'failed'].includes(quest.status)) {
+                changes.push(`Quest ${quest.status}: ${quest.title}`);
+            }
+        });
+    }
+    const relationshipLabels = witnessedRelationshipEvents.length
+        ? worldRelationshipEvidenceLabels(world, witnessedRelationshipEvents)
+        : (Array.isArray(message?.visibleRelationshipChanges) ? message.visibleRelationshipChanges : []);
+    relationshipLabels.forEach(label => {
+        if (changes.length >= 3) return;
+        if (!changes.includes(label)) changes.push(label);
+    });
+    if (before && after) {
+        const priorSecrets = new Set(Array.isArray(before.revealedSecrets) ? before.revealedSecrets : []);
+        (Array.isArray(after.revealedSecrets) ? after.revealedSecrets : []).forEach(secret => {
+            if (changes.length < 3 && !priorSecrets.has(secret)) changes.push(`Discovered: ${secret}`);
+        });
+    }
+    return changes.slice(0, 3);
+}
+
+function renderWorldHistoryDirectory(world, sess) {
+    const list = document.getElementById('world-history-list');
+    if (!list) return;
+    const scenes = (sess.history || []).map((message, index) => ({ message, index }))
+        .filter(entry => entry.message.role === 'dm').reverse();
+    const witnessedRelationships = new Map();
+    const witnessedRelationshipsByVersion = new Map();
+    (Array.isArray(sess.turnEvents) ? sess.turnEvents : []).forEach(event => {
+        if (event.type !== 'relationship' || !event.committed
+            || !Array.isArray(event.witnessed_by) || !event.witnessed_by.includes('player')) return;
+        const turn = Number(event.turn);
+        if (!Number.isFinite(turn)) return;
+        if (!witnessedRelationships.has(turn)) witnessedRelationships.set(turn, []);
+        witnessedRelationships.get(turn).push(event);
+        const version = Number(event.world_state_version);
+        if (Number.isFinite(version)) {
+            if (!witnessedRelationshipsByVersion.has(version)) witnessedRelationshipsByVersion.set(version, []);
+            witnessedRelationshipsByVersion.get(version).push(event);
+        }
+    });
+    const health = document.getElementById('world-history-health');
+    if (health) {
+        const latest = scenes[0]?.message;
+        const rejected = Number(latest?.worldAudit?.rejected) || 0;
+        health.classList.toggle('is-warning', latest?.stateSource === 'frozen_no_receipt' || rejected > 0);
+        health.textContent = !latest ? 'No turn has been played yet.'
+            : latest.stateSource === 'frozen_no_receipt'
+                ? 'Latest turn: the unverified DM reply was discarded; Reroll to try again.'
+                : rejected
+                    ? `Latest turn: ${rejected} proposed world change${rejected === 1 ? ' was' : 's were'} rejected by the engine.`
+                    : latest.stateSource && latest.stateSource !== 'none'
+                        ? 'Latest turn: world state was committed.'
+                        : 'Latest turn: no lasting world change was recorded.';
+    }
+    const pages = Math.max(1, Math.ceil(scenes.length / WORLD_HISTORY_PAGE_SIZE));
+    worldHistoryPage = Math.min(worldHistoryPage, pages - 1);
+    const count = document.getElementById('world-history-count');
+    if (count) count.textContent = String(scenes.length);
+    const page = document.getElementById('world-history-page');
+    if (page) page.textContent = `Page ${worldHistoryPage + 1} of ${pages}`;
+    const newer = document.getElementById('world-history-newer');
+    const older = document.getElementById('world-history-older');
+    if (newer) newer.disabled = worldHistoryPage === 0;
+    if (older) older.disabled = worldHistoryPage >= pages - 1;
+    list.replaceChildren();
+    if (!scenes.length) {
+        const empty = document.createElement('p');
+        empty.className = 'world-insight-empty';
+        empty.textContent = 'The first scene will appear here when this timeline begins.';
+        list.appendChild(empty);
+        return;
+    }
+    scenes.slice(worldHistoryPage * WORLD_HISTORY_PAGE_SIZE, (worldHistoryPage + 1) * WORLD_HISTORY_PAGE_SIZE)
+        .forEach(({ message }, pageIndex) => {
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = 'world-insight-card';
+            card.dataset.messageId = message.id || '';
+            const location = world.locations.find(item => item.id === message.location);
+            const title = document.createElement('strong');
+            title.textContent = `Scene ${scenes.length - worldHistoryPage * WORLD_HISTORY_PAGE_SIZE - pageIndex}${location ? ` · ${location.name}` : ''}`;
+            const detail = document.createElement('span');
+            const visibleText = String(scrubNarrativeArtifacts(message.ledgerEntry || message.text || '')).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+            detail.textContent = visibleText.slice(0, 140) + (visibleText.length > 140 ? '…' : '');
+            const visibleChanges = worldVisibleTurnChanges(world, message,
+                witnessedRelationshipsByVersion.get(Number(message.worldAudit?.version))
+                || witnessedRelationships.get(Number(message.worldAudit?.turn)) || []);
+            const meta = document.createElement('span');
+            meta.className = 'world-insight-meta';
+            const status = message.stateSource === 'frozen_no_receipt' ? 'State not verified'
+                : message.worldAudit?.rejected ? `${message.worldAudit.rejected} proposed change${message.worldAudit.rejected === 1 ? '' : 's'} rejected`
+                : message.ledgerEntry ? 'Lasting change recorded' : 'Scene';
+            const calls = Number(message.callAudit?.foregroundTotal) || 0;
+            const elapsedMs = Number(message.turnDurationMs) || 0;
+            meta.textContent = `${visibleChanges.length ? visibleChanges.join(' · ') + ' · ' : ''}${status}${calls ? ` · ${calls} foreground model call${calls === 1 ? '' : 's'}` : ''}${elapsedMs ? ` · ${(elapsedMs / 1000).toFixed(1)}s` : ''}`;
+            card.append(title, detail, meta);
+            card.onclick = () => jumpToWorldMessage(message.id);
+            list.appendChild(card);
+        });
+}
+
+function renderWorldDirectorPanel(world, sess) {
+    if (document.getElementById('world-play-view')?.classList.contains('multiplayer-guest-view')) return;
+    const receiptsList = document.getElementById('world-director-receipts');
+    const mindsList = document.getElementById('world-director-minds');
+    if (!receiptsList || !mindsList) return;
+    const version = document.getElementById('world-director-version');
+    if (version) version.textContent = `v${Math.max(0, Number(sess.worldStateVersion) || 0)}`;
+    const health = document.getElementById('world-director-health');
+    const latestReply = [...(sess.history || [])].reverse().find(message => message.role === 'dm');
+    const latestReceipt = (Array.isArray(sess.worldTurnReceipts) ? sess.worldTurnReceipts : []).at(-1);
+    const latestAudit = latestReply?.worldAudit || latestReceipt?.audit || sess.lastTurnAudit;
+    if (health) {
+        const frozen = latestReply?.stateSource === 'frozen_no_receipt';
+        const rejected = Number(latestAudit?.rejected?.length ?? latestAudit?.rejected) || 0;
+        health.classList.toggle('is-warning', frozen || rejected > 0);
+        health.textContent = frozen
+            ? 'Latest unverified DM reply was discarded; its proposed changes were not applied.'
+            : rejected
+                ? `${rejected} proposed change${rejected === 1 ? ' was' : 's were'} rejected ${latestReply?.worldAudit ? 'on the latest turn' : `in turn ${latestReceipt?.turn || '?'}`}. Open its receipt below for the reason.`
+                : latestReply?.worldAudit ? 'Latest turn passed the world-state check.'
+                    : latestReceipt ? `Last recorded receipt: turn ${latestReceipt.turn}.` : 'No world turn has been committed yet.';
+    }
+
+    // The receipt list covers committed turns. This separate ledger also
+    // includes failed retries, semantic embeddings, Labs, and asynchronous
+    // World Agent / memory work. Only provider-reported money is summed.
+    const tracked = Array.isArray(sess.worldModelAttempts) ? sess.worldModelAttempts : [];
+    const totals = sess.worldModelTotals || {};
+    let modelSummary = document.getElementById('world-director-model-summary');
+    if (!modelSummary && health) {
+        modelSummary = document.createElement('p');
+        modelSummary.id = 'world-director-model-summary';
+        modelSummary.className = 'world-director-fact';
+        health.after(modelSummary);
+    }
+    if (modelSummary) {
+        const all = Math.max(0, Number(totals.attempts) || tracked.length);
+        const background = Math.max(0, Number(totals.background) || tracked.filter(item => item.background).length);
+        const local = Math.max(0, Number(totals.local) || tracked.filter(item => item.billing === 'local').length);
+        const unknown = Math.max(0, Number(totals.unpricedProviderAttempts)
+            || tracked.filter(item => item.billing !== 'local' && item.usage?.costUsd == null).length);
+        const reported = Math.max(0, Number(totals.reportedCostUsd) || 0);
+        const priced = Math.max(0, all - local - unknown);
+        modelSummary.textContent = !all
+            ? 'Model calls: none tracked yet. Provider bills and earlier calls are not inferred.'
+            : `${all} tracked model attempt${all === 1 ? '' : 's'} (${background} background, ${local} local cognition). `
+                + (priced ? `$${reported.toFixed(4)} provider-reported cost; ` : '')
+                + (unknown ? `${unknown} provider attempt${unknown === 1 ? '' : 's'} with unknown cost. ` : '')
+                + `${Math.max(0, Number(totals.reportedInputTokens) || 0)} input / ${Math.max(0, Number(totals.reportedOutputTokens) || 0)} output tokens reported; `
+                + `${Math.max(0, Number(totals.usageUnknownAttempts) || 0)} attempt${Number(totals.usageUnknownAttempts) === 1 ? '' : 's'} without reported token usage. `
+                + 'This is not a bill; check your provider dashboard for charges, including failed or stopped calls.';
+    }
+    let modelDetails = document.getElementById('world-director-model-attempts');
+    if (!modelDetails && modelSummary) {
+        modelDetails = document.createElement('details');
+        modelDetails.id = 'world-director-model-attempts';
+        modelDetails.className = 'world-director-receipt';
+        modelSummary.after(modelDetails);
+    }
+    if (modelDetails) {
+        modelDetails.replaceChildren();
+        const heading = document.createElement('summary');
+        heading.textContent = `Recent model attempts · ${tracked.length} retained`;
+        modelDetails.appendChild(heading);
+        tracked.slice(-20).reverse().forEach(attempt => {
+            const line = document.createElement('p');
+            line.className = 'world-director-fact';
+            const usage = attempt.usage || {};
+            const tokens = usage.total != null ? `${usage.total} reported tokens` : 'token usage unknown';
+            const cost = usage.costUsd != null ? `$${Number(usage.costUsd).toFixed(4)} reported`
+                : attempt.billing === 'local' ? 'local runtime' : 'cost unknown';
+            line.textContent = `${new Date(attempt.at).toLocaleString()} · ${attempt.kind || 'model'} · ${attempt.model || attempt.provider || 'model unknown'} · ${attempt.outcome || 'unknown'}${attempt.status ? ` (HTTP ${attempt.status})` : ''} · ${attempt.background ? 'background' : 'foreground'} · ${tokens} · ${cost}`;
+            modelDetails.appendChild(line);
+        });
+        if (tracked.length > 20) {
+            const older = document.createElement('p');
+            older.className = 'world-director-fact';
+            older.textContent = `${tracked.length - 20} older retained attempts are omitted here; cumulative counters above include them.`;
+            modelDetails.appendChild(older);
+        }
+    }
+
+    const text = (tag, value, className = '') => {
+        const node = document.createElement(tag);
+        node.textContent = String(value ?? '');
+        if (className) node.className = className;
+        return node;
+    };
+    const empty = value => text('p', value, 'world-insight-empty');
+    receiptsList.replaceChildren();
+    const receipts = (Array.isArray(sess.worldTurnReceipts) ? sess.worldTurnReceipts : []).slice(-10).reverse();
+    const failedAttempts = Array.isArray(sess.worldCallDiagnostics) ? sess.worldCallDiagnostics.slice(-5).reverse() : [];
+    failedAttempts.forEach(attempt => {
+        const details = document.createElement('details');
+        details.className = 'world-director-receipt';
+        details.appendChild(text('summary', `${attempt.reason || 'Failed turn'} · ${new Date(attempt.at).toLocaleString()} · ${attempt.calls?.length || 0} model call${attempt.calls?.length === 1 ? '' : 's'}`));
+        (attempt.calls || []).forEach(call => {
+            const usage = call.usage?.total != null ? `${call.usage.total} reported tokens` : 'token usage not reported';
+            details.appendChild(text('p', `${call.kind} · ${call.model || 'model not reported'} · HTTP ${call.status || 'network error'} · ${(Math.max(0, Number(call.durationMs) || 0) / 1000).toFixed(1)}s · ${usage}`, 'world-director-fact'));
+        });
+        receiptsList.appendChild(details);
+    });
+    if (!receipts.length && !failedAttempts.length) receiptsList.appendChild(empty('Receipts appear after the first played turn.'));
+    const eventsByTurn = new Map();
+    (Array.isArray(sess.turnEvents) ? sess.turnEvents : []).forEach(event => {
+        const turn = Number(event.turn);
+        if (!eventsByTurn.has(turn)) eventsByTurn.set(turn, []);
+        eventsByTurn.get(turn).push(event);
+    });
+    const replyByTurn = new Map();
+    const replyByVersion = new Map();
+    (sess.history || []).forEach(message => {
+        if (message.role === 'dm' && Number.isFinite(Number(message.worldAudit?.turn))) {
+            replyByTurn.set(Number(message.worldAudit.turn), message);
+        }
+        if (message.role === 'dm' && Number.isFinite(Number(message.worldAudit?.version))) {
+            replyByVersion.set(Number(message.worldAudit.version), message);
+        }
+    });
+    receipts.forEach(({ turn, audit }) => {
+        const rejections = Array.isArray(audit?.rejected) ? audit.rejected : [];
+        const rejectedCount = rejections.length || Math.max(0, Number(audit?.rejected) || 0);
+        const details = document.createElement('details');
+        details.className = 'world-director-receipt';
+        const summary = text('summary', `Turn ${turn} · ${audit?.accepted || 0} committed · ${rejectedCount} rejected`);
+        details.appendChild(summary);
+        const reply = replyByVersion.get(Number(audit?.world_state_version)) || replyByTurn.get(Number(turn));
+        const meta = [];
+        if (audit?.source) meta.push(`Source: ${audit.source.replace(/_/g, ' ')}`);
+        if (Number.isFinite(Number(audit?.world_state_version))) meta.push(`State v${audit.world_state_version}`);
+        if (reply?.callAudit?.foregroundTotal) meta.push(`${reply.callAudit.foregroundTotal} foreground model calls`);
+        if (reply?.turnDurationMs) meta.push(`${(reply.turnDurationMs / 1000).toFixed(1)}s`);
+        if (meta.length) details.appendChild(text('p', meta.join(' · '), 'world-director-fact'));
+        const calls = Array.isArray(reply?.callAudit?.calls) ? reply.callAudit.calls : [];
+        calls.slice(0, 8).forEach(call => {
+            const usage = call.usage && typeof call.usage === 'object' ? call.usage : null;
+            const reported = usage ? [
+                usage.input != null && Number.isFinite(Number(usage.input)) ? `${usage.input} input` : '',
+                usage.output != null && Number.isFinite(Number(usage.output)) ? `${usage.output} output` : '',
+                usage.total != null && Number.isFinite(Number(usage.total)) ? `${usage.total} total tokens` : ''
+            ].filter(Boolean).join(' · ') : '';
+            details.appendChild(text('p', `${String(call.kind || 'model call').replace(/([a-z])([A-Z])/g, '$1 $2')}
+                · ${call.model || 'model not reported'} · ${call.status || 'network error'}
+                · ${(Math.max(0, Number(call.durationMs) || 0) / 1000).toFixed(1)}s
+                · ${reported || 'token usage not reported by provider'}`.replace(/\s+/g, ' '), 'world-director-fact'));
+        });
+        if (calls.length > 8) details.appendChild(text('p', `${calls.length - 8} more model calls in this turn.`, 'world-director-fact'));
+        const events = eventsByTurn.get(Number(turn)) || [];
+        events.slice(0, 8).forEach(event => {
+            const evidence = String(event.evidence || event.cause || event.summary || '').trim();
+            details.appendChild(text('p', `${event.committed ? 'Committed' : 'Informational'} · ${event.type || 'event'}${evidence ? ` — ${evidence}` : ''}`, 'world-director-fact'));
+        });
+        if (events.length > 8) details.appendChild(text('p', `${events.length - 8} more events in this turn.`, 'world-director-fact'));
+        rejections.slice(0, 8).forEach(rejection => {
+            const why = String(rejection.detail || rejection.reason || 'Invalid world-state proposal').trim();
+            details.appendChild(text('p', `Rejected · ${rejection.type || 'event'} — ${why}`, 'world-director-fact is-rejected'));
+        });
+        if (!events.length && !rejectedCount) details.appendChild(empty('No lasting change was proposed.'));
+        receiptsList.appendChild(details);
+    });
+
+    mindsList.replaceChildren();
+    const minds = sessionNpcs(world, sess).filter(npc => {
+        const npcState = sess.entityStates?.[npc.id];
+        return npcState && npcState.status !== 'dead' && npcState.status !== 'gone'
+            && String(npcState.goal || '').trim() && npcState.goalAutonomy !== 'paused';
+    }).sort((a, b) => Number(sess.entityStates?.[b.id]?.goalProgress || 0)
+        - Number(sess.entityStates?.[a.id]?.goalProgress || 0));
+    if (!minds.length) mindsList.appendChild(empty('No person has an active private goal. Goals can be set in a person’s dossier.'));
+    minds.slice(0, 12).forEach(npc => {
+        const npcState = sess.entityStates[npc.id];
+        const card = document.createElement('div');
+        card.className = 'world-director-mind';
+        card.appendChild(text('strong', npc.name || 'Unnamed person'));
+        card.appendChild(text('p', npcState.goal, 'world-director-fact'));
+        card.appendChild(text('span', `${npcState.goalAutonomy || 'medium'} autonomy · ${Math.max(0, Math.min(100, Number(npcState.goalProgress) || 0))}% progress`, 'world-insight-meta'));
+        if (world.entities?.some(entity => entity.id === npc.id)) {
+            const open = text('button', 'Open dossier');
+            open.type = 'button';
+            open.className = 'tool-btn';
+            open.onclick = () => openNpcDossier(npc.id);
+            card.appendChild(open);
+        }
+        mindsList.appendChild(card);
+    });
+    if (minds.length > 12) mindsList.appendChild(empty(`Showing 12 of ${minds.length} active minds.`));
+}
+
 function setupWorldPlayLogic() {
+    document.querySelectorAll('#world-play-view [data-world-status-tab]').forEach(button => {
+        button.onclick = () => setWorldStatusTab(button.dataset.worldStatusTab);
+    });
+    document.getElementById('world-people-search').oninput = () => {
+        const world = state.worlds.find(item => item.id === state.activeWorldId);
+        const sess = getCurrentWorldSession();
+        if (!world || !sess) return;
+        const present = sessionNpcs(world, sess).filter(npc => sess.entityStates?.[npc.id]?.location === sess.playerLocation && isNpcActive(sess.entityStates[npc.id]));
+        renderWorldPeopleDirectory(world, sess, present);
+    };
+    document.getElementById('world-history-newer').onclick = () => {
+        worldHistoryPage = Math.max(0, worldHistoryPage - 1);
+        const world = state.worlds.find(item => item.id === state.activeWorldId);
+        const sess = getCurrentWorldSession();
+        if (world && sess) renderWorldHistoryDirectory(world, sess);
+    };
+    document.getElementById('world-history-older').onclick = () => {
+        worldHistoryPage++;
+        const world = state.worlds.find(item => item.id === state.activeWorldId);
+        const sess = getCurrentWorldSession();
+        if (world && sess) renderWorldHistoryDirectory(world, sess);
+    };
+    document.getElementById('world-optimize-snapshots').onclick = async () => {
+        if (document.getElementById('world-play-view')?.classList.contains('multiplayer-guest-view')) return;
+        const world = state.worlds.find(item => item.id === state.activeWorldId);
+        const sess = getCurrentWorldSession();
+        if (!world || !sess) return;
+        const button = document.getElementById('world-optimize-snapshots');
+        const status = document.getElementById('world-optimize-snapshots-status');
+        button.disabled = true;
+        status.textContent = 'Checking older scenes…';
+        try {
+            const count = compactWorldHistorySnapshots(world, sess, { keepRecent: 2 });
+            if (count) await saveWorldsState();
+            status.textContent = count
+                ? `Optimized ${count} older scene${count === 1 ? '' : 's'}. Narrative, rewind checkpoints, and alternate takes remain.`
+                : 'Already optimized. No eligible older single-take snapshots found.';
+            if (count) renderWorldHistoryDirectory(world, sess);
+        } catch (error) {
+            status.textContent = `Could not save the optimized timeline: ${error?.message || error}`;
+        } finally {
+            button.disabled = false;
+        }
+    };
+    const timelineButton = document.getElementById('world-timeline-btn');
+    const timelineActions = document.getElementById('world-timeline-actions');
+    const closeTimelineActions = (restoreFocus = false) => {
+        timelineActions.classList.remove('is-open');
+        document.querySelector('#world-play-view .chat-header')?.classList.remove('has-open-timeline');
+        timelineButton.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) timelineButton.focus();
+    };
+    timelineButton.onclick = () => {
+        const open = !timelineActions.classList.contains('is-open');
+        timelineActions.classList.toggle('is-open', open);
+        document.querySelector('#world-play-view .chat-header')?.classList.toggle('has-open-timeline', open);
+        timelineButton.setAttribute('aria-expanded', String(open));
+    };
+    timelineActions.addEventListener('click', event => {
+        if (event.target.closest('button')) closeTimelineActions();
+    });
+    timelineActions.addEventListener('keydown', event => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        closeTimelineActions(true);
+    });
+    document.addEventListener('click', event => {
+        if (!timelineActions.classList.contains('is-open') || timelineActions.contains(event.target)
+            || timelineButton.contains(event.target)) return;
+        closeTimelineActions();
+    });
     document.getElementById('world-exit-btn').onclick = () => switchView('worlds');
     document.getElementById('world-map-btn').onclick = renderWorldMap;
+    const compactWorldTools = window.matchMedia('(max-width: 600px)');
+    const syncCompactWorldTools = () => {
+        const row = document.querySelector('#world-play-view .world-toolbar-secondary');
+        const actions = document.getElementById('world-more-actions');
+        const map = document.getElementById('world-map-btn');
+        const ids = ['world-roll-btn', 'world-continue-btn', 'world-session-zero-btn'];
+        if (compactWorldTools.matches) {
+            for (const id of [...ids].reverse()) {
+                const button = document.getElementById(id);
+                actions.insertBefore(button, actions.firstChild);
+            }
+        } else {
+            for (const id of ids) row.insertBefore(document.getElementById(id), map);
+        }
+    };
+    compactWorldTools.addEventListener('change', syncCompactWorldTools);
+    syncCompactWorldTools();
     document.getElementById('world-more-btn').onclick = () => {
         const actions = document.getElementById('world-more-actions');
         const button = document.getElementById('world-more-btn');
         const open = !actions.classList.contains('is-open');
         actions.classList.toggle('is-open', open);
+        actions.closest('.world-toolbar-secondary')?.classList.toggle('has-open-more', open);
         button.setAttribute('aria-expanded', String(open));
+    };
+    document.getElementById('world-more-btn').onkeydown = event => {
+        if (event.key !== 'Escape') return;
+        const actions = document.getElementById('world-more-actions');
+        if (!actions.classList.contains('is-open')) return;
+        actions.classList.remove('is-open');
+        actions.closest('.world-toolbar-secondary')?.classList.remove('has-open-more');
+        event.currentTarget.setAttribute('aria-expanded', 'false');
+        event.preventDefault();
+    };
+    document.addEventListener('click', event => {
+        const actions = document.getElementById('world-more-actions');
+        const button = document.getElementById('world-more-btn');
+        if (!actions?.classList.contains('is-open') || actions.contains(event.target) || button?.contains(event.target)) return;
+        actions.classList.remove('is-open');
+        actions.closest('.world-toolbar-secondary')?.classList.remove('has-open-more');
+        button.setAttribute('aria-expanded', 'false');
+    });
+    document.getElementById('world-more-actions').onkeydown = event => {
+        if (event.key !== 'Escape') return;
+        const actions = event.currentTarget;
+        actions.classList.remove('is-open');
+        actions.closest('.world-toolbar-secondary')?.classList.remove('has-open-more');
+        const button = document.getElementById('world-more-btn');
+        button.setAttribute('aria-expanded', 'false');
+        button.focus();
+        event.stopPropagation();
     };
     document.getElementById('world-presentation-btn').onclick = async () => {
         const world = state.worlds.find(item => item.id === state.activeWorldId);
@@ -19351,14 +22321,16 @@ function setupWorldPlayLogic() {
         const current = modes.includes(sess.presentationMode)
             ? sess.presentationMode : (presentation.enabled ? presentation.mode : 'classic');
         sess.presentationMode = modes[(modes.indexOf(current) + 1) % modes.length];
-        await saveState();
+        await saveWorldsState();
         renderWorldPlayState();
         showToast(`World view: ${sess.presentationMode[0].toUpperCase() + sess.presentationMode.slice(1)}.`, 'success');
     };
     document.getElementById('world-hud-toggle').onclick = () => {
         const hud = document.querySelector('#world-play-view .world-status-col');
         const collapsed = hud.classList.toggle('is-collapsed');
-        document.getElementById('world-hud-toggle').textContent = collapsed ? '◧ Show HUD' : '◫ Hide HUD';
+        const button = document.getElementById('world-hud-toggle');
+        button.textContent = collapsed ? '◧ World info' : '◫ Hide world info';
+        button.setAttribute('aria-expanded', String(!collapsed));
     };
     document.getElementById('close-map-modal').onclick = () => document.getElementById('map-modal').classList.add('hidden');
     
@@ -19401,7 +22373,7 @@ function setupWorldPlayLogic() {
         const mins = parseInt(input);
         if (!isNaN(mins)) {
             sess.bonusTimeMinutes = (sess.bonusTimeMinutes || 0) + mins;
-            saveState().catch(() => {});
+            saveWorldsState().catch(() => {});
             renderWorldPlayState();
             document.getElementById('world-clock-modal-overlay').classList.add('hidden');
             showToast(`Clock adjusted by ${mins} minutes.`, 'success');
@@ -19445,7 +22417,7 @@ function setupWorldPlayLogic() {
         const newBonusTimeMinutes = targetTotalMinutes - startMinutes - (sess.turnCount - 1) * timeStep;
         sess.bonusTimeMinutes = newBonusTimeMinutes;
         
-        saveState().catch(() => {});
+        saveWorldsState().catch(() => {});
         renderWorldPlayState();
         document.getElementById('world-clock-modal-overlay').classList.add('hidden');
         showToast('Clock updated to new date & time.', 'success');
@@ -19464,8 +22436,12 @@ function setupWorldPlayLogic() {
         executeWorldTurn();
     };
     input.onkeydown = (e) => {
+        // Enter confirms an in-progress IME composition on many keyboards.
+        // Safari may report keyCode 229 while isComposing is still false.
+        if (e.isComposing || e.keyCode === 229) return;
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
+            if (e.repeat) return;
             if (worldTurnInProgress) return; // don't queue while generating
             executeWorldTurn();
         }
@@ -19486,7 +22462,7 @@ function setupWorldPlayLogic() {
         if (!session) return;
         const changed = replaceWorldLedger(session, document.getElementById('m-ledger-content').value);
         try {
-            await saveState();
+            await saveWorldsState();
             renderWorldPlayState();
             ledgerModal.classList.add('hidden');
             showToast(changed ? 'Ledger Updated' : 'Ledger already up to date', 'success');
@@ -19547,7 +22523,7 @@ function setupWorldPlayLogic() {
             return;
         }
         evaluateQuestProgress(world, sess);
-        await saveState();
+        await saveWorldsState();
         renderWorldPlayState();
         statsModal.classList.add('hidden');
         showToast('Character Stats Updated', 'success');
@@ -19606,7 +22582,7 @@ function setupWorldPlayLogic() {
         };
         if (objectiveText) update.objectives.push({ text: objectiveText, type: 'manual' });
         applyQuestUpdates(world, sess, [update]);
-        saveState().catch(() => {});
+        saveWorldsState().catch(() => {});
         renderWorldPlayState();
         closeQuestModal();
         showToast(id ? 'Quest updated.' : 'Quest added.', 'success');
@@ -19619,7 +22595,7 @@ function setupWorldPlayLogic() {
         showConfirmModal('Delete Quest', `Delete "${quest.title}" from this timeline?`, async () => {
             const index = sess.quests.findIndex(item => item.id === quest.id);
             if (index !== -1) sess.quests.splice(index, 1);
-            await saveState();
+            await saveWorldsState();
             closeQuestModal();
             renderWorldPlayState();
             showToast('Quest deleted.', 'info');
@@ -19639,7 +22615,7 @@ function setupWorldPlayLogic() {
     document.getElementById('save-world-outfit-btn').onclick = () => {
         const sess = getCurrentWorldSession();
         sess.outfit = document.getElementById('m-outfit-content').value;
-        saveState().catch(() => {});
+        saveWorldsState().catch(() => {});
         renderWorldPlayState();
         outfitModal.classList.add('hidden');
         showToast('Outfit Updated', 'success');
@@ -19647,34 +22623,41 @@ function setupWorldPlayLogic() {
 
     // Parity Features
     document.getElementById('world-new-session-btn').onclick = () => {
-        if (worldTurnInProgress) return showToast('Finish or stop the current DM response before changing timelines.', 'info');
+        if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action before changing timelines.', 'info');
         return createNewWorldSession();
     };
 
     document.getElementById('world-rename-session-btn').onclick = async () => {
-        if (worldTurnInProgress) return showToast('Finish or stop the current DM response before changing timelines.', 'info');
+        if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action before changing timelines.', 'info');
         const sess = getCurrentWorldSession();
         if (!sess) return;
         const newName = prompt('Enter new session name:', sess.name || 'Session');
         if (newName && newName.trim()) {
             sess.name = newName.trim();
-            await saveState();
+            await saveWorldsState();
             renderWorldPlayState();
             showToast('Session renamed', 'success');
         }
     };
     
     document.getElementById('world-del-session-btn').onclick = () => {
-        if (worldTurnInProgress) return showToast('Finish or stop the current DM response before changing timelines.', 'info');
+        if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action before changing timelines.', 'info');
         const inst = state.worldInstances[state.activeWorldId];
         if (!inst || inst.sessions.length <= 1) return showToast('Cannot delete the last session', 'info');
         
         showConfirmModal('Delete Session', 'Permanently delete this timeline? This cannot be undone.', async () => {
             const currentIdx = inst.sessions.findIndex(s => s.id === inst.activeSessionId);
             if (currentIdx !== -1) {
+                const removedSession = inst.sessions[currentIdx];
+                const world = state.worlds.find(item => item.id === state.activeWorldId);
+                bumpMemoryEpoch(removedSession);
+                bumpWorldEpoch(removedSession);
+                if (world) removeWorldTimelineOwnedContent(world, removedSession.id);
                 inst.sessions.splice(currentIdx, 1);
                 inst.activeSessionId = inst.sessions[0].id;
-                await saveState();
+                prepareCurrentWorldSession();
+                resetWorldInsightFilters();
+                await saveWorldsState();
                 renderWorldPlayState();
                 showToast('Session Deleted');
             }
@@ -19682,22 +22665,24 @@ function setupWorldPlayLogic() {
     };
 
     document.getElementById('world-session-select').onchange = (e) => {
-        if (worldTurnInProgress) {
+        if (worldTurnInProgress || worldMutationInProgress) {
             e.target.value = state.worldInstances[state.activeWorldId]?.activeSessionId || '';
-            return showToast('Finish or stop the current DM response before changing timelines.', 'info');
+            return showToast('Finish the current World action before changing timelines.', 'info');
         }
         state.worldInstances[state.activeWorldId].activeSessionId = e.target.value;
-        saveState().catch(() => {});
+        prepareCurrentWorldSession();
+        resetWorldInsightFilters();
+        saveWorldsState().catch(() => {});
         renderWorldPlayState();
     };
 
     document.getElementById('world-session-zero-btn').onclick = () => {
-        if (worldTurnInProgress) return showToast('Finish or stop the current DM response before changing timeline setup.', 'info');
+        if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action before changing timeline setup.', 'info');
         openSessionZero(null);
     };
 
     document.getElementById('world-continue-btn').onclick = () => {
-        if (worldTurnInProgress) return showToast('The DM is still responding — please wait.', 'info');
+        if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action first.', 'info');
         const sess = getCurrentWorldSession();
         if (!sess || !sess.history.length) return showToast('Nothing to continue yet.', 'info');
         executeWorldTurn('continue');
@@ -19787,10 +22772,7 @@ function setupWorldPlayLogic() {
     };
 }
 
-function resetWorldTimeline(world, sess) {
-    const id = sess.id;
-    const name = sess.name;
-
+function removeWorldTimelineOwnedContent(world, id) {
     // Remove only objects generated by this timeline. Authored content and
     // story-born content from other timelines are never touched.
     const removedLocations = new Set((world.locations || [])
@@ -19807,6 +22789,12 @@ function resetWorldTimeline(world, sess) {
             return !removedLocations.has(target) && !removedNames.has(target);
         });
     });
+}
+
+function resetWorldTimeline(world, sess) {
+    const id = sess.id;
+    const name = sess.name;
+    removeWorldTimelineOwnedContent(world, id);
 
     // Invalidate every asynchronous operation before replacing timeline data.
     bumpMemoryEpoch(sess);
@@ -19881,12 +22869,23 @@ function resetWorldTimeline(world, sess) {
     return sess;
 }
 
+// Reading the active timeline must never create a timeline, repair an actor,
+// or overwrite a location. Run preparation at entry/switch boundaries instead
+// of letting an unrelated render or prompt lookup change campaign state.
 function getCurrentWorldSession() {
     const inst = state.worldInstances[state.activeWorldId];
-    if (!inst) return null;
-    
-    // Migration: Ensure session structure exists
-    if (!inst.sessions || !inst.activeSessionId) {
+    if (!inst || !Array.isArray(inst.sessions)) return null;
+    return inst.sessions.find(session => session.id === inst.activeSessionId) || inst.sessions[0] || null;
+}
+
+function prepareCurrentWorldSession() {
+    const inst = state.worldInstances[state.activeWorldId];
+    const world = state.worlds.find(item => item.id === state.activeWorldId);
+    if (!inst || !world) return null;
+
+    // Legacy instances predate timelines. An existing sessions array must not
+    // be replaced merely because its activeSessionId is missing or stale.
+    if (!Array.isArray(inst.sessions) || inst.sessions.length === 0) {
         const oldHistory = inst.history || [];
         const oldLedger = inst.ledger || "";
         const oldInv = inst.inventory || [];
@@ -19915,19 +22914,28 @@ function getCurrentWorldSession() {
         delete inst.history; delete inst.ledger; delete inst.inventory; delete inst.playerLocation; delete inst.entityStates;
     }
 
-    let session = inst.sessions.find(s => s.id === inst.activeSessionId);
-    if (!session) session = inst.sessions[0];
+    if (!inst.sessions.some(session => session.id === inst.activeSessionId)) {
+        inst.activeSessionId = inst.sessions[0].id;
+    }
+    const session = getCurrentWorldSession();
 
-    // --- HEALING PASS: Normalize State to IDs ---
-    const world = state.worlds.find(w => w.id === state.activeWorldId);
-    if (world && session) {
+    // Explicit, one-time-per-entry normalization of legacy references.
+    if (session) {
         // Resolve Player Location Name -> ID
-        const currentLoc = world.locations.find(l => l.id === session.playerLocation || (session.playerLocation && l.name.toLowerCase() === session.playerLocation.toString().toLowerCase()));
-        const defaultStartId = world.startLocationId || (world.locations[0]?.id || null);
+        const visibleLocations = sessionLocations(world, session);
+        const currentLoc = visibleLocations.find(l => l.id === session.playerLocation || (session.playerLocation && l.name.toLowerCase() === session.playerLocation.toString().toLowerCase()));
+        const defaultStartId = visibleLocations.find(location => location.id === world.startLocationId)?.id
+            || visibleLocations[0]?.id || null;
 
         if (currentLoc) {
             session.playerLocation = currentLoc.id;
-        } else if (world.locations.length > 0) {
+        } else if (visibleLocations.length > 0) {
+            session.playerLocation = defaultStartId;
+        }
+        // An unconfigured, never-played timeline follows Workshop start edits.
+        // A chosen starting life may deliberately begin elsewhere; rendering
+        // must never teleport that player back to the template start.
+        if (!session.history?.length && !session.originId && !session.setupComplete && defaultStartId) {
             session.playerLocation = defaultStartId;
         }
 
@@ -19935,7 +22943,7 @@ function getCurrentWorldSession() {
         // (presence, schedules, population, context) silently drops entities
         // whose type is missing or spelled differently ("NPC", "character").
         // Anything not explicitly an item is a person.
-        world.entities.forEach(ent => {
+        world.entities.filter(ent => isVisibleToSession(ent, session)).forEach(ent => {
             const t = (ent.type || '').trim().toLowerCase();
             if (t === 'item' || t === 'object' || t === 'prop') {
                 ent.type = 'item';
@@ -19947,7 +22955,7 @@ function getCurrentWorldSession() {
 
         // Ensure all NPCs have state and valid locations
         if (!session.entityStates) session.entityStates = {};
-        world.entities.forEach(ent => {
+        world.entities.filter(ent => isVisibleToSession(ent, session)).forEach(ent => {
             if (ent.type === 'npc') {
                 // HEALING: Ensure NPC state exists
                 if (!session.entityStates[ent.id]) {
@@ -19961,14 +22969,20 @@ function getCurrentWorldSession() {
 
                 // INITIAL POSITIONING: only heal missing/invalid locations. A valid
                 // default location may be the result of real narrative movement.
-                const hasValidLocation = world.locations.some(location => location.id === entState.location);
+                const hasValidLocation = visibleLocations.some(location => location.id === entState.location);
                 if (!hasValidLocation) {
-                    const foundLoc = world.locations.find(l => l.id === ent.startLocation) || 
-                                     world.locations.find(l => l.name.toLowerCase().trim() === startRef);
+                    const foundLoc = visibleLocations.find(l => l.id === ent.startLocation) ||
+                                     visibleLocations.find(l => l.name.toLowerCase().trim() === startRef);
                     
                     if (foundLoc) {
                         entState.location = foundLoc.id;
                         console.log(`Horde Engine: Positioned ${ent.name} at ${foundLoc.name}`);
+                    } else if (entState.offstage === true
+                        || (ent.sessionOrigin === session.id && entState.location === '')) {
+                        // Life-seeded contacts can exist without being present
+                        // in the opening room. Empty is an intentional offstage
+                        // position, not an invitation to spawn them at start.
+                        entState.location = '';
                     } else if (!entState.location) {
                         entState.location = defaultStartId;
                     }
@@ -20223,6 +23237,14 @@ function applyWorldRuleProfile(world, profileId) {
     return normalizeWorldGameRules(world);
 }
 
+function worldGameRulesForDisplay(world) {
+    if (!world) return normalizeWorldGameRules(null);
+    return normalizeWorldGameRules({
+        hudConfig: safeJsonClone(world.hudConfig || {}),
+        gameRules: safeJsonClone(world.gameRules || {})
+    });
+}
+
 function normalizeWorldGameRules(world) {
     if (!world) {
         return {
@@ -20414,7 +23436,7 @@ async function toggleWorldOptionalRpg() {
     }
     rules.profileId = 'custom';
     world.gameRules = rules;
-    await saveState();
+    await saveWorldsState();
     renderWorldPlayState();
 }
 
@@ -20509,27 +23531,27 @@ function applyPlayerStatChanges(world, sess, changes, options = {}) {
             appendWorldLedgerEntry(sess, lethal
                 ? `The player died: ${playerState.lastDefeatCause}`
                 : `The player was incapacitated after ${vitalDef.name} reached zero.`);
-            showToast(lethal ? '☠️ Game Over — this timeline has ended' : '⚠️ Incapacitated — the story will fail forward', lethal ? 'error' : 'info');
+            if (options.showToast !== false) showToast(lethal ? '☠️ Game Over — this timeline has ended' : '⚠️ Incapacitated — the story will fail forward', lethal ? 'error' : 'info');
         } else if (vitalChange.next > vitalDef.min && playerState.status === 'incapacitated') {
             playerState.status = 'active';
             playerState.conditions = playerState.conditions.filter(condition => condition !== 'Incapacitated');
             result.recovered = true;
-            showToast('Recovered from incapacitation', 'success');
+            if (options.showToast !== false) showToast('Recovered from incapacitation', 'success');
         } else if (vitalChange.next > vitalDef.min && playerState.status === 'dead' && options.allowDeadRecovery) {
             playerState.status = 'active';
             playerState.conditions = playerState.conditions.filter(condition => condition !== 'Incapacitated');
             result.recovered = true;
-            showToast('Timeline restored by manual correction', 'success');
+            if (options.showToast !== false) showToast('Timeline restored by manual correction', 'success');
         }
     }
     result.success = result.applied.length > 0 && result.rejected.length === 0;
     return result;
 }
 
-function findInventoryMatchIndices(inventory, item, quantity = 1) {
+function planWorldInventoryRemoval(inventory, item, quantity = 1) {
     const itemName = value => globalThis.HordeRpgMechanics?.itemName(value) || String(value || '');
     const query = questTextKey(itemName(item));
-    if (!query || !Array.isArray(inventory)) return [];
+    if (!query || !Array.isArray(inventory)) return { ok: false, reason: 'invalid_item', owned: 0, removals: [] };
     const exact = [];
     const fuzzy = [];
     inventory.forEach((entry, index) => {
@@ -20537,7 +23559,46 @@ function findInventoryMatchIndices(inventory, item, quantity = 1) {
         if (key === query) exact.push(index);
         else if (key.includes(query) || query.includes(key)) fuzzy.push(index);
     });
-    return [...exact, ...fuzzy].slice(0, Math.max(1, quantity));
+    if (!exact.length && new Set(fuzzy.map(index => questTextKey(itemName(inventory[index])))).size > 1) {
+        return { ok: false, reason: 'ambiguous_item', owned: 0, removals: [] };
+    }
+    const matches = exact.length ? exact : fuzzy;
+    const units = entry => {
+        const amount = typeof entry === 'object' && entry !== null ? Number(entry.quantity) : 1;
+        return Number.isFinite(amount) && amount > 0 ? Math.max(1, Math.trunc(amount)) : 1;
+    };
+    const owned = matches.reduce((sum, index) => sum + units(inventory[index]), 0);
+    let remaining = Math.max(1, Math.trunc(Number(quantity) || 1));
+    const removals = [];
+    matches.forEach(index => {
+        if (!remaining) return;
+        const take = Math.min(remaining, units(inventory[index]));
+        removals.push({ index, quantity: take });
+        remaining -= take;
+    });
+    return { ok: remaining === 0, reason: remaining ? 'item_not_owned' : '', owned, removals };
+}
+
+function applyWorldInventoryRemovalPlan(sess, plan) {
+    const removedUnits = [];
+    [...(plan?.removals || [])].sort((a, b) => b.index - a.index).forEach(({ index, quantity }) => {
+        const entry = sess.inventory[index];
+        if (entry === undefined) return;
+        const amount = typeof entry === 'object' && entry !== null ? Number(entry.quantity) : 1;
+        const available = Number.isFinite(amount) && amount > 0 ? Math.max(1, Math.trunc(amount)) : 1;
+        const take = Math.min(quantity, available);
+        for (let count = 0; count < take; count++) removedUnits.push(typeof entry === 'string'
+            ? entry : { ...entry, quantity: 1 });
+        if (take >= available) {
+            sess.inventory.splice(index, 1);
+            Object.keys(sess.equipment || {}).forEach(slot => {
+                if (sess.equipment[slot] === entry?.id) sess.equipment[slot] = null;
+            });
+        } else {
+            sess.inventory[index] = { ...entry, quantity: available - take };
+        }
+    });
+    return removedUnits;
 }
 
 function executeCommerceTransactions(world, sess, transactions) {
@@ -20589,17 +23650,20 @@ function executeCommerceTransactions(world, sess, transactions) {
                 showToast(`Bought ${quantity} × ${itemName} for ${total} ${rules.currencyName}`, 'success');
                 return results.push({ ...base, item: itemName, success: true, unitPrice: statedPrice, total, openMarket: true, balance: Number(sess.playerStats[currencyDef.id]) || 0 });
             }
-            const indices = findInventoryMatchIndices(sess.inventory, itemName, quantity);
-            if (rules.modules.inventory && indices.length < quantity) {
-                return results.push({ ...base, item: itemName, reason: 'item_not_owned', owned: indices.length });
+            const removal = planWorldInventoryRemoval(sess.inventory, itemName, quantity);
+            if (rules.modules.inventory && !removal.ok) {
+                return results.push({ ...base, item: itemName, reason: removal.reason, owned: removal.owned });
             }
             if (currencyDef.max > 0 && funds + total > currencyDef.max) {
                 return results.push({ ...base, item: itemName, reason: 'currency_capacity', capacity: currencyDef.max });
             }
-            indices.sort((a, b) => b - a).forEach(itemIndex => sess.inventory.splice(itemIndex, 1));
+            const inventoryBefore = safeJsonClone(sess.inventory);
+            const equipmentBefore = safeJsonClone(sess.equipment || {});
+            if (rules.modules.inventory) applyWorldInventoryRemovalPlan(sess, removal);
             const statResult = applyPlayerStatChanges(world, sess, { [currencyDef.id]: total }, { showToast: false });
             if (!statResult.success && total > 0) {
-                for (let count = 0; count < quantity; count++) sess.inventory.push(itemName);
+                sess.inventory = inventoryBefore;
+                sess.equipment = equipmentBefore;
                 return results.push({ ...base, item: itemName, reason: 'currency_update_failed' });
             }
             showToast(`Sold ${quantity} × ${itemName} for ${total} ${rules.currencyName}`, 'success');
@@ -20627,21 +23691,24 @@ function executeCommerceTransactions(world, sess, transactions) {
             results.push({ ...base, item: stock.item, success: true, unitPrice, total, balance: Number(sess.playerStats[currencyDef.id]) || 0, stock: stock.quantity });
             showToast(`Bought ${quantity} × ${stock.item} for ${total} ${rules.currencyName}`, 'success');
         } else {
-            const indices = findInventoryMatchIndices(sess.inventory, stock.item, quantity);
-            if (indices.length < quantity) return results.push({ ...base, item: stock.item, reason: 'item_not_owned', owned: indices.length });
+            const removal = planWorldInventoryRemoval(sess.inventory, stock.item, quantity);
+            if (!removal.ok) return results.push({ ...base, item: stock.item, reason: removal.reason, owned: removal.owned });
             if (stock.maxQuantity > 0 && stock.quantity + quantity > stock.maxQuantity) {
                 return results.push({ ...base, item: stock.item, reason: 'merchant_stock_full' });
             }
             if (currencyDef.max > 0 && funds + total > currencyDef.max) {
                 return results.push({ ...base, item: stock.item, reason: 'currency_capacity', capacity: currencyDef.max });
             }
-            indices.sort((a, b) => b - a).forEach(itemIndex => sess.inventory.splice(itemIndex, 1));
+            const inventoryBefore = safeJsonClone(sess.inventory);
+            const equipmentBefore = safeJsonClone(sess.equipment || {});
+            applyWorldInventoryRemovalPlan(sess, removal);
             stock.quantity += quantity;
             const statResult = applyPlayerStatChanges(world, sess, { [currencyDef.id]: total }, { showToast: false });
             if (!statResult.success && total > 0) {
                 // Roll back the item side if an unexpected stat validation failure occurs.
                 stock.quantity -= quantity;
-                for (let count = 0; count < quantity; count++) sess.inventory.push(stock.item);
+                sess.inventory = inventoryBefore;
+                sess.equipment = equipmentBefore;
                 return results.push({ ...base, item: stock.item, reason: 'currency_update_failed' });
             }
             results.push({ ...base, item: stock.item, success: true, unitPrice, total, balance: Number(sess.playerStats[currencyDef.id]) || 0, stock: stock.quantity });
@@ -20652,7 +23719,7 @@ function executeCommerceTransactions(world, sess, transactions) {
     return results;
 }
 
-function performAuthoritativeChecks(world, sess, checks) {
+function performAuthoritativeChecks(world, sess, checks, options = {}) {
     const results = [];
     if (!Array.isArray(checks)) return results;
     const rules = normalizeWorldGameRules(world);
@@ -20673,7 +23740,10 @@ function performAuthoritativeChecks(world, sess, checks) {
         const label = String(raw?.label || `Check ${index + 1}`).trim().slice(0, 120);
         // Model wording and IDs may change on reroll; the mechanical slot does
         // not. Engine-authored IDs make a roll immutable for this turn/index.
-        const checkId = String(raw?.force_resolve === true && raw?.id
+        const authorizedProvidedRoll = options.allowProvidedRoll === true
+            && raw?.provided_roll !== undefined && raw?.provided_roll !== null
+            && Number.isFinite(Number(raw.provided_roll));
+        const checkId = String(authorizedProvidedRoll && raw?.force_resolve === true && raw?.id
             ? raw.id : `check_${turn}_${index + 1}`).slice(0, 80);
         let existing = null;
         for (let historyIndex = sess.checkHistory.length - 1; historyIndex >= 0; historyIndex--) {
@@ -20686,7 +23756,7 @@ function performAuthoritativeChecks(world, sess, checks) {
         if (existing) {
             const replay = { ...existing, replayed: true };
             results.push(replay);
-            if (dice.visibility !== 'hidden') showToast(`↻ ${existing.label}: keeping ${existing.roll} → ${existing.total}`, 'info');
+            if (!options.silent && dice.visibility !== 'hidden') showToast(`↻ ${existing.label}: keeping ${existing.roll} → ${existing.total}`, 'info');
             return;
         }
         const statId = String(raw?.stat_id || '').trim();
@@ -20707,7 +23777,7 @@ function performAuthoritativeChecks(world, sess, checks) {
         const difficulty = Math.max(2, Math.min(dice.sides + 10,
             Math.trunc(Number(raw?.difficulty) || dice.defaultDifficulty)));
 
-        if (dice.resolution === 'player' && !Number.isFinite(Number(raw?.provided_roll)) && raw?.force_resolve !== true) {
+        if (dice.resolution === 'player' && !authorizedProvidedRoll) {
             const pendingRequest = {
                 id: checkId, label, stat_id: definition?.id || '', capability_id: capability?.id || '', modifier: situationalModifier,
                 difficulty, failure_cost: isPlainObject(raw?.failure_cost)
@@ -20721,11 +23791,11 @@ function performAuthoritativeChecks(world, sess, checks) {
             sess.pendingChecks = sess.pendingChecks.slice(0, 10);
             sess.pendingCheck = sess.pendingChecks[0] || pendingRequest;
             results.push({ id: checkId, label, statId: definition?.id || '', capabilityId: capability?.id || '', difficulty, pending: true, success: null });
-            showToast(`🎲 Check requested: ${label} · roll d${dice.sides} vs ${difficulty}`, 'info');
+            if (!options.silent) showToast(`🎲 Check requested: ${label} · roll d${dice.sides} vs ${difficulty}`, 'info');
             return;
         }
 
-        const provided = Number(raw?.provided_roll);
+        const provided = authorizedProvidedRoll ? Number(raw.provided_roll) : NaN;
         const roll = Number.isFinite(provided)
             ? Math.max(1, Math.min(dice.sides, Math.trunc(provided)))
             : 1 + Math.floor(stableWorldRoll(`${world.id}|${sess.id}|${turn}|${checkId}`) * dice.sides);
@@ -20757,13 +23827,16 @@ function performAuthoritativeChecks(world, sess, checks) {
                 ? applyPlayerStatChanges(world, sess, cost.stat_changes, { dryRun: true })
                 : { success: true, rejected: [] };
             const requestedItems = (Array.isArray(cost.inventory_remove) ? cost.inventory_remove : []).slice(0, 20);
-            const reservedIndices = [];
+            const preview = {
+                inventory: safeJsonClone(Array.isArray(sess.inventory) ? sess.inventory : []),
+                equipment: safeJsonClone(sess.equipment || {})
+            };
+            const previewRemovedUnits = [];
             const unavailableItems = [];
             requestedItems.forEach(item => {
-                const candidate = findInventoryMatchIndices(sess.inventory, item, sess.inventory.length)
-                    .find(itemIndex => !reservedIndices.includes(itemIndex));
-                if (candidate === undefined) unavailableItems.push(String(item));
-                else reservedIndices.push(candidate);
+                const removal = planWorldInventoryRemoval(preview.inventory, item, 1);
+                if (!removal.ok) unavailableItems.push(String(item));
+                else previewRemovedUnits.push(...applyWorldInventoryRemovalPlan(preview, removal));
             });
             if (statPreview.rejected.length || unavailableItems.length) {
                 result.failureCost = {
@@ -20776,13 +23849,13 @@ function performAuthoritativeChecks(world, sess, checks) {
                 result.failureCost = { applied: true };
                 if (isPlainObject(cost.stat_changes) && Object.keys(cost.stat_changes).length) {
                     result.failureCost.stats = applyPlayerStatChanges(world, sess, cost.stat_changes, {
-                        cause: String(cost.cause || `Failed check: ${label}`).slice(0, 240)
+                        cause: String(cost.cause || `Failed check: ${label}`).slice(0, 240),
+                        showToast: !options.silent
                     });
                 }
-                result.failureCost.itemsRemoved = [];
-                reservedIndices.sort((a, b) => b - a).forEach(itemIndex => {
-                    result.failureCost.itemsRemoved.unshift(sess.inventory.splice(itemIndex, 1)[0]);
-                });
+                sess.inventory = preview.inventory;
+                sess.equipment = preview.equipment;
+                result.failureCost.itemsRemoved = previewRemovedUnits;
                 const time = Math.max(0, Math.min(14400, parseInt(cost.time_skip_minutes) || 0));
                 if (time > 0) {
                     sess.bonusTimeMinutes = (sess.bonusTimeMinutes || 0) + time;
@@ -20800,7 +23873,7 @@ function performAuthoritativeChecks(world, sess, checks) {
         if (Array.isArray(sess.pendingChecks)) sess.pendingChecks = sess.pendingChecks.filter(item => item.id !== checkId);
         sess.pendingCheck = sess.pendingChecks?.[0] || null;
         results.push(result);
-        if (dice.visibility !== 'hidden') {
+        if (!options.silent && dice.visibility !== 'hidden') {
             showToast(`${success ? '✓' : '×'} ${label}: ${roll}${statModifier || situationalModifier ? ` → ${total}` : ''} vs ${difficulty}`, success ? 'success' : 'info');
         }
     });
@@ -20898,9 +23971,9 @@ function makeQuestId(sess, title = 'quest', requestedId = '') {
 
 function normalizeQuestRewards(rawRewards) {
     const raw = isPlainObject(rawRewards) ? rawRewards : {};
-    const items = [...new Set((Array.isArray(raw.items) ? raw.items : [])
+    const items = (Array.isArray(raw.items) ? raw.items : [])
         .map(item => String(item || '').trim().slice(0, 160))
-        .filter(Boolean))].slice(0, 100);
+        .filter(Boolean).slice(0, 100);
     const stats = {};
     if (isPlainObject(raw.stats || raw.stat_changes)) {
         Object.entries(raw.stats || raw.stat_changes).slice(0, 100).forEach(([key, value]) => {
@@ -20930,6 +24003,7 @@ function normalizeQuestObjective(rawObjective, index = 0, usedIds = new Set()) {
     let current = Math.max(0, Math.min(1e9, Number(raw.current ?? raw.progress) || 0));
     let status = ['active', 'completed', 'failed'].includes(raw.status) ? raw.status : 'active';
     if (status === 'completed') current = Math.max(current, required);
+    if (type === 'manual') current = Math.min(current, required);
     if (current >= required && status === 'active') status = 'completed';
     return {
         id,
@@ -20942,6 +24016,60 @@ function normalizeQuestObjective(rawObjective, index = 0, usedIds = new Set()) {
         status,
         optional: !!raw.optional
     };
+}
+
+// Starting quests are a template, not played state. Never carry progress or a
+// reward receipt from an imported template into a new timeline.
+function normalizeWorldStartingQuests(world) {
+    if (!world) return [];
+    const usedIds = new Set();
+    world.startingQuests = (Array.isArray(world.startingQuests) ? world.startingQuests : [])
+        .filter(isPlainObject).slice(0, 100).map((raw, index) => {
+            const title = String(raw.title || `Starting quest ${index + 1}`).trim().slice(0, 200);
+            const id = makeQuestId({ quests: [...usedIds].map(value => ({ id: value })) }, title, raw.id);
+            usedIds.add(id.toLowerCase());
+            const objectiveIds = new Set();
+            const objectives = (Array.isArray(raw.objectives) ? raw.objectives : [])
+                .slice(0, 100).map((objective, objectiveIndex) => ({
+                    ...normalizeQuestObjective(objective, objectiveIndex, objectiveIds),
+                    current: 0,
+                    status: 'active'
+                }));
+            return {
+                id,
+                title,
+                description: String(raw.description || '').trim().slice(0, 1000),
+                giver: String(raw.giver || '').trim().slice(0, 160),
+                objectives,
+                rewards: normalizeQuestRewards(raw.rewards)
+            };
+        });
+    return world.startingQuests;
+}
+
+function seedWorldStartingQuests(world, sess) {
+    if (!sess || sess.startingQuestsSeeded) return false;
+    const templates = normalizeWorldStartingQuests(world);
+    normalizeQuestState(world, sess);
+    templates.forEach(template => {
+        // A creator may have already added this quest while setting up the
+        // timeline. Do not duplicate it or reset its progress.
+        if (findSessionQuest(sess, template.id)) return;
+        sess.quests.push({
+            ...safeJsonClone(template),
+            status: 'active',
+            objectives: template.objectives.map(objective => ({ ...objective, current: 0, status: 'active' })),
+            rewardsGranted: false,
+            rewardReceipt: '',
+            createdTurn: Math.max(1, Number(sess.turnCount) || 1),
+            updatedTurn: Math.max(1, Number(sess.turnCount) || 1),
+            resolvedTurn: null,
+            rewardGrantedTurn: null,
+            completionNote: ''
+        });
+    });
+    sess.startingQuestsSeeded = true;
+    return true;
 }
 
 function normalizeQuestState(world, sess) {
@@ -21002,14 +24130,40 @@ function grantQuestRewards(world, sess, quest) {
     if (!quest || quest.status !== 'completed' || quest.rewardsGranted) return false;
     const modules = normalizeWorldGameRules(world).modules;
     const rewards = normalizeQuestRewards(quest.rewards);
+    // A completed quest must not silently consume its one-time payout marker
+    // when an imported/model-created reward names a nonexistent stat or a
+    // disabled system. Preflight the whole bundle before granting any part;
+    // the author can fix the reward and the next evaluation will settle it.
+    const pending = [];
+    if (rewards.items.length && !modules.inventory) pending.push('inventory is disabled');
+    if (Object.keys(rewards.stats).length && !modules.stats) pending.push('stats are disabled');
+    if (rewards.factionReputation.length && !(modules.relationships || modules.livingWorld)) {
+        pending.push('faction reputation is disabled');
+    }
+    if (modules.stats && Object.keys(rewards.stats).length) {
+        const preview = applyPlayerStatChanges(world, sess, rewards.stats, { dryRun: true });
+        if (preview.rejected.length) pending.push(`invalid stat reward: ${preview.rejected.map(item =>
+            item.statId || item.reason).join(', ')}`);
+    }
+    if (rewards.factionReputation.length) {
+        const existing = new Set((Array.isArray(sess.factions) ? sess.factions : [])
+            .flatMap(item => [questTextKey(item.id), questTextKey(item.name)]));
+        const newNames = new Set(rewards.factionReputation.map(entry => questTextKey(entry.factionId))
+            .filter(key => !existing.has(key)));
+        if ((sess.factions?.length || 0) + newNames.size > 200) pending.push('faction limit reached');
+    }
+    if (pending.length) {
+        quest.rewardReceipt = pending.join('; ').slice(0, 500);
+        return false;
+    }
     const receipt = [];
     if (!Array.isArray(sess.inventory)) sess.inventory = [];
     if (modules.inventory) {
         rewards.items.forEach(item => {
-            if (!sess.inventory.some(existing => questTextKey(existing) === questTextKey(item))) {
-                sess.inventory.push(item);
-                receipt.push(item);
-            }
+            // Each declared reward is one unit. Owning another copy (perhaps
+            // from another quest) must not erase this quest's payout.
+            sess.inventory.push(item);
+            receipt.push(item);
         });
     }
     if (modules.stats) {
@@ -21062,10 +24216,15 @@ function evaluateQuestObjective(world, sess, objective) {
         const target = getLocationRef(world, objective.target);
         current = target && sess.playerLocation === target.id ? objective.required : 0;
     } else if (objective.type === 'inventory') {
-        current = targetKey ? (sess.inventory || []).filter(item => {
-            const key = questTextKey(item);
-            return key === targetKey || key.includes(targetKey) || targetKey.includes(key);
-        }).length : 0;
+        current = targetKey ? (sess.inventory || []).reduce((total, item) => {
+            const itemName = globalThis.HordeRpgMechanics?.itemName(item)
+                || (typeof item === 'string' ? item : item?.name || '');
+            const key = questTextKey(itemName);
+            if (!key || !(key === targetKey || key.includes(targetKey) || targetKey.includes(key))) return total;
+            const quantity = item && typeof item === 'object' && item.quantity !== undefined
+                ? Math.max(0, Math.floor(Number(item.quantity) || 0)) : 1;
+            return total + quantity;
+        }, 0) : 0;
     } else if (objective.type === 'stat') {
         current = Number(sess.playerStats?.[objective.target]) || 0;
     } else if (objective.type === 'secret') {
@@ -21099,6 +24258,7 @@ function evaluateQuestProgress(world, sess, options = {}) {
     (sess.quests || []).forEach(quest => {
         const beforeStatus = quest.status;
         const beforeObjectives = JSON.stringify(quest.objectives);
+        const beforeRewardReceipt = quest.rewardReceipt;
         if (quest.status === 'active' && quest.objectives.length) {
             quest.objectives.forEach(objective => evaluateQuestObjective(world, sess, objective));
             const required = quest.objectives.filter(objective => !objective.optional);
@@ -21122,6 +24282,7 @@ function evaluateQuestProgress(world, sess, options = {}) {
             result.rewardsGranted.push(quest.id);
             result.changed = true;
         }
+        if (quest.rewardReceipt !== beforeRewardReceipt) result.changed = true;
     });
     return result;
 }
@@ -21181,13 +24342,17 @@ function applyQuestUpdates(world, sess, updates) {
                         objective.expected = String(rawObjective.expected || rawObjective.value || '').trim().slice(0, 80);
                     }
                     if (rawObjective.required !== undefined) objective.required = Math.max(1, Math.min(1e9, Number(rawObjective.required) || 1));
-                    if (rawObjective.current !== undefined) objective.current = Math.max(0, Math.min(1e9, Number(rawObjective.current) || 0));
-                    if (rawObjective.progress_change !== undefined) {
+                    const hasAbsoluteProgress = rawObjective.current !== undefined;
+                    if (hasAbsoluteProgress) objective.current = Math.max(0, Math.min(1e9, Number(rawObjective.current) || 0));
+                    // Some models supply both an absolute value and a delta.
+                    // Applying both counts the same scene twice; absolute wins.
+                    if (!hasAbsoluteProgress && rawObjective.progress_change !== undefined) {
                         objective.current = Math.max(0, Math.min(1e9, objective.current + Number(rawObjective.progress_change || 0)));
                     }
                     if (['active', 'completed', 'failed'].includes(rawObjective.status)) objective.status = rawObjective.status;
                     if (rawObjective.optional !== undefined) objective.optional = !!rawObjective.optional;
                     if (objective.status === 'completed') objective.current = Math.max(objective.current, objective.required);
+                    if (objective.type === 'manual') objective.current = Math.min(objective.current, objective.required);
                 }
             });
         }
@@ -21226,7 +24391,7 @@ function getQuestPrompt(world, sess) {
     // empty ledger had no reason to ever create one — the quest system simply
     // never started. State plainly when a quest comes into existence.
     lines.push('WHEN TO OPEN A QUEST: the moment the player takes on anything that outlives this scene — accepts a job, errand, favour or bargain; makes a promise; sets themselves a goal; is given a deadline, a debt, or a warning to act on — call quests_update with a title and, where the fiction supports it, concrete objectives. This is true of everyday obligations ("pick Emily up at six", "pay Greg back by Friday") as much as of grand adventures. Do not wait for the player to ask for a quest, and do not announce it as a game mechanic — record it and keep narrating.');
-    lines.push('Use these exact quest and objective IDs in quests_update. Never recreate an existing quest under a new title. The engine evaluates structured objectives and grants declared rewards exactly once; do not duplicate declared rewards through inventory_add or stat_changes.');
+    lines.push('Use these exact quest and objective IDs in quests_update. Never recreate an existing quest under a new title. Manual objectives do not advance automatically: when direct, on-screen evidence fulfills one, include its exact quest ID and objective ID with current set to required and status completed in this turn receipt. Merely reaching an NPC location or knowing hidden lore is not confirmation; leave the objective active until the player witnesses or establishes the fact. The engine evaluates structured objectives and grants declared rewards exactly once; do not duplicate declared rewards through inventory_add or stat_changes.');
     return `\n${lines.join('\n')}\n`;
 }
 
@@ -21306,7 +24471,7 @@ function openWorldQuestManager(questId = '') {
     }
     const rewardSummary = quest ? formatQuestRewardSummary(quest) : '';
     document.getElementById('m-quest-rewards').textContent = rewardSummary
-        ? `${rewardSummary}${quest.rewardsGranted ? `\nGranted: ${quest.rewardReceipt}` : ''}`
+        ? `${rewardSummary}${quest.rewardReceipt ? `\n${quest.rewardsGranted ? 'Granted' : 'Pending'}: ${quest.rewardReceipt}` : ''}`
         : 'No material reward declared.';
     modal.classList.remove('hidden');
     document.getElementById('m-quest-title').focus();
@@ -21394,7 +24559,8 @@ async function createNewWorldSession() {
 
     inst.sessions.push(newSess);
     inst.activeSessionId = newSess.id;
-    await saveState();
+    resetWorldInsightFilters();
+    await saveWorldsState();
     renderWorldPlayState();
     openSessionZero(() => executeWorldTurn("init"));
     showToast('New Timeline Created');
@@ -21531,7 +24697,7 @@ function openSessionZero(onDone) {
             : 'No Persona selected. The Starting Life will be the only identity source.';
         renderSessionRoleSetup(world, sess, selected);
     };
-    personaSelect.onchange = () => { renderPersonaPreview(); saveStatus.textContent = 'Unsaved identity change'; };
+    personaSelect.onchange = () => { renderPersonaPreview(); refreshLifeSeedStatus(); saveStatus.textContent = 'Unsaved identity change'; };
     renderPersonaPreview();
     const alreadyInitialized = !!sess.lifeSeed?.initialized;
     personaSelect.disabled = alreadyInitialized;
@@ -21540,9 +24706,23 @@ function openSessionZero(onDone) {
     lifeSeedEnabled.checked = !alreadyInitialized;
     lifeSeedEnabled.disabled = alreadyInitialized || !isFirstRun;
     lifeSeedOption.classList.toggle('hidden', alreadyInitialized || !isFirstRun);
-    lifeSeedStatus.textContent = alreadyInitialized
-        ? `Active life initialized: ${sess.lifeSeed.summary || `${sess.lifeSeed.people?.length || 0} persistent people`}`
-        : isFirstRun ? `This runs once using ${structuredModelFor(world)}. If that model fails, a deterministic initializer preserves the core household facts. It will not regenerate or overwrite this timeline later.` : '';
+    const refreshLifeSeedStatus = () => {
+        if (alreadyInitialized) {
+            lifeSeedStatus.textContent = `Active life initialized: ${sess.lifeSeed.summary || `${sess.lifeSeed.people?.length || 0} persistent people`}`;
+            return;
+        }
+        if (!isFirstRun) { lifeSeedStatus.textContent = ''; return; }
+        if (!lifeSeedEnabled.checked) {
+            lifeSeedStatus.textContent = 'Life setup is off. Your Starting Life still applies, but no prior home or social network will be generated.';
+            return;
+        }
+        const selectedPersona = state.personas.find(persona => persona.id === personaSelect.value) || null;
+        const selectedOrigin = (world.startingLives || []).find(life => life.id === sess.originId) || null;
+        lifeSeedStatus.textContent = minimalTimelineOriginPlan(world, sess, selectedPersona, selectedOrigin)
+            ? 'This outsider start has no authored home or prior local ties. It starts immediately from the selected facts; no model request or provider credits are needed for life setup.'
+            : `Life setup calls ${structuredModelFor(world)} once and may use provider credits. If it cannot finish, a deterministic initializer preserves the authored facts. It will not regenerate this timeline later.`;
+    };
+    lifeSeedEnabled.onchange = refreshLifeSeedStatus;
 
     normalizeWorldSandboxConfig(world);
     const canChooseOrigin = !!(originSection && originList && world?.startingLives?.length
@@ -21575,6 +24755,7 @@ function openSessionZero(onDone) {
                     applyStartingLifeToSession(world, sess, life.id);
                     renderOrigins();
                     renderSessionRoleSetup(world, sess, state.personas.find(persona => persona.id === personaSelect.value) || null);
+                    refreshLifeSeedStatus();
                     saveStatus.textContent = `Starting as ${life.name}`;
                 };
                 originList.appendChild(card);
@@ -21583,6 +24764,7 @@ function openSessionZero(onDone) {
         renderOrigins();
         renderSessionRoleSetup(world, sess, state.personas.find(persona => persona.id === personaSelect.value) || null);
     }
+    refreshLifeSeedStatus();
 
     overlay.classList.remove('hidden');
     const close = () => overlay.classList.add('hidden');
@@ -21682,11 +24864,20 @@ function openSessionZero(onDone) {
         try {
             if (seedLife && isFirstRun && lifeSeedEnabled.checked && !s.lifeSeed?.initialized) {
                 saveStatus.textContent = 'Initializing home and social life…';
-                lifeSeedStatus.textContent = 'Building a validated household, routine and social graph from your selections…';
+                const startingOrigin = (world.startingLives || []).find(life => life.id === s.originId) || null;
+                lifeSeedStatus.textContent = minimalTimelineOriginPlan(world, s, selectedPersona, startingOrigin)
+                    ? 'Applying the Starting Life without a model request…'
+                    : 'Building a validated household, routine and social graph from your selections…';
                 const result = await initializeTimelineLife(world, s, selectedPersona);
                 lifeSeedStatus.textContent = result.summary;
             }
-            await saveState();
+            // Only a never-played timeline receives authored starting quests.
+            // Reopening setup or reloading a saved timeline must not recreate
+            // completed objectives or pay its rewards again.
+            if (isFirstRun && !sessionSetupSnapshot.setupComplete && !s.startingQuestsSeeded) {
+                seedWorldStartingQuests(world, s);
+            }
+            await saveWorldsState();
             saveStatus.textContent = 'Saved';
             return true;
         } catch (error) {
@@ -21744,11 +24935,13 @@ function openNpcDossier(npcId) {
             <span class="mini-tag">📍 ${escapeHTML(locName)}</span>
             ${npc.isMajor ? '<span class="mini-tag">⭐ major</span>' : ''}
             ${npc.sessionOrigin ? '<span class="mini-tag" title="Created by the story in this timeline">✨ story-born</span>' : ''}
-            ${entState.relationshipToPlayer ? `<span class="mini-tag">🤝 ${escapeHTML(entState.relationshipToPlayer)}</span>` : ''}
             ${npc.role ? `<span class="mini-tag">💼 ${escapeHTML(npc.role)}</span>` : ''}
-            ${entState.currentActivity ? `<span class="mini-tag">🕒 ${escapeHTML(entState.currentActivity)}</span>` : ''}
         </div>
         ${npc.description ? `<p style="font-size:0.85rem; color:var(--text-2); margin-bottom:12px;">${escapeHTML(npc.description)}</p>` : ''}
+        <details class="world-director-details">
+            <summary>Director notes & controls <span>May reveal private motives and engine state</span></summary>
+            ${entState.relationshipToPlayer ? `<p class="world-director-fact">Relationship to player: ${escapeHTML(entState.relationshipToPlayer)}</p>` : ''}
+            ${entState.currentActivity ? `<p class="world-director-fact">Current activity: ${escapeHTML(entState.currentActivity)}</p>` : ''}
         ${npc.persona ? `<div class="form-section"><label class="form-label">Personality</label><p style="font-size:0.8rem; color:var(--text-2); white-space:pre-wrap;">${escapeHTML(npc.persona)}</p></div>` : ''}
         <div class="form-section">
             <label class="form-label">Disposition Toward You (drag to adjust)</label>
@@ -21784,6 +24977,7 @@ function openNpcDossier(npcId) {
                 }).join('')}
             </div>
         </div>` : ''}
+        </details>
         <div class="form-section">
             <label class="form-label">Memories & Observations (${obs.length})</label>
             <div id="dossier-obs-list" style="display:flex; flex-direction:column; gap:6px; max-height:220px; overflow-y:auto;">
@@ -21804,7 +24998,7 @@ function openNpcDossier(npcId) {
         dispoSaveTimer = setTimeout(async () => {
             if (!sess.entityStates[npc.id]) sess.entityStates[npc.id] = { location: sess.playerLocation };
             sess.entityStates[npc.id].disposition = v;
-            await saveState();
+            await saveWorldsState();
         }, 400);
     };
 
@@ -21837,7 +25031,7 @@ function openNpcDossier(npcId) {
             delete es.goalDeadlineTurn;
             delete es.goalStatus;
         }
-        await saveState();
+        await saveWorldsState();
         showToast(goal ? `🎯 Goal set for ${npc.name}` : `Goal cleared for ${npc.name}`, 'success');
     };
 
@@ -21852,7 +25046,7 @@ function openNpcDossier(npcId) {
         `;
         row.querySelector('button').onclick = async () => {
             entState.observations.splice(idx, 1);
-            await saveState();
+            await saveWorldsState();
             openNpcDossier(npcId); // re-render
         };
         obsList.appendChild(row);
@@ -21867,6 +25061,8 @@ function enterWorld(worldId) {
     if (!world) return;
     
     state.activeWorldId = worldId;
+    resetWorldInsightFilters();
+    setWorldStatusTab('now');
     
     // Init Instance if not present
     if (!state.worldInstances[worldId]) {
@@ -21874,15 +25070,26 @@ function enterWorld(worldId) {
             sessions: [],
             activeSessionId: null
         };
-        // This will trigger migration/init in getCurrentWorldSession()
+        // Explicit preparation below creates the first timeline.
     }
     
-    const sess = getCurrentWorldSession();
+    const sess = prepareCurrentWorldSession();
     normalizeLivingWorldState(world, sess);
     const entryScheduleSync = syncNPCSchedules(world, sess);
-    if (entryScheduleSync.moves > 0) saveState().catch(() => {});
+    const entryQuests = evaluateQuestProgress(world, sess);
+    if (entryScheduleSync.moves > 0 || entryQuests.changed) saveWorldsState().catch(() => {});
     
     document.getElementById('world-active-name').textContent = 'Living world';
+    // On phones the status column otherwise consumes most of the story area.
+    // Keep it one tap away, without hiding it on wider screens.
+    const hud = document.querySelector('#world-play-view .world-status-col');
+    const hudToggle = document.getElementById('world-hud-toggle');
+    if (hud && hudToggle) {
+        const compact = window.matchMedia('(max-width: 600px)').matches;
+        hud.classList.toggle('is-collapsed', compact);
+        hudToggle.textContent = compact ? '◧ World info' : '◫ Hide world info';
+        hudToggle.setAttribute('aria-expanded', String(!compact));
+    }
     renderWorldPlayState();
     switchView('worldPlay');
     
@@ -21892,21 +25099,223 @@ function enterWorld(worldId) {
     }
 }
 
-function renderWorldPlayState() {
-    const world = state.worlds.find(w => w.id === state.activeWorldId);
-    const inst = state.worldInstances[state.activeWorldId];
-    const sess = getCurrentWorldSession(); // Triggers Healing Pass
-    if (!world || !inst || !sess) return;
-    const ruleModules = normalizeWorldGameRules(world).modules;
-    const questEvaluation = evaluateQuestProgress(world, sess);
-    if (questEvaluation.changed) saveState().catch(() => {});
+async function travelThroughWorldExit(world, sess, exit) {
+    if (worldTurnInProgress || worldMutationInProgress) {
+        showToast('Finish the current World action before travelling.', 'info');
+        return { ok: false, reason: 'busy' };
+    }
+    if (!world || !sess || state.activeWorldId !== world.id || getCurrentWorldSession() !== sess) {
+        return { ok: false, reason: 'stale_timeline' };
+    }
+    const playerState = normalizePlayerRulesState(world, sess);
+    if (playerState.status !== 'active') {
+        showToast(playerState.status === 'dead'
+            ? 'Game Over — this timeline cannot continue.'
+            : 'You are incapacitated and cannot travel until you recover.', 'info');
+        return { ok: false, reason: playerState.status };
+    }
+    if (sess.pendingChecks?.length || sess.pendingCheck) {
+        showToast('Resolve the pending check before travelling.', 'info');
+        return { ok: false, reason: 'pending_check' };
+    }
+    const target = resolveWorldExitTarget(worldForSession(world, sess), exit);
+    if (!target) {
+        showToast('This exit no longer resolves to one place. Repair it in World Studio.', 'error');
+        return { ok: false, reason: 'broken_exit' };
+    }
 
-    // Auto-sync start location if history is empty (fixes workshop start location updates not applying)
-    if (sess.history.length === 0) {
-        const defaultStartId = world.startLocationId || (world.locations[0]?.id || null);
-        if (defaultStartId && sess.playerLocation !== defaultStartId) {
-            sess.playerLocation = defaultStartId;
+    worldMutationInProgress = true;
+    try {
+        const attempt = attemptWorldStateMutation(world, sess, () => {
+            const movement = movePlayerAlongWorldPath(world, sess, target, { exit, showTravelToast: false });
+            if (movement.ok && movement.moved) {
+                recordEngineWorldTravel(world, sess, movement);
+                // A background World Agent may have drafted against the old
+                // room. Its epoch must no longer match after direct travel.
+                bumpWorldEpoch(sess);
+                rollForScenePopulation(target.id, false);
+                evaluateQuestProgress(world, sess);
+                const companionNames = (movement.followersMoved || []).map(id =>
+                    sessionNpcs(worldForSession(world, sess), sess).find(npc => npc.id === id)?.name).filter(Boolean);
+                addWorldMessage('system', `You move to ${target.name}${companionNames.length ? ` with ${companionNames.join(', ')}` : ''}.`,
+                    { deferPersist: true, deferEmbedding: true }, sess, world);
+            }
+            return movement;
+        }, movement => movement?.ok && movement?.moved);
+        if (!attempt.accepted) {
+            const reason = attempt.result?.reason || 'unreachable';
+            showToast(reason === 'already_there' ? `You are already at ${target.name}.`
+                : reason === 'impassable_destination' ? `${attempt.result.blockedLocationName || target.name} is impassable: ${attempt.result.blockedLabel || 'route closed'}.`
+                : reason === 'required_item' ? `You need ${attempt.result.requiredItem} to use this exit${attempt.result.allowCheckUnlock ? ', or you can try to open it with a check' : ''}.`
+                : reason === 'locked_exit' ? 'This exit is locked. Describe how you try to open it in chat.'
+                : `${target.name} is not reachable from here.`, 'info');
+            return { ok: false, reason };
         }
+        try {
+            await saveWorldsState({ worldId: world.id });
+            attempt.commit();
+        } catch (error) {
+            attempt.rollback();
+            if (state.activeWorldId === world.id && getCurrentWorldSession() === sess) renderWorldPlayState();
+            showToast('Travel was not saved. Your previous location is restored; retry after checking storage.', 'error');
+            return { ok: false, reason: 'save_failed', error };
+        }
+        if (attempt.result.travelMinutes > 0) {
+            showToast(`🕒 Travel time: +${attempt.result.travelMinutes}m`, 'info');
+        }
+        if (state.activeWorldId === world.id && getCurrentWorldSession() === sess) renderWorldPlayState();
+        return attempt.result;
+    } finally {
+        worldMutationInProgress = false;
+    }
+}
+
+function recordEngineWorldTravel(world, sess, movement) {
+    if (!movement?.ok || !movement.moved || !Array.isArray(movement.path) || movement.path.length < 2) return null;
+    const fromId = movement.path[0];
+    const toId = movement.path[movement.path.length - 1];
+    const frame = buildWorldSceneFrame(world, sess);
+    const followers = (movement.followersMoved || []).filter(id => sess.entityStates?.[id]?.location === toId);
+    const witnesses = ['player', ...followers];
+    const version = Math.max(0, Number(sess.worldStateVersion) || 0) + 1;
+    const evidence = `The player travelled from ${getLocationRef(world, fromId)?.name || fromId} to ${getLocationRef(world, toId)?.name || toId} through a mapped exit.`;
+    const events = [{
+        id: `engine_travel_${version}_player`, type: 'movement', actor_id: 'player', status: 'completed',
+        from_location_id: fromId, to_location_id: toId, movement_mode: 'voluntary',
+        caused_by_actor_id: null, participants: followers, witnessed_by: witnesses,
+        evidence, cause: 'Player used a mapped exit.'
+    }, ...followers.map((id, index) => ({
+        id: `engine_travel_${version}_follower_${index + 1}`, type: 'movement', actor_id: id,
+        status: 'completed', from_location_id: fromId, to_location_id: toId,
+        movement_mode: 'voluntary', caused_by_actor_id: null,
+        participants: ['player'], witnessed_by: witnesses,
+        evidence: `${sessionNpcs(worldForSession(world, sess), sess).find(npc => npc.id === id)?.name || id} accompanied the player to ${getLocationRef(world, toId)?.name || toId}.`,
+        cause: 'Active escort followed the player through a mapped exit.'
+    }))];
+    const receipt = {
+        version: 1, turn_id: `engine_travel_${version}`,
+        summary: `Mapped travel to ${getLocationRef(world, toId)?.name || toId}.`,
+        scene: {
+            player_location_id: toId, player_location_changed: true,
+            present_character_ids: frame.present_character_ids
+        },
+        events,
+        entity_updates: Object.entries(frame.activities || {}).map(([entity_id, details]) => ({
+            entity_id, location_id: toId, activity: details.activity || '',
+            interacting_with: details.interacting_with || []
+        })),
+        state_updates: {}
+    };
+    return recordWorldTurnCommit(world, sess, {
+        receipt, acceptedEvents: events, informationalEvents: [], rejectedEvents: [],
+        entityPatches: [], legacyArgs: {}, sceneAssertion: receipt.scene
+    }, { movementResult: { ok: true, moved: true, path: [...movement.path],
+        followersMoved: [...followers], travelMinutes: Number(movement.travelMinutes) || 0 } }, 'engine_travel');
+}
+
+async function commitWorldPlayerStateChange(world, sess, apply) {
+    if (worldTurnInProgress || worldMutationInProgress) {
+        showToast('Finish the current World action first.', 'info');
+        return false;
+    }
+    if (!world || !sess || state.activeWorldId !== world.id || getCurrentWorldSession() !== sess) {
+        showToast('This timeline changed. Reopen the World view.', 'info');
+        return false;
+    }
+    worldMutationInProgress = true;
+    try {
+        const attempt = attemptWorldStateMutation(world, sess, () => {
+            const result = apply();
+            if (result !== false) {
+                bumpWorldEpoch(sess);
+                evaluateQuestProgress(world, sess);
+            }
+            return result;
+        }, result => result !== false);
+        if (!attempt.accepted) return false;
+        try {
+            await saveWorldsState({ worldId: world.id });
+            attempt.commit();
+        } catch (error) {
+            attempt.rollback();
+            showToast('Your change was not saved and has been restored. Check storage, then retry.', 'error');
+            if (state.activeWorldId === world.id && getCurrentWorldSession() === sess) renderWorldPlayState();
+            return false;
+        }
+        if (state.activeWorldId === world.id && getCurrentWorldSession() === sess) renderWorldPlayState();
+        return true;
+    } catch (error) {
+        showToast(`World action failed: ${error.message || error}`, 'error');
+        return false;
+    } finally {
+        worldMutationInProgress = false;
+    }
+}
+
+// Drawing the play view may normalize legacy-looking values for display, but
+// those normalizers must never edit canonical campaign state or enqueue a save.
+// Copy only the small, mutable view domains: history, geography, and media data
+// remain shared/read-only so a long campaign does not clone megabytes on render.
+function worldPlayReadProjection(world, sess) {
+    const clone = value => safeJsonClone(value);
+    return {
+        world: {
+            ...world,
+            hudConfig: clone(world.hudConfig || {}),
+            gameRules: clone(world.gameRules || {}),
+            presentation: clone(world.presentation || {}),
+            mediaAssets: Array.isArray(world.mediaAssets) ? world.mediaAssets.slice() : []
+        },
+        sess: {
+            ...sess,
+            playerState: clone(sess.playerState || {}),
+            inventory: clone(sess.inventory || []),
+            equipment: clone(sess.equipment || {}),
+            checkHistory: clone(sess.checkHistory || []),
+            quests: clone(sess.quests || []),
+            worldClock: sess.worldClock ? clone(sess.worldClock) : null,
+            playerStats: sess.playerStats || {},
+            entityStates: sess.entityStates || {},
+            locationStates: sess.locationStates || {},
+            npcScheduleOverrides: sess.npcScheduleOverrides || {},
+            scheduledEvents: Array.isArray(sess.scheduledEvents) ? sess.scheduledEvents : [],
+            factions: Array.isArray(sess.factions) ? sess.factions : [],
+            worldNews: Array.isArray(sess.worldNews) ? sess.worldNews : [],
+            threads: Array.isArray(sess.threads) ? sess.threads : [],
+            revealedSecrets: Array.isArray(sess.revealedSecrets) ? sess.revealedSecrets : [],
+            economy: { ...(sess.economy || {}), markets: sess.economy?.markets || {} },
+            livingWorldActivity: sess.livingWorldActivity || {},
+            playstyle: { ...(sess.playstyle || {}), dominant: sess.playstyle?.dominant || [] }
+        }
+    };
+}
+
+function renderWorldPlayState() {
+    const sourceWorld = state.worlds.find(w => w.id === state.activeWorldId);
+    const inst = state.worldInstances[state.activeWorldId];
+    const sourceSess = getCurrentWorldSession();
+    if (!sourceWorld || !inst || !sourceSess) return;
+    const { world, sess } = worldPlayReadProjection(sourceWorld, sourceSess);
+    const ruleModules = normalizeWorldGameRules(world).modules;
+
+    const urgentStakes = document.getElementById('world-urgent-stakes');
+    if (urgentStakes) {
+        const clock = getWorldTimeData(world, sess);
+        const visibleDeadlines = (sess.scheduledEvents || [])
+            .filter(event => event?.status === 'scheduled' && event.urgent === true)
+            .sort((a, b) => worldEventMinutesRemaining(world, sess, a, clock)
+                - worldEventMinutesRemaining(world, sess, b, clock));
+        const recentAftermath = (sess.consequences || []).filter(item =>
+            item.type === 'deadline' && item.state !== 'resolved' && item.visibility !== 'hidden').at(-1);
+        const messages = [];
+        if (visibleDeadlines.length) {
+            const event = visibleDeadlines[0];
+            messages.push(`Urgent · ${event.title} · ${describeWorldEventDeadline(world, sess, event, clock)}`);
+            if (visibleDeadlines.length > 1) messages.push(`${visibleDeadlines.length - 1} more deadline${visibleDeadlines.length === 2 ? '' : 's'} in World info`);
+        }
+        if (recentAftermath) messages.push(`Consequence · ${recentAftermath.title}${recentAftermath.detail ? ` — ${recentAftermath.detail}` : ''}`);
+        urgentStakes.textContent = messages.join('  •  ');
+        urgentStakes.classList.toggle('hidden', messages.length === 0);
     }
 
     // 1. Core Header
@@ -21924,7 +25333,7 @@ function renderWorldPlayState() {
     // Apply the optional presentation layer. Canonical location/session state
     // chooses the visual; the visual can never choose or mutate game state.
     const playView = document.getElementById('world-play-view');
-    const presentation = normalizeWorldPresentation(world);
+    const presentation = worldPresentationForDisplay(world);
     const requestedPresentation = ['classic', 'cinematic'].includes(sess.presentationMode)
         ? sess.presentationMode : (presentation.enabled ? presentation.mode : 'classic');
     const visualLocation = world.locations.find(location => location.id === sess.playerLocation);
@@ -22017,65 +25426,64 @@ function renderWorldPlayState() {
     const loc = playWorldView.locations.find(l => l.id === sess.playerLocation); // session-scoped geography
     document.getElementById('world-loc-name').textContent = loc ? loc.name : 'Unknown Realm';
     document.getElementById('world-loc-desc').textContent = loc ? loc.description : 'The surroundings are indistinct.';
+    document.getElementById('world-mobile-loc-name').textContent = loc ? loc.name : 'Unknown Realm';
 
     const exitList = document.getElementById('world-exits-list');
     exitList.innerHTML = '';
+    const mobileExits = document.getElementById('world-mobile-exits-list');
+    mobileExits.replaceChildren();
+    const exitCount = Array.isArray(loc?.exits) ? loc.exits.length : 0;
+    document.getElementById('world-mobile-exit-count').textContent = `${exitCount} exit${exitCount === 1 ? '' : 's'}${exitCount > 4 ? ' · scroll for more' : ''}`;
     if (loc && loc.exits) {
         loc.exits.forEach(exit => {
             const isObj = typeof exit === 'object';
             const exitText = isObj ? (exit.text || "") : exit;
             const oneWay = isObj ? exit.isOneWay : false;
+            const requirement = worldExitRequirement(sess, exit, loc.id);
+            const destination = resolveWorldExitTarget(playWorldView, exit);
+            const travelBlock = destination && worldLocationTravelBlock(sess, destination.id);
 
             const btn = document.createElement('button');
             btn.className = 'btn btn-ghost btn-full';
             btn.style.textAlign = 'left'; btn.style.fontSize = '0.8rem';
-            btn.textContent = '→ ' + exitText + (oneWay ? ' [One-Way]' : '');
+            btn.textContent = '→ ' + exitText + (oneWay ? ' [One-Way]' : '')
+                + (requirement.unlocked ? ' · unlocked'
+                    : requirement.requiredItem ? ` · requires ${requirement.requiredItem}${requirement.allowCheckUnlock ? ' or a check' : ''}`
+                    : requirement.allowCheckUnlock ? ' · locked; try a check' : '')
+                + (travelBlock ? ` · route closed: ${travelBlock.label}` : '');
             
-            btn.onclick = () => {
-                if (worldTurnInProgress) {
-                    showToast('The DM is still responding — stop that turn before travelling.', 'info');
-                    return;
-                }
-                const playerState = normalizePlayerRulesState(world, sess);
-                if (playerState.status !== 'active') {
-                    showToast(playerState.status === 'dead'
-                        ? 'Game Over — this timeline cannot continue.'
-                        : 'You are incapacitated and cannot travel until you recover.', 'info');
-                    return;
-                }
-                if (sess.pendingChecks?.length || sess.pendingCheck) {
-                    showToast('Resolve the pending check before travelling.', 'info');
-                    return;
-                }
-                const targetLoc = resolveWorldExitTarget(playWorldView, exit);
-                if (!targetLoc) {
-                    showToast(`Broken exit: "${exitText}" does not resolve to one unique location.`, 'error');
-                    return;
-                }
-                const movement = movePlayerAlongWorldPath(world, sess, targetLoc, { exit });
-                if (!movement.ok || !movement.moved) {
-                    showToast(movement.reason === 'already_there'
-                        ? `You are already at ${targetLoc.name}.`
-                        : `${targetLoc.name} is not reachable from here.`, 'info');
-                    return;
-                }
-                rollForScenePopulation(targetLoc.id, false);
-                evaluateQuestProgress(world, sess);
-                addWorldMessage('system', `You move to ${targetLoc.name}.`);
-                saveState().catch(() => {}); // PERSIST IMMEDIATELY
-                renderWorldPlayState();
-                executeWorldTurn("look");
+            btn.onclick = async () => {
+                const movement = await travelThroughWorldExit(sourceWorld, sourceSess, exit);
+                if (movement.ok && movement.moved && state.activeWorldId === sourceWorld.id
+                    && getCurrentWorldSession() === sourceSess) void executeWorldTurn('look');
             };
             const currentPlayerState = normalizePlayerRulesState(world, sess);
-            if (!resolveWorldExitTarget(playWorldView, exit)) {
+            if (!destination) {
                 btn.disabled = true;
                 btn.title = 'Broken exit reference — repair it in World Studio';
+            } else if (travelBlock) {
+                btn.disabled = true;
+                btn.title = `${destination.name} is impassable: ${travelBlock.label}. Wait for the route to reopen or find another way.`;
+            } else if (!requirement.ok) {
+                btn.disabled = true;
+                btn.title = requirement.requiredItem
+                    ? `Requires ${requirement.requiredItem}${requirement.allowCheckUnlock ? ' or a successful check; describe how you try to open it in chat' : ''}`
+                    : 'Locked; describe how you try to open it in chat';
             } else if (currentPlayerState.status !== 'active') {
                 btn.disabled = true;
                 btn.title = currentPlayerState.status === 'dead' ? 'Timeline ended' : 'Recover before travelling';
             }
             exitList.appendChild(btn);
+            const mobileExit = btn.cloneNode(true);
+            mobileExit.onclick = () => btn.click();
+            mobileExits.appendChild(mobileExit);
         });
+    }
+    if (!exitCount) {
+        const emptyExits = document.createElement('span');
+        emptyExits.className = 'world-mobile-exits-empty';
+        emptyExits.textContent = 'No connected exits';
+        mobileExits.appendChild(emptyExits);
     }
 
     // 4. Inventory & Outfit
@@ -22113,22 +25521,42 @@ function renderWorldPlayState() {
             chip.querySelector('.inv-chip-name').onclick = () => sendIntent(`I examine the ${itemName}.`);
             chip.querySelectorAll('.inv-chip-btn:not(.inv-chip-drop):not(.inv-chip-equip)').forEach(button => button.onclick = () => sendIntent(`I use the ${itemName}.`));
             chip.querySelector('.inv-chip-equip')?.addEventListener('click', async () => {
-                const slot = item.slot;
-                if (equipped) { if (sess.equipment?.[slot] === item.id) sess.equipment[slot] = null; item.equipped = false; }
-                else {
-                    const priorId = sess.equipment?.[slot]; const prior = sess.inventory.find(entry => entry?.id === priorId);
-                    if (prior) prior.equipped = false;
-                    sess.equipment[slot] = item.id; item.equipped = true;
-                }
-                await saveState(); renderWorldPlayState();
+                await commitWorldPlayerStateChange(sourceWorld, sourceSess, () => {
+                    const sourceItem = sourceSess.inventory?.[idx];
+                    if (!sourceItem || sourceItem.id !== item.id) {
+                        showToast('Inventory changed. Reopen this World view.', 'info');
+                        return false;
+                    }
+                    const slot = sourceItem.slot;
+                    if (sourceSess.equipment?.[slot] === sourceItem.id) {
+                        sourceSess.equipment[slot] = null;
+                        sourceItem.equipped = false;
+                    } else {
+                        const priorId = sourceSess.equipment?.[slot];
+                        const prior = sourceSess.inventory.find(entry => entry?.id === priorId);
+                        if (prior) prior.equipped = false;
+                        sourceSess.equipment[slot] = sourceItem.id;
+                        sourceItem.equipped = true;
+                    }
+                    return true;
+                });
             });
             chip.querySelector('.inv-chip-drop').onclick = () => {
                 showConfirmModal('Drop Item', `Drop "${itemName}" here? It will be removed from your pack.`, async () => {
-                    Object.keys(sess.equipment || {}).forEach(slot => { if (sess.equipment[slot] === item?.id) sess.equipment[slot] = null; });
-                    sess.inventory.splice(idx, 1);
-                    addWorldMessage('system', `You drop the ${itemName}.`);
-                    await saveState();
-                    renderWorldPlayState();
+                    await commitWorldPlayerStateChange(sourceWorld, sourceSess, () => {
+                        const sourceItem = sourceSess.inventory?.[idx];
+                        if (!sourceItem || sourceItem.id !== item.id) {
+                            showToast('Inventory changed. Reopen this World view.', 'info');
+                            return false;
+                        }
+                        Object.keys(sourceSess.equipment || {}).forEach(slot => {
+                            if (sourceSess.equipment[slot] === sourceItem.id) sourceSess.equipment[slot] = null;
+                        });
+                        sourceSess.inventory.splice(idx, 1);
+                        addWorldMessage('system', `You drop the ${itemName}.`,
+                            { deferPersist: true, deferEmbedding: true }, sourceSess, sourceWorld);
+                        return true;
+                    });
                 });
             };
             invList.appendChild(chip);
@@ -22213,9 +25641,11 @@ function renderWorldPlayState() {
             weatherDisplay.appendChild(sel);
             sel.focus();
             sel.onchange = async () => {
-                sess.weatherOverride = sel.value || null;
-                await saveState();
-                renderWorldPlayState();
+                const weather = sel.value || null;
+                await commitWorldPlayerStateChange(sourceWorld, sourceSess, () => {
+                    sourceSess.weatherOverride = weather;
+                    return true;
+                });
             };
             sel.onblur = () => renderWorldPlayState();
         };
@@ -22229,7 +25659,6 @@ function renderWorldPlayState() {
     
     if (questList && ruleModules.quests && world.hudConfig?.showQuests) {
         questList.innerHTML = '';
-        normalizeQuestState(world, sess);
         const activeQuests = sess.quests.filter(quest => quest.status === 'active');
         const resolvedQuests = sess.quests.filter(quest => quest.status !== 'active').slice(-5).reverse();
         if (questCount) questCount.textContent = activeQuests.length;
@@ -22352,14 +25781,8 @@ function renderWorldPlayState() {
     const livingSection = document.getElementById('hud-section-living-world');
     if (livingSection) livingSection.style.display = ruleModules.livingWorld ? 'block' : 'none';
     if (livingList && ruleModules.livingWorld) {
-        normalizeLivingWorldState(world, sess);
         livingList.innerHTML = '';
         const cards = [];
-        const worldAudit = sess.lastTurnAudit;
-        if (worldAudit) {
-            const rejected = worldAudit.rejected?.length || 0;
-            cards.push(`${rejected ? '⚠️' : '⚙️'} Immersion Engine v${worldAudit.world_state_version} · ${worldAudit.accepted || 0} committed · ${worldAudit.informational || 0} tracked${rejected ? ` · ${rejected} unsafe proposal${rejected === 1 ? '' : 's'} rejected` : ' · scene reconciled'}`);
-        }
         const locState = sess.locationStates[sess.playerLocation];
         if (locState) {
             const controller = sess.factions.find(faction => faction.id === locState.controlFactionId);
@@ -22386,11 +25809,11 @@ function renderWorldPlayState() {
             cards.push(`🎯 ${activeGoals.length} autonomous agenda${activeGoals.length === 1 ? '' : 's'} active${progressed ? ` · ${progressed} advanced this turn` : ''}`);
         }
         const upcoming = sess.scheduledEvents.filter(event => event.status === 'scheduled')
-            .sort((a, b) => (a.dueTurn ?? 999999) - (b.dueTurn ?? 999999))
+            .sort((a, b) => worldEventMinutesRemaining(world, sess, a)
+                - worldEventMinutesRemaining(world, sess, b))
             .slice(0, 3);
         upcoming.forEach(event => {
-            const due = event.dueTurn != null ? `turn ${event.dueTurn}` : 'clock-timed';
-            cards.push(`⏳ ${event.title} · ${due}`);
+            cards.push(`${event.urgent ? '⚠️' : '⏳'} ${event.title} · ${describeWorldEventDeadline(world, sess, event)}`);
         });
         sess.factions.filter(faction => !['defeated', 'disbanded'].includes(faction.status)).slice(0, 3).forEach(faction => {
             cards.push(`⚑ ${faction.name} · influence ${faction.influence}${faction.goal ? ` · ${faction.goalProgress}% toward its goal` : ''}`);
@@ -22411,9 +25834,12 @@ function renderWorldPlayState() {
         }
         if (sess.lifeSeed?.initialized) {
             const home = getLocationRef(world, sess.lifeSeed.homeLocationId);
-            const household = (sess.lifeSeed.people || []).filter(person =>
-                /parent|guardian|spouse|sibling|child|roommate|household|family/i.test(person.relationship));
-            cards.push(`🏠 ${home?.name || 'Active home'} · ${household.length ? household.map(person => `${person.name} (${person.relationship})`).join(', ') : `${sess.lifeSeed.people?.length || 0} persistent social connections`}`);
+            const seededPeople = sess.lifeSeed.people || [];
+            if (home || seededPeople.length) {
+                const household = seededPeople.filter(person =>
+                    /parent|guardian|spouse|sibling|child|roommate|household|family/i.test(person.relationship));
+                cards.push(`🏠 ${home?.name || 'No fixed home'} · ${household.length ? household.map(person => `${person.name} (${person.relationship})`).join(', ') : `${seededPeople.length} persistent social connections`}`);
+            }
         }
         const localSociety = getLocalSocietySettlement(world, sess);
         if (localSociety) {
@@ -22491,19 +25917,22 @@ function renderWorldPlayState() {
         }
     }
 
-    // Render history (Audit: Use appendWorldMessageUI for parity)
-    const container = document.getElementById('world-messages-container');
-    container.innerHTML = '';
-    sess.history.forEach((msg, idx) => {
-        appendWorldMessageUI(msg, idx);
-    });
-    container.scrollTop = container.scrollHeight;
+    // Preserve the existing transcript DOM. Rebuilding every message for each
+    // HUD update was costly on long campaigns and discarded the reader's scroll.
+    reconcileWorldMessages(world, sess, requestedPresentation);
+    renderWorldPeopleDirectory(world, sess, presentNPCs);
+    renderWorldHistoryDirectory(world, sess);
+    if (worldStatusTab === 'director') renderWorldDirectorPanel(world, sess);
 
-    // Update Context Meter (Audit: Robust & Persistent)
-    const historyText = (sess.history || []).map(m => m.text || "").join(' ');
-    const worldText = (world.dmPrompt || '') + (world.authorNote || '') + (loc?.description || '')
-        + (sess.ledger || '') + getLivingWorldPrompt(world, sess, presentNPCs) + getWorldSocietyPrompt(world, sess);
-    const totalChars = historyText.length + worldText.length;
+    // Display archive size, not a false estimate of the next provider request.
+    // The request builder below reserves output and selects only fitting history.
+    const historyChars = (sess.history || []).reduce((sum, message, index) =>
+        sum + String(message.text || '').length + (index ? 1 : 0), 0);
+    // The label estimates saved story text, not the next provider request.
+    // Prompt builders may normalize state; do not run them on a UI refresh.
+    const worldText = (world.dmPrompt || '') + (world.authorNote || '')
+        + (loc?.description || '') + (sess.ledger || '');
+    const totalChars = historyChars + worldText.length;
     const estTokens = Math.ceil(totalChars / 3.5);
     
     // Conflation Fix: Prioritize world.contextSize (Studio Config)
@@ -22512,19 +25941,10 @@ function renderWorldPlayState() {
         maxTokens = parseInt(world.maxTokens);
     }
     
-    const percent = Math.min(100, (estTokens / maxTokens) * 100);
-    
-    const fill = document.getElementById('world-context-fill');
     const label = document.getElementById('world-context-label');
-    if (fill) {
-        fill.style.width = `${percent}%`;
-        if (percent > 85) fill.style.background = '#E63946';
-        else if (percent > 60) fill.style.background = '#FF8C42';
-        else fill.style.background = '#00CC66';
-    }
     if (label) {
-        label.textContent = `${estTokens.toLocaleString()} / ${(maxTokens/1000).toFixed(0)}k`;
-        label.style.color = percent > 85 ? '#E63946' : (percent > 60 ? '#FF8C42' : 'var(--text-2)');
+        label.textContent = `~${estTokens.toLocaleString()} tokens`;
+        label.title = `Approximate saved story/world text. Configured model context: ${maxTokens.toLocaleString()} tokens. The next request selects only history that fits after instructions and output reserves; this is not billed usage.`;
     }
 }
 
@@ -22720,6 +26140,180 @@ function renderWorldPlayerMessageHtml(sess, text) {
     </div>`;
 }
 
+function worldMessageRenderSignature(msg, isLastEntry) {
+    const versions = Array.isArray(msg.versions) ? msg.versions : [msg.text];
+    const current = msg.currentVersion === undefined ? versions.length - 1 : msg.currentVersion;
+    return JSON.stringify([
+        msg.id, msg.role, msg.text, versions.length, current, versions[current],
+        msg.location, msg.command, msg.ledgerEntry, msg.stateSource, msg.stateFallbackArmed,
+        msg.worldAudit, msg.narrativeAuditWarnings, msg.callAudit, msg.turnDurationMs, msg.narratedMove,
+        msg.missingPlace, msg.narratedPresence, msg.narratedOutfit, msg.ledgerStatus,
+        isLastEntry
+    ]);
+}
+
+function reconcileWorldMessages(world, sess, presentationMode) {
+    const container = document.getElementById('world-messages-container');
+    if (!container) return;
+    if (!container._worldScrollIntentBound) {
+        // Track deliberate browsing separately from scrollTop. Removing the
+        // temporary streaming bubble can clamp scrollTop before the committed
+        // reply is inserted, which otherwise looks like a user scrolled away.
+        const detach = (towardLatest = false) => {
+            if (!worldMessageWindow) return;
+            worldMessageWindow.followLatest = false;
+            worldMessageWindow.manualBrowse = true;
+            worldMessageWindow.resumeOnBottom = towardLatest;
+        };
+        const resumeAtBottom = () => {
+            if (!worldMessageWindow?.manualBrowse || !worldMessageWindow.resumeOnBottom) return;
+            if (container.scrollHeight - container.scrollTop - container.clientHeight <= 4) {
+                worldMessageWindow.followLatest = true;
+                worldMessageWindow.manualBrowse = false;
+                worldMessageWindow.resumeOnBottom = false;
+            }
+        };
+        container.addEventListener('wheel', event => detach(event.deltaY > 0), { passive: true });
+        let touchY = null;
+        container.addEventListener('touchstart', event => {
+            touchY = event.touches[0]?.clientY ?? null;
+        }, { passive: true });
+        container.addEventListener('touchmove', event => {
+            const nextY = event.touches[0]?.clientY;
+            if (touchY != null && nextY != null) detach(nextY < touchY);
+            touchY = nextY ?? null;
+        }, { passive: true });
+        container.addEventListener('scroll', resumeAtBottom, { passive: true });
+        container.addEventListener('keydown', event => {
+            if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
+                detach(['ArrowDown', 'PageDown', 'End'].includes(event.key)
+                    || (event.key === ' ' && !event.shiftKey));
+            }
+        });
+        container.addEventListener('pointerdown', event => {
+            if (event.target === container && event.clientX >= container.getBoundingClientRect().right - 24) detach(true);
+        });
+        container._worldScrollIntentBound = true;
+    }
+    const renderKey = `${world.id}|${sess.id}|${presentationMode}`;
+    const changedTimeline = container.dataset.worldRenderKey !== renderKey;
+    const total = (sess.history || []).length;
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 96;
+    if (!worldMessageWindow || worldMessageWindow.key !== renderKey || changedTimeline) {
+        worldMessageWindow = {
+            key: renderKey,
+            start: Math.max(0, total - WORLD_MESSAGE_WINDOW_SIZE),
+            end: total,
+            total,
+            forceAnchor: false,
+            followLatest: true,
+            manualBrowse: false,
+            resumeOnBottom: false
+        };
+    } else {
+        const wasAtLatest = worldMessageWindow.end >= worldMessageWindow.total;
+        const historyGrew = total > worldMessageWindow.total;
+        const explicitAnchor = worldMessageWindow.forceAnchor;
+        if (atBottom && !explicitAnchor && !worldMessageWindow.manualBrowse) worldMessageWindow.followLatest = true;
+        // If no new history arrived and the reader is above the bottom,
+        // preserve that position even if the scroll came from a scrollbar.
+        else if (!historyGrew && !explicitAnchor && !atBottom
+            && !container.querySelector('.msg:not([data-world-message-id])')) {
+            worldMessageWindow.followLatest = false;
+        }
+        worldMessageWindow.start = Math.min(worldMessageWindow.start, total);
+        worldMessageWindow.end = Math.min(worldMessageWindow.end, total);
+        if (total && worldMessageWindow.end <= worldMessageWindow.start) {
+            worldMessageWindow.start = Math.max(0, total - WORLD_MESSAGE_WINDOW_SIZE);
+            worldMessageWindow.end = total;
+        }
+        if (wasAtLatest) {
+            if (worldMessageWindow.followLatest && !explicitAnchor) {
+                worldMessageWindow.end = total;
+                worldMessageWindow.start = Math.max(0, total - WORLD_MESSAGE_WINDOW_SIZE);
+            }
+        }
+        // A reader parked on old history must not accumulate every new turn
+        // into the DOM. Keep a bounded page and offer Jump to latest instead.
+        if (worldMessageWindow.end - worldMessageWindow.start > WORLD_MESSAGE_WINDOW_MAX) {
+            if (worldMessageWindow.followLatest && !explicitAnchor) {
+                worldMessageWindow.start = worldMessageWindow.end - WORLD_MESSAGE_WINDOW_MAX;
+            } else {
+                worldMessageWindow.end = worldMessageWindow.start + WORLD_MESSAGE_WINDOW_MAX;
+            }
+        }
+    }
+    const nearBottom = !worldMessageWindow.forceAnchor
+        && (changedTimeline || (worldMessageWindow.followLatest && worldMessageWindow.end === total));
+    const firstVisible = changedTimeline ? null : [...container.children].find(node =>
+        node.dataset.worldMessageId && node.getBoundingClientRect().bottom > container.getBoundingClientRect().top);
+    const anchorId = firstVisible?.dataset.worldMessageId;
+    const anchorTop = firstVisible?.getBoundingClientRect().top;
+    const existingById = new Map([...container.children]
+        .filter(node => node.dataset.worldMessageId)
+        .map(node => [node.dataset.worldMessageId, node]));
+    const desired = [];
+    if (worldMessageWindow.start > 0) {
+        const older = container.querySelector('[data-world-window-action="older"]') || document.createElement('button');
+        older.type = 'button';
+        older.className = 'world-transcript-window-action';
+        older.dataset.worldWindowAction = 'older';
+        older.textContent = `Load earlier messages · ${worldMessageWindow.start} above`;
+        older.onclick = () => {
+            const previousStart = worldMessageWindow.start;
+            worldMessageWindow.start = Math.max(0, previousStart - WORLD_MESSAGE_WINDOW_SIZE);
+            worldMessageWindow.end = Math.min(worldMessageWindow.end, worldMessageWindow.start + WORLD_MESSAGE_WINDOW_MAX);
+            worldMessageWindow.forceAnchor = true;
+            worldMessageWindow.followLatest = false;
+            worldMessageWindow.manualBrowse = true;
+            reconcileWorldMessages(world, sess, presentationMode);
+        };
+        desired.push(older);
+    }
+    for (let index = worldMessageWindow.start; index < worldMessageWindow.end; index++) {
+        const msg = sess.history[index];
+        const id = String(msg.id || `legacy-${index}`);
+        const signature = worldMessageRenderSignature(msg, index === sess.history.length - 1);
+        let node = existingById.get(id);
+        if (!node || node._worldRenderSignature !== signature) {
+            node = appendWorldMessageUI(msg, index);
+            node.dataset.worldMessageId = id;
+            node._worldRenderSignature = signature;
+        }
+        desired.push(node);
+    }
+    if (worldMessageWindow.end < total) {
+        const latest = container.querySelector('[data-world-window-action="latest"]') || document.createElement('button');
+        latest.type = 'button';
+        latest.className = 'world-transcript-window-action';
+        latest.dataset.worldWindowAction = 'latest';
+        latest.textContent = `Jump to latest · ${total - worldMessageWindow.end} newer messages`;
+        latest.onclick = () => {
+            worldMessageWindow.start = Math.max(0, sess.history.length - WORLD_MESSAGE_WINDOW_SIZE);
+            worldMessageWindow.end = sess.history.length;
+            worldMessageWindow.forceAnchor = false;
+            worldMessageWindow.followLatest = true;
+            worldMessageWindow.manualBrowse = false;
+            worldMessageWindow.resumeOnBottom = false;
+            reconcileWorldMessages(world, sess, presentationMode);
+            container.scrollTop = container.scrollHeight;
+        };
+        desired.push(latest);
+    }
+    if (desired.length !== container.children.length
+        || desired.some((node, index) => container.children[index] !== node)) {
+        container.replaceChildren(...desired);
+    }
+    container.dataset.worldRenderKey = renderKey;
+    worldMessageWindow.total = total;
+    worldMessageWindow.forceAnchor = false;
+    if (nearBottom) container.scrollTop = container.scrollHeight;
+    else if (anchorId && Number.isFinite(anchorTop)) {
+        const anchor = [...container.children].find(node => node.dataset.worldMessageId === anchorId);
+        if (anchor) container.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+    }
+}
+
 function appendWorldMessageUI(msg, index = null) {
     const container = document.getElementById('world-messages-container');
     const div = document.createElement('div');
@@ -22732,7 +26326,7 @@ function appendWorldMessageUI(msg, index = null) {
     // Per-message metadata line (revealed by the 👁️ Metadata toggle)
     const world = state.worlds.find(w => w.id === state.activeWorldId);
     const activeSession = getCurrentWorldSession();
-    const presentation = world ? normalizeWorldPresentation(world) : null;
+    const presentation = worldPresentationForDisplay(world);
     const presentationMode = ['classic', 'cinematic'].includes(activeSession?.presentationMode)
         ? activeSession.presentationMode
         : (presentation?.enabled ? presentation.mode : 'classic');
@@ -22757,7 +26351,7 @@ function appendWorldMessageUI(msg, index = null) {
         metaParts.push(msg.stateSource === 'tool_call' ? '⚙️ canonical turn committed'
             : msg.stateSource === 'inline_rescue' ? '⚙️ tagged turn receipt recovered'
             : msg.stateSource === 'receipt_repair' ? '🩹 missing receipt repaired'
-            : msg.stateSource === 'frozen_no_receipt' ? '🧊 unverified state frozen — receipt missing'
+            : msg.stateSource === 'frozen_no_receipt' ? '🧊 unverified reply discarded — receipt missing'
             : msg.stateSource === 'engine_intro' ? '⚙️ engine-authored scene committed'
             : msg.stateSource === 'local_intent' ? '🔧 state: applied from your action'
             : msg.stateFallbackArmed
@@ -22775,9 +26369,11 @@ function appendWorldMessageUI(msg, index = null) {
             if (msg.callAudit.providerFallback) extras.push('provider fallback');
             if (msg.callAudit.receiptRepair) extras.push('receipt repair');
             if (msg.callAudit.narrativeFollowUp) extras.push('dice/tool narration');
+            if (msg.callAudit.narrativeRescue) extras.push('empty-reply rescue');
             if (msg.callAudit.chronicleClassifier) extras.push('chronicle classifier');
             metaParts.push(`🧮 ${escapeHTML(msg.callAudit.foregroundTotal)} foreground model call${msg.callAudit.foregroundTotal === 1 ? '' : 's'}${extras.length ? ` · ${escapeHTML(extras.join(', '))}` : ' · scene kernel'}`);
         }
+        if (Number(msg.turnDurationMs) > 0) metaParts.push(`⏱ ${escapeHTML((msg.turnDurationMs / 1000).toFixed(1))}s total turn time`);
         if (msg.narratedMove) {
             metaParts.push(`📍 followed the prose to ${escapeHTML(msg.narratedMove)} (no location_id was recorded)`);
         }
@@ -22843,6 +26439,11 @@ function appendWorldMessageUI(msg, index = null) {
             div.querySelector('.prev-ver').onclick = async () => {
                 msg.currentVersion = Math.max(0, currentVersionIdx - 1);
                 msg.text = msg.versions[msg.currentVersion]; // keep canonical for API context
+                applyWorldTakeMetadata(msg, msg.versionTakeMetadata?.[msg.currentVersion]);
+                if (Array.isArray(msg.versionCallAudits)) {
+                    msg.callAudit = msg.versionCallAudits[msg.currentVersion] || null;
+                    msg.turnDurationMs = msg.versionTurnDurations?.[msg.currentVersion] || 0;
+                }
                 const ledgerEntry = msg.versionLedgerEntries?.[msg.currentVersion] || null;
                 if (ledgerEntry) msg.ledgerEntry = ledgerEntry;
                 else delete msg.ledgerEntry;
@@ -22851,12 +26452,17 @@ function appendWorldMessageUI(msg, index = null) {
                 const snapshot = msg.versionSnapshots?.[msg.currentVersion];
                 if (world && snapshot) restoreWorldTurnState(world, sess, snapshot);
                 if (sess) invalidateEpisodicFrom(sess, sess.history.indexOf(msg));
-                await saveState();
+                await saveWorldsState();
                 renderWorldPlayState();
             };
             div.querySelector('.next-ver').onclick = async () => {
                 msg.currentVersion = Math.min(versions.length - 1, currentVersionIdx + 1);
                 msg.text = msg.versions[msg.currentVersion]; // keep canonical for API context
+                applyWorldTakeMetadata(msg, msg.versionTakeMetadata?.[msg.currentVersion]);
+                if (Array.isArray(msg.versionCallAudits)) {
+                    msg.callAudit = msg.versionCallAudits[msg.currentVersion] || null;
+                    msg.turnDurationMs = msg.versionTurnDurations?.[msg.currentVersion] || 0;
+                }
                 const ledgerEntry = msg.versionLedgerEntries?.[msg.currentVersion] || null;
                 if (ledgerEntry) msg.ledgerEntry = ledgerEntry;
                 else delete msg.ledgerEntry;
@@ -22865,7 +26471,7 @@ function appendWorldMessageUI(msg, index = null) {
                 const snapshot = msg.versionSnapshots?.[msg.currentVersion];
                 if (world && snapshot) restoreWorldTurnState(world, sess, snapshot);
                 if (sess) invalidateEpisodicFrom(sess, sess.history.indexOf(msg));
-                await saveState();
+                await saveWorldsState();
                 renderWorldPlayState();
             };
         }
@@ -22880,7 +26486,7 @@ function appendWorldMessageUI(msg, index = null) {
                 if (world && affectedDm?.turnSnapshot) restoreWorldTurnState(world, sess, affectedDm.turnSnapshot);
                 invalidateEpisodicFrom(sess, index);
                 sess.history.splice(index);
-                await saveState();
+                await saveWorldsState();
                 renderWorldPlayState();
             });
         };
@@ -22906,7 +26512,7 @@ function appendWorldMessageUI(msg, index = null) {
                 }
                 const sess = getCurrentWorldSession();
                 if (sess) invalidateEpisodicFrom(sess, sess.history.indexOf(msg));
-                await saveState();
+                await saveWorldsState();
                 renderWorldPlayState();
                 isEditing = false;
             }
@@ -22914,6 +26520,7 @@ function appendWorldMessageUI(msg, index = null) {
     }
 
     container.appendChild(div);
+    return div;
 }
 
 function captureWorldTurnState(world, sess) {
@@ -22921,7 +26528,9 @@ function captureWorldTurnState(world, sess) {
     Object.entries(sess).forEach(([key, value]) => {
         // Epochs must never be captured/restored: they are monotonic guards
         // against late background work committing into a rewound timeline.
-        if (!['history', 'id', 'name', '_memEpoch', '_worldEpoch'].includes(key)) sessionState[key] = value;
+        // The newest receipt already carries the same audit. Keeping it here
+        // repeats a growing audit inside every pre-turn checkpoint.
+        if (!['history', 'id', 'name', '_memEpoch', '_worldEpoch', 'worldCallDiagnostics', 'worldModelAttempts', 'worldModelTotals', 'worldTurnReceipts', 'lastTurnAudit'].includes(key)) sessionState[key] = value;
     });
     // Authored geography and template characters belong to the world, not a
     // single timeline. A reroll must never replace them. Only story-born NPCs
@@ -22931,13 +26540,63 @@ function captureWorldTurnState(world, sess) {
     const dynamicLocations = (world.locations || [])
         .filter(location => location?.sessionOrigin === sess.id);
     return safeJsonClone({
-        schema: 3,
+        schema: 5,
         session: sessionState,
+        // The latest receipt is enough to restore an exact selected take.
+        // Copying the rolling 120-receipt audit into *every* pre-turn snapshot
+        // made a quiet 1,000-turn campaign grow quadratically.
+        receiptCheckpoint: {
+            worldStateVersion: Math.max(0, Number(sess.worldStateVersion) || 0),
+            tail: (Array.isArray(sess.worldTurnReceipts) ? sess.worldTurnReceipts : []).at(-1) || null
+        },
         world: {
             dynamicEntities,
             dynamicLocations
         }
     });
+}
+
+/**
+ * A single-take scene only needs its pre-turn checkpoint for rewind/delete.
+ * Keep post-turn checkpoints for the newest scenes and every multi-take scene:
+ * those are required for version switching. The small visible change summary
+ * preserves History labels after an older redundant post copy is removed.
+ */
+function compactWorldHistorySnapshots(world, sess, options = {}) {
+    const keepRecent = Math.max(1, Number(options.keepRecent) || 2);
+    const maxMessages = Number.isFinite(options.maxMessages)
+        ? Math.max(0, Number(options.maxMessages)) : Infinity;
+    let recentDm = 0;
+    let compacted = 0;
+    const history = Array.isArray(sess?.history) ? sess.history : [];
+    for (let index = history.length - 1; index >= 0 && compacted < maxMessages; index--) {
+        const message = history[index];
+        if (message?.role !== 'dm') continue;
+        const witnessed = worldWitnessedRelationshipEventsForMessage(sess, message);
+        if (witnessed.length && !Array.isArray(message.visibleRelationshipChanges)) {
+            message.visibleRelationshipChanges = worldRelationshipEvidenceLabels(world, witnessed);
+        }
+        recentDm++;
+        if (recentDm <= keepRecent || !message.turnSnapshot) continue;
+        const versions = Array.isArray(message.versions) ? message.versions : [message.text];
+        const snapshots = Array.isArray(message.versionSnapshots) ? message.versionSnapshots : [];
+        if (versions.length !== 1 || snapshots.length > 1) continue;
+        if (!snapshots[0] && !message.postSnapshot) continue;
+        message.visibleStateChanges = worldVisibleTurnChanges(world, message, []);
+        delete message.versionSnapshots;
+        delete message.postSnapshot;
+        message.snapshotCompacted = true;
+        compacted++;
+    }
+    return compacted;
+}
+
+function ensureWorldRerollBaseSnapshot(message, fallbackSnapshot) {
+    if (!Array.isArray(message.versionSnapshots)) {
+        message.versionSnapshots = [message.postSnapshot || fallbackSnapshot || null];
+    }
+    delete message.snapshotCompacted;
+    delete message.visibleStateChanges;
 }
 
 function restoreWorldTurnState(world, sess, snapshot) {
@@ -22947,17 +26606,38 @@ function restoreWorldTurnState(world, sess, snapshot) {
     const snapshotManualRevision = Number(snapshot.session.ledgerManualRevision) || 0;
     const liveManualLedger = String(sess.ledgerManualOverrideText ?? sess.ledger ?? '');
     const liveLedgerDiagnostics = safeJsonClone(sess.ledgerDiagnostics || {});
+    const receiptCheckpoint = snapshot.schema >= 4 && isPlainObject(snapshot.receiptCheckpoint)
+        ? snapshot.receiptCheckpoint : null;
+    const liveReceipts = Array.isArray(sess.worldTurnReceipts) ? sess.worldTurnReceipts : [];
+    const receiptVersion = Math.max(0, Number(receiptCheckpoint?.worldStateVersion) || 0);
+    const receiptTail = receiptCheckpoint?.tail;
+    const receiptTailVersion = Number(receiptTail?.audit?.world_state_version);
+    const restoredReceipts = receiptCheckpoint ? liveReceipts.filter(receipt => {
+        const version = Number(receipt?.audit?.world_state_version);
+        return Number.isFinite(version) && version <= receiptVersion
+            && (!receiptTail || version < receiptTailVersion);
+    }).slice(-119) : null;
+    if (restoredReceipts && receiptTail) restoredReceipts.push(safeJsonClone(receiptTail));
     const preserved = {
         id: sess.id,
         name: sess.name,
         history: sess.history,
         _memEpoch: sess._memEpoch,
-        _worldEpoch: sess._worldEpoch
+        _worldEpoch: sess._worldEpoch,
+        worldCallDiagnostics: sess.worldCallDiagnostics,
+        worldModelAttempts: sess.worldModelAttempts,
+        worldModelTotals: sess.worldModelTotals
     };
+    if (restoredReceipts) preserved.worldTurnReceipts = restoredReceipts;
     Object.keys(sess).forEach(key => {
-        if (!['id', 'name', 'history', '_memEpoch', '_worldEpoch'].includes(key)) delete sess[key];
+        if (!['id', 'name', 'history', '_memEpoch', '_worldEpoch', 'worldCallDiagnostics', 'worldModelAttempts', 'worldModelTotals'].includes(key)) delete sess[key];
     });
     Object.assign(sess, safeJsonClone(snapshot.session), preserved);
+    // Schema 5 stores this audit once, in the receipt checkpoint. Older
+    // snapshots still carry their own lastTurnAudit in snapshot.session.
+    if (snapshot.schema >= 5) {
+        sess.lastTurnAudit = restoredReceipts?.at(-1)?.audit || null;
+    }
     // A manual ledger save is an explicit source-of-truth correction. Rerolls
     // restore automated state, but must not silently erase a newer correction.
     if (liveManualRevision > snapshotManualRevision) {
@@ -22993,6 +26673,57 @@ function restoreWorldTurnState(world, sess, snapshot) {
     return true;
 }
 
+// One rollback boundary for model receipts, background simulation and direct
+// player commands. History is intentionally excluded from turn checkpoints,
+// so its append-only tail must be restored separately on a failed command.
+function attemptWorldStateMutation(world, sess, apply, accepts = () => true) {
+    const before = captureWorldTurnState(world, sess);
+    const historyLength = Array.isArray(sess.history) ? sess.history.length : 0;
+    let closed = false;
+    const rollback = () => {
+        if (closed) return false;
+        closed = true;
+        restoreWorldTurnState(world, sess, before);
+        if (Array.isArray(sess.history)) sess.history.splice(historyLength);
+        return true;
+    };
+    try {
+        const result = apply();
+        if (!accepts(result)) {
+            rollback();
+            return { accepted: false, result, rollback };
+        }
+        return { accepted: true, result, rollback, commit: () => { closed = true; } };
+    } catch (error) {
+        rollback();
+        throw error;
+    }
+}
+
+const WORLD_TAKE_METADATA_FIELDS = [
+    'location', 'witnesses', 'worldAudit', 'narrativeAuditWarnings',
+    'missingPlace', 'stateSource', 'stateFallbackArmed', 'ledgerStatus',
+    'narratedMove', 'narratedPresence', 'narratedOutfit', 'visibleRelationshipChanges'
+];
+
+function captureWorldTakeMetadata(source) {
+    const metadata = {};
+    WORLD_TAKE_METADATA_FIELDS.forEach(key => {
+        if (Object.prototype.hasOwnProperty.call(source || {}, key)) metadata[key] = safeJsonClone(source[key]);
+    });
+    return metadata;
+}
+
+function applyWorldTakeMetadata(message, metadata) {
+    // Older multi-take timelines predate per-take scene metadata. Leave their
+    // unknown fields alone instead of pretending we can reconstruct witnesses.
+    if (!metadata || typeof metadata !== 'object') return;
+    WORLD_TAKE_METADATA_FIELDS.forEach(key => {
+        if (Object.prototype.hasOwnProperty.call(metadata, key)) message[key] = safeJsonClone(metadata[key]);
+        else delete message[key];
+    });
+}
+
 function addWorldMessage(role, text, metadata = {}, targetSession = null, targetWorld = null) {
     // A generated turn is bound to the timeline that started it. Looking the
     // session up again after an awaited provider call can redirect its message
@@ -23009,8 +26740,30 @@ function addWorldMessage(role, text, metadata = {}, targetSession = null, target
         const lastMsg = sess.history[sess.history.length - 1];
         if (lastMsg.role === 'dm') {
             lastMsg.versions = lastMsg.versions || [lastMsg.text];
+            const previousVersion = Number.isInteger(lastMsg.currentVersion)
+                ? lastMsg.currentVersion : lastMsg.versions.length - 1;
+            lastMsg.versionTakeMetadata = Array.isArray(lastMsg.versionTakeMetadata)
+                ? lastMsg.versionTakeMetadata.slice(0, lastMsg.versions.length)
+                : Array(lastMsg.versions.length).fill(null);
+            while (lastMsg.versionTakeMetadata.length < lastMsg.versions.length) lastMsg.versionTakeMetadata.push(null);
+            lastMsg.versionTakeMetadata[previousVersion] = captureWorldTakeMetadata(lastMsg);
+            if (!Array.isArray(lastMsg.versionCallAudits)) {
+                lastMsg.versionCallAudits = lastMsg.versions.map((_, index) =>
+                    index === previousVersion ? (lastMsg.callAudit || null) : null);
+            }
+            if (!Array.isArray(lastMsg.versionTurnDurations)) {
+                lastMsg.versionTurnDurations = lastMsg.versions.map((_, index) =>
+                    index === previousVersion ? (lastMsg.turnDurationMs || 0) : 0);
+            }
             lastMsg.versions.push(text);
             lastMsg.currentVersion = lastMsg.versions.length - 1;
+            const newTakeMetadata = captureWorldTakeMetadata(metadata);
+            lastMsg.versionTakeMetadata.push(newTakeMetadata);
+            applyWorldTakeMetadata(lastMsg, newTakeMetadata);
+            lastMsg.versionCallAudits.push(metadata.callAudit || null);
+            lastMsg.versionTurnDurations.push(metadata.turnDurationMs || 0);
+            lastMsg.callAudit = metadata.callAudit || null;
+            lastMsg.turnDurationMs = metadata.turnDurationMs || 0;
             // CRITICAL: keep .text canonical — it's what gets sent to the API on
             // later turns. Without this, rerolled-away content bleeds back into context.
             lastMsg.text = text;
@@ -23069,12 +26822,16 @@ function addWorldMessage(role, text, metadata = {}, targetSession = null, target
             invalidateEpisodicFrom(sess, sess.history.length - 1);
 
             if (!metadata.deferPersist) {
-                saveState().catch(() => {});
+                saveWorldsState({ worldId: targetWorld?.id || state.activeWorldId }).catch(() => {});
                 renderWorldPlayState();
             }
         }
     } else {
         const newMsg = { id: msgId, role, text, versions: [text], currentVersion: 0, ...metadata };
+        // Persistence and embedding are dispatch options, not story data.
+        delete newMsg.deferPersist;
+        delete newMsg.deferEmbedding;
+        delete newMsg.isReroll;
         sess.history.push(newMsg);
         targetMsgRef = newMsg;
         
@@ -23101,25 +26858,26 @@ function addWorldMessage(role, text, metadata = {}, targetSession = null, target
         }
 
         if (!metadata.deferPersist) {
-            saveState().catch(() => {});
+            saveWorldsState({ worldId: targetWorld?.id || state.activeWorldId }).catch(() => {});
             renderWorldPlayState();
         }
     }
 
     // Background, non-blocking asynchronous embedding pre-computation for future world turns
     const embeddingWorld = targetWorld || state.worlds.find(w => w.id === state.activeWorldId);
-    const shouldEmbedMessage = !embeddingWorld
+    const shouldEmbedMessage = !metadata.deferEmbedding && (!embeddingWorld
         || !normalizeWorldKernelConfig(embeddingWorld).enabled
-        || normalizeWorldKernelConfig(embeddingWorld).memoryMode === 'semantic';
+        || normalizeWorldKernelConfig(embeddingWorld).memoryMode === 'semantic');
     if (targetMsgRef && text && shouldEmbedMessage) {
         const msgText = text;
         const msgRef = targetMsgRef;
         (async () => {
             try {
-                const emb = await HordeVectorMemory.getCachedEmbedding(msgText);
+                const emb = await HordeVectorMemory.getCachedEmbedding(msgText,
+                    diagnostic => recordWorldEmbeddingAttempt(embeddingWorld, sess, 'messageEmbedding', diagnostic));
                 if (emb) {
                     msgRef.embedding = emb;
-                    await saveState();
+                    await saveWorldsState({ worldId: embeddingWorld?.id || state.activeWorldId });
                     console.log(`World Mode: Asynchronously generated/cached embedding for event.`);
                 }
             } catch (err) {
@@ -23189,7 +26947,8 @@ async function getMemoryMatrixContext(world, sess, userInput) {
                 }
             }
 
-            retrieved = await HordeVectorMemory.search(allCandidates, userInput, topk, thresh);
+            retrieved = await HordeVectorMemory.search(allCandidates, userInput, topk, thresh,
+                diagnostic => recordWorldEmbeddingAttempt(world, sess, 'semanticSearch', diagnostic), 2);
         } catch (e) {
             console.warn("World mode hybrid search failed:", e);
         }
@@ -23223,7 +26982,8 @@ async function getMemoryMatrixContext(world, sess, userInput) {
     let retrievedEpisodic = [];
     if (useSemanticMemory && sess.episodicMemories && sess.episodicMemories.length > 0 && userInput) {
         try {
-            retrievedEpisodic = await HordeVectorMemory.search(sess.episodicMemories, userInput, topk, thresh);
+            retrievedEpisodic = await HordeVectorMemory.search(sess.episodicMemories, userInput, topk, thresh,
+                diagnostic => recordWorldEmbeddingAttempt(world, sess, 'semanticSearch', diagnostic), 2);
         } catch (e) {
             console.warn("World mode episodic search failed:", e);
         }
@@ -23294,6 +27054,20 @@ function extractUserMovementTarget(userInput) {
         const whole = String(match[0] || '');
         const verbRaw = match[0].match(/\b(exit(?:ed)?|leave|left)\b/i)?.[1]?.toLowerCase();
         const verb = verbRaw ? (verbRaw.startsWith('exit') ? 'exit' : 'leave') : '';
+        // "Leave the gate shut" changes no location. The coordinated-move
+        // grammar can otherwise read "and leave" after a player action as
+        // locomotion, then fuzzy-resolve "the gate shut" to a nearby exit.
+        if (verb === 'leave'
+            && /^(?:the\s+|a\s+|an\s+)?(?:gate|door|lock|latch|barrier|valve|passage|entrance|window)\b[^.!?]{0,60}\b(?:shut|closed|locked|open|opened|untouched|sealed|unlocked|ajar)\b/i.test(target)) return '';
+        // "Leave the square by the east road" names the origin first. The
+        // route direction, not the square, is the destination clue. Treating
+        // the entire phrase as a fuzzy place once sent players back to the inn.
+        const departureDirection = verb && target.match(/\bby\s+(?:the\s+)?(north|south|east|west|northeast|northwest|southeast|southwest|up|down)\b/i);
+        if (departureDirection) return departureDirection[1].toLowerCase();
+        // "I leave Gloria at reception" leaves a person behind; it does not
+        // name Gloria's home as the player's destination. A later clause may
+        // still say where the player actually goes.
+        if (verb && /^[A-Z][a-z]+\s+at\s+/i.test(target)) return '';
         // "out", "outside", "out of the room/the vault/here" are all the same
         // outward intent the resolver understands as 'out'.
         if (/^out(?:side)?(?:\s+of\s+\S.*)?$/i.test(target)) return 'out';
@@ -23308,15 +27082,29 @@ function extractUserMovementTarget(userInput) {
         if (verb) return verb;
         return '';
     };
+    const negatedCoordinatedMove = (index, continuation = '') => {
+        // In "I do not take the lantern, leave the square, or promise", the
+        // negation governs the whole coordinated list. A later "then I walk"
+        // or "but I leave" starts a new affirmative action.
+        if (/\b(?:then|but|instead|rather)\b/i.test(continuation)) return false;
+        const boundary = Math.max(actionText.lastIndexOf('.', index),
+            actionText.lastIndexOf('!', index), actionText.lastIndexOf('?', index));
+        const prefix = actionText.slice(boundary + 1, index);
+        const subjects = [...prefix.matchAll(/\b(?:i|we)\b/gi)];
+        const currentClause = subjects.length ? prefix.slice(subjects.at(-1).index).trim() : '';
+        const negation = /^(?:i|we)\s+(?:(?:do|did|will)\s+not|don't|didn't|won't|never|refuse\s+to)\b/i;
+        return negation.test(currentClause) && !/\b(?:then|but|instead|rather)\b/i.test(currentClause);
+    };
     // Natural first-person prose often wraps the locomotion verb in a small
     // transition: "I turn to head out to the hall", "I'm walking to the
     // kitchen", or "I start to walk toward the gate". These are completed
     // player moves just as surely as "I go to..." and must be committed before
     // narration begins, otherwise the prose and authoritative ledger diverge.
-    const actorMovement = /(?:^|[.!?]\s+)(?:(?:then|so)\s+)?(?:(?:i|we)(?:(?:\s+(?:am|are))|['’]m)?\s+|let'?s\s+)(?:(?:turn(?:ed)?|start(?:ed)?|begin|began)\s+(?:to\s+|and\s+)?)?(?:go|went|walk(?:ed|ing)?|head(?:ed|ing)?|travel(?:l?ed|l?ing)?|moved?|moving|run|ran|running|ride|rode|riding|climb(?:ed|ing)?|return(?:ed|ing)?|enter(?:ed|ing)?|exit(?:ed|ing)?|leave|left|leaving|step(?:ped|ping)?|cross(?:ed|ing)?|ma[dk]e\s+(?:my|our)\s+way|sleep|slept)\b\s*(?:out\s+(?=(?:to|towards?)\b))?(?:(?:to|towards?|into|inside|through|across|up|down|for|in)\s+)?([^,.;!?]+)?/ig;
+    const movementCandidates = [];
+    const actorMovement = /(?:^|[.!?]\s+|,\s+(?:but\s+)?)(?:(?:then|so)\s+)?(?:(?:i|we)(?:(?:\s+(?:am|are))|['’]m)?\s+|let'?s\s+)(?:(?:turn(?:ed)?|start(?:ed)?|begin|began)\s+(?:to\s+|and\s+)?)?(?:go|went|walk(?:ed|ing)?|head(?:ed|ing)?|travel(?:l?ed|l?ing)?|moved?|moving|run|ran|running|ride|rode|riding|climb(?:ed|ing)?|return(?:ed|ing)?|enter(?:ed|ing)?|exit(?:ed|ing)?|leave|left|leaving|step(?:ped|ping)?|cross(?:ed|ing)?|ma[dk]e\s+(?:my|our)\s+way|sleep|slept)\b\s*(?:out\s+(?=(?:to|towards?)\b))?(?:(?:to|towards?|into|inside|through|across|up|down|for|in)\s+)?([^,.;!?]+)?/ig;
     for (const actorMatch of actionText.matchAll(actorMovement)) {
         const resolved = resolveMatch(actorMatch);
-        if (resolved) return resolved;
+        if (resolved) movementCandidates.push({ index: actorMatch.index, target: resolved });
     }
 
     // A first-person turn commonly begins with another action before moving:
@@ -23328,8 +27116,71 @@ function extractUserMovementTarget(userInput) {
     // "I watch as Emily leaves" therefore remain somebody else's movement.
     const continuedActorMovement = /(?:^|[.!?]\s+)(?:(?:then|so)\s+)?(?:i|we)\b[^.!?]{0,100}?(?:,\s*(?:and\s+|then\s+)?|\s+(?:and|then|so|before|after|as|while)\s+)(?:(?:i|we)(?:(?:\s+(?:am|are))|['’]m)?\s+)?(?:(?:turn(?:ed)?|start(?:ed)?|begin|began)\s+(?:to\s+|and\s+)?)?(?:go|went|walk(?:ed|ing)?|head(?:ed|ing)?|travel(?:l?ed|l?ing)?|moved?|moving|run|ran|running|ride|rode|riding|climb(?:ed|ing)?|return(?:ed|ing)?|enter(?:ed|ing)?|exit(?:ed|ing)?|leave|left|leaving|step(?:ped|ping)?|cross(?:ed|ing)?|ma[dk]e\s+(?:my|our)\s+way)\b\s*(?:out\s+(?=(?:to|towards?)\b))?(?:(?:to|towards?|into|inside|through|across|up|down|for|in)\s+)?([^,.;!?]+)?/ig;
     for (const continuedMatch of actionText.matchAll(continuedActorMovement)) {
+        if (/^\s*(?:i|we)\s+(?:(?:do|did|will)\s+not|don't|didn't|won't|never|refuse\s+to)\b/i
+            .test(continuedMatch[0].replace(/^[.!?]\s+/, ''))
+            && !/\b(?:then|but|instead|rather)\b/i.test(continuedMatch[0])) continue;
+        if (/\b(?:tell|ask|order|instruct|command)\s+\w+(?:\s+\w+)?\s+to\b/i.test(continuedMatch[0])
+            && !continuedMatch[0].includes(',')) continue;
         const resolved = resolveMatch(continuedMatch);
-        if (resolved) return resolved;
+        if (resolved) movementCandidates.push({ index: continuedMatch.index + continuedMatch[0].lastIndexOf(continuedMatch[1] || ''), target: resolved });
+    }
+
+    // Carrying an object through a route is still the player's own movement:
+    // "I take my binder through the bullpen and into Denton's office."
+    // Restrict this to into/through so a handoff "to Gloria" cannot resolve
+    // to Gloria's home.
+    const carryingMovement = /(?:^|[.!?]\s+|,\s+|(?:then|and)\s+)(?:i|we)\s+(?:take|carry|bring)\b([^.!?]{0,200})/ig;
+    for (const carry of actionText.matchAll(carryingMovement)) {
+        const route = String(carry[1] || '');
+        const waypoints = /\b(?:into|through)\s+([^,.;!?]+?)(?=\s+and\s+(?:into|through)\b|[,.;!?]|$)/ig;
+        for (const waypoint of route.matchAll(waypoints)) {
+            const target = trimTarget(waypoint[1]);
+            if (target) movementCandidates.push({ index: carry.index + carry[0].indexOf(route) + waypoint.index, target });
+        }
+    }
+
+    // A player may name a mapped edge rather than use "go": "I take the
+    // single east-road exit to Marsh Causeway". Do not mistake an ordinary
+    // "take the strap" inventory action for a move.
+    const chosenExit = /(?:^|[.!?]\s+|,\s+)(?:i|we)\s+take\s+(?:the\s+|a\s+)?(?:[\w-]+\s+){0,5}?(?:exit|road|path|route)\s+to\s+([^,.;!?]+)/ig;
+    for (const match of actionText.matchAll(chosenExit)) {
+        const target = trimTarget(match[1]);
+        if (target) movementCandidates.push({ index: match.index + match[0].lastIndexOf(match[1]), target });
+    }
+
+    // "Follow the mapped causeway toward the tower" is traversal of the
+    // named route, not arrival at the tower. Require a first-person subject
+    // or a continuation of the player's own clause; NPC orders stay inert.
+    const followRoute = /(?:^|[.!?]\s+|,\s+)(?:i|we)\s+follow\s+([^,.;!?]+)/ig;
+    for (const match of actionText.matchAll(followRoute)) {
+        const target = trimTarget(match[1]).split(/\s+towards?\s+/i)[0].trim();
+        if (target) movementCandidates.push({ index: match.index + match[0].lastIndexOf(match[1]), target });
+    }
+    const continuedFollowRoute = /(?:^|[.!?]\s+)(?:i|we)\b[^.!?]{0,140}?\s+and\s+follow\s+([^,.;!?]+)/ig;
+    for (const match of actionText.matchAll(continuedFollowRoute)) {
+        const target = trimTarget(match[1]).split(/\s+towards?\s+/i)[0].trim();
+        if (target) movementCandidates.push({ index: match.index + match[0].lastIndexOf(match[1]), target });
+    }
+
+    // The subject carries across coordinated player actions: "I leave Gloria
+    // at reception, cross the bullpen, and enter Denton's office." Prefer
+    // the final destination, not an intermediate waypoint. Do not infer a
+    // player action from another character's explicit subject.
+    if (/(?:^|[.!?]\s+)(?:i|we|let'?s)\b/i.test(actionText)) {
+        const coordinatedMovement = /(?:,\s*(?:and\s+|then\s+)?|\s+(?:and|then)\s+)(?:go|went|walk(?:ed|ing)?|head(?:ed|ing)?|travel(?:l?ed|l?ing)?|moved?|moving|run|ran|running|ride|rode|riding|climb(?:ed|ing)?|return(?:ed|ing)?|enter(?:ed|ing)?|exit(?:ed|ing)?|leave|left|leaving|step(?:ped|ping)?|cross(?:ed|ing)?)\b\s*(?:(?:to|towards?|into|inside|through|across|up|down|for|in)\s+)?([^,.;!?]+)?/ig;
+        for (const match of actionText.matchAll(coordinatedMovement)) {
+            const priorClause = actionText.slice(Math.max(0, actionText.lastIndexOf('.', match.index) + 1), match.index);
+            if (negatedCoordinatedMove(match.index, match[0])) continue;
+            if (!match[0].trimStart().startsWith(',')
+                && /\b(?:tell|ask|order|instruct|command)\s+\w+(?:\s+\w+)?\s+to\b/i.test(priorClause)
+                && !priorClause.includes(',')) continue;
+            const resolved = resolveMatch(match);
+            if (resolved) movementCandidates.push({ index: match.index, target: resolved });
+        }
+    }
+    if (movementCandidates.length) {
+        movementCandidates.sort((a, b) => a.index - b.index);
+        return movementCandidates[movementCandidates.length - 1].target;
     }
 
     // Bare commands are accepted only when the message is not quoted dialogue.
@@ -23393,20 +27244,38 @@ function buildWorldMicroFrameEnvelope(world, sess, userInput) {
 
 async function requestWorldMicroFrame(world, sess, userInput) {
     if (!userInput || !window.HordeLabs) return null;
-    return labsProposal('world_micro_frame', buildWorldMicroFrameEnvelope(world, sess, userInput),
-        'worlds', { priority: 135 });
+    const policy = window.HordeLabs.policyFor('worlds');
+    if (policy === 'off') return null;
+    const envelope = buildWorldMicroFrameEnvelope(world, sess, userInput);
+    const request = window.HordeLabs.propose('world_micro_frame', envelope,
+        { mode: 'worlds', priority: 135 });
+    if (policy === 'shadow') {
+        void request.then(result => recordWorldLabsResult(world, sess, 'labsWorldFrame', result, true)).catch(() => {});
+        return null;
+    }
+    try {
+        const result = await request;
+        recordWorldLabsResult(world, sess, 'labsWorldFrame', result, false);
+        return result?.accepted ? result : null;
+    } catch (_) { return null; }
 }
 
 function trustedWorldMicroMove(world, sess, userInput, candidate) {
     if (!candidate || candidate.actorId !== 'player' || candidate.intent !== 'move'
         || candidate.phase !== 'completed' || Number(candidate.confidence) < 0.72
         || !candidate.destinationId || !candidate.evidence) return null;
+    // A semantic sensor's positive movement proposal cannot override the
+    // player's explicit "do not ... leave" when the action has no affirmative
+    // movement clause. This also covers coordinated negation across commas.
+    if (!extractUserMovementTarget(userInput)
+        && /\b(?:i|we)\s+(?:(?:do|did|will)\s+not|don't|didn't|won't|never|refuse\s+to)\b[^.!?;]{0,140}\b(?:go|walk|head|travel|move|run|ride|climb|return|enter|exit|leave|step|cross)\b/i
+            .test(String(userInput || ''))) return null;
     const view = typeof worldForSession === 'function' ? worldForSession(world, sess) : world;
     const destination = view.locations.find(location => location.id === candidate.destinationId);
-    if (!destination || !findWorldTravelPath(view, sess.playerLocation, destination.id)) return null;
+    if (!destination || !findWorldTravelPath(view, sess.playerLocation, destination.id, { session: sess })) return null;
     const evidencePhrase = extractUserMovementTarget(candidate.evidence);
     const evidenceTarget = evidencePhrase
-        ? resolveWorldMovementTarget(view, sess.playerLocation, evidencePhrase) : null;
+        ? resolveWorldMovementTarget(view, sess.playerLocation, evidencePhrase, true, sess) : null;
     const namedInEvidence = ` ${normalizeLocationSearchText(candidate.evidence)} `
         .includes(` ${normalizeLocationSearchText(destination.name)} `);
     return evidenceTarget?.id === destination.id || namedInEvidence ? destination : null;
@@ -23422,7 +27291,7 @@ function applyUserDirectedMovement(world, sess, userInput, microCandidate = null
         return '';
     }
     const view = typeof worldForSession === 'function' ? worldForSession(world, sess) : world;
-    let targetLoc = targetPhrase ? resolveWorldMovementTarget(view, sess.playerLocation, targetPhrase) : null;
+    let targetLoc = targetPhrase ? resolveWorldMovementTarget(view, sess.playerLocation, targetPhrase, true, sess) : null;
     const exactDeterministicTarget = targetLoc && [targetLoc.id, targetLoc.name]
         .some(value => normalizeLocationSearchText(value) === normalizeLocationSearchText(targetPhrase));
     const microTarget = trustedWorldMicroMove(world, sess, userInput, microCandidate);
@@ -23433,9 +27302,29 @@ function applyUserDirectedMovement(world, sess, userInput, microCandidate = null
     }
     if (!targetPhrase && !targetLoc) return '';
     if (!targetLoc) {
-        const knownButBlocked = findFuzzyLocation(targetPhrase, world.locations);
+        const knownButBlocked = findFuzzyLocation(targetPhrase, view.locations);
         if (knownButBlocked) {
-            showToast(`${knownButBlocked.name} has no valid route from here.`, 'info');
+            const openWithoutRequirement = findWorldTravelPath(view, sess.playerLocation,
+                knownButBlocked.id, { ignoreRequirements: true });
+            const blockedId = openWithoutRequirement?.slice(1).find(id => worldLocationTravelBlock(sess, id));
+            if (blockedId) {
+                const blockedLocation = getLocationRef(view, blockedId);
+                const block = worldLocationTravelBlock(sess, blockedId);
+                showToast(`${blockedLocation?.name || blockedId} is impassable: ${block?.label || 'route closed'}.`, 'info');
+                return '';
+            }
+            const guardedLeg = openWithoutRequirement?.slice(1).map((id, index) => {
+                const from = getLocationRef(view, openWithoutRequirement[index]);
+                const exit = (from?.exits || []).find(exit =>
+                    resolveWorldExitTarget(view, exit)?.id === id
+                    && !worldExitRequirement(sess, exit, from.id).ok);
+                return exit ? { exit, fromId: from.id } : null;
+            }).find(Boolean);
+            const requirement = worldExitRequirement(sess, guardedLeg?.exit, guardedLeg?.fromId);
+            showToast(requirement.requiredItem
+                ? `${knownButBlocked.name} requires ${requirement.requiredItem}${requirement.allowCheckUnlock ? ' or a successful check' : ''}.`
+                : requirement.allowCheckUnlock ? `${knownButBlocked.name} is locked. Describe how you try to open it.`
+                : `${knownButBlocked.name} has no valid route from here.`, 'info');
             return '';
         }
         // A line of roleplay is not a failed command. When the player is clearly
@@ -23458,7 +27347,9 @@ function applyUserDirectedMovement(world, sess, userInput, microCandidate = null
     }
     const result = movePlayerAlongWorldPath(world, sess, targetLoc);
     if (!result.ok) {
-        showToast(`${targetLoc.name} is not reachable from here.`, 'info');
+        showToast(result.reason === 'impassable_destination'
+            ? `${result.blockedLocationName || targetLoc.name} is impassable: ${result.blockedLabel || 'route closed'}.`
+            : `${targetLoc.name} is not reachable from here.`, 'info');
         return '';
     }
     if (!result.moved) return '';
@@ -23466,7 +27357,32 @@ function applyUserDirectedMovement(world, sess, userInput, microCandidate = null
     showToast(`Heading to ${targetLoc.name}...`, 'info');
     rollForScenePopulation(sess.playerLocation, false);
     const routeDescription = (result.travelLegs || []).map(describeWorldTravelLeg).filter(Boolean).join('; ');
-    return `\n[SYSTEM: The player has just arrived at ${targetLoc.name}${routeDescription ? ` after travelling via ${routeDescription}` : ''}. ${result.travelMinutes ? `${result.travelMinutes} minutes elapsed.` : ''} Narrate the journey or arrival in a way that respects the transport mode, route, fare and elapsed time. Describe who they see there immediately.]`;
+    return `\n[SYSTEM: The player has just arrived at ${targetLoc.name}${routeDescription ? ` after travelling via ${routeDescription}` : ''}. ${result.travelMinutes ? `${result.travelMinutes} minutes elapsed.` : ''} Respect transport, fare and elapsed time. If this is familiar, uneventful travel, use one or two concise sentences; do not repeat unchanged scenery or old quest exposition. If people, danger, a deadline or a new consequence matter now, show that change clearly before scenic detail.]`;
+}
+
+function classifyWorldArrivalPacing(world, sess, location, snapshot, presentNpcs, absoluteMinute, hadEngineEvents = false) {
+    if (snapshot?.receiptCheckpoint?.tail?.audit?.source !== 'engine_travel' || !location) return 'ordinary';
+    const previouslyDescribed = (sess.history || []).some(message =>
+        message.role === 'dm' && message.location === location.id);
+    const clock = Math.max(0, Number(absoluteMinute) || 0);
+    const nextTurn = Math.max(1, Number(sess.turnCount) || 1) + 1;
+    const imminentEvent = (sess.scheduledEvents || []).some(event =>
+        event.status === 'scheduled' && (event.dueMinute != null && Number(event.dueMinute) <= clock
+            || event.dueTurn != null && Number(event.dueTurn) <= nextTurn));
+    const activeStakes = (sess.consequences || []).some(item =>
+        item.state !== 'resolved' && (item.locationId === location.id
+            || (Number(item.severity) >= 60
+                && Math.max(Number(item.createdTurn) || 0, Number(item.updatedTurn) || 0) >= nextTurn - 2)));
+    const firstMeeting = !previouslyDescribed && (presentNpcs || []).length > 0;
+    const localThread = (sess.threads || []).some(thread => thread.status === 'open'
+        && (thread.locationId || thread.location_id) === location.id);
+    const changedScene = firstMeeting
+        || hadEngineEvents || (sess.engineEvents || []).length > 0
+        || localThread
+        || (sess.locationStates?.[location.id]?.conditions || []).length > 0
+        || !!sess.pendingCheck || (sess.pendingChecks || []).length > 0
+        || imminentEvent || activeStakes;
+    return changedScene ? 'eventful' : previouslyDescribed ? 'familiar' : 'first';
 }
 
 function candidateEvidenceMovementPhrase(candidate) {
@@ -23477,16 +27393,39 @@ async function executeWorldTurn(commandOrReroll = null) {
     // Re-entry guard: a world turn mutates sess.history, the clock, and NPC
     // spawns — running two concurrently corrupts state. Block until the
     // in-flight turn finishes.
-    if (worldTurnInProgress) {
+    if (worldTurnInProgress || worldMutationInProgress) {
         showToast('The DM is still responding — please wait.', 'info');
         return;
     }
+    // Submitting an action opts back into the live end of the transcript.
+    // A reader can still scroll away during generation without being pulled
+    // back by streaming tokens or a later background World update.
+    if (worldMessageWindow) {
+        const latestCount = getCurrentWorldSession()?.history?.length;
+        const wasReadingOlder = Number.isInteger(latestCount)
+            && worldMessageWindow.end < latestCount;
+        if (Number.isInteger(latestCount)) {
+            worldMessageWindow.start = Math.max(0, latestCount - WORLD_MESSAGE_WINDOW_SIZE);
+            worldMessageWindow.end = latestCount;
+            worldMessageWindow.total = latestCount;
+            worldMessageWindow.forceAnchor = false;
+        }
+        worldMessageWindow.followLatest = true;
+        worldMessageWindow.manualBrowse = false;
+        worldMessageWindow.resumeOnBottom = false;
+        // The streaming bubble is appended to the current DOM. If that DOM is
+        // an older transcript page, move to the live page before streaming so
+        // the reply is not temporarily displayed under unrelated old scenes.
+        if (wasReadingOlder) renderWorldPlayState();
+    }
+    const worldTurnStartedAt = Date.now();
     worldTurnInProgress = true;
     const worldSendBtn = document.getElementById('world-send-btn');
     if (worldSendBtn) {
         // Turn the send button into a Stop button for the duration of the turn
         worldSendBtn.classList.add('stop');
         worldSendBtn.innerHTML = '⏹';
+        worldSendBtn.setAttribute('aria-label', 'Stop generation');
     }
 
     let world = null;
@@ -23499,14 +27438,79 @@ async function executeWorldTurn(commandOrReroll = null) {
     let historyStartLength = null;
     let submittedInput = '';
     let timeoutId = null;
+    let hostedDeadlineId = null;
     let generationTimedOut = false;
+    let hostedDeadlineReached = false;
     let activeIdleTimeoutMs = 0;
     let restoredRerollSnapshot = false;
     let failureRestoreSnapshot = null;
     let committedMovement = null;
     let committedOutfit = null;
+    let currentTotalMinutes = null; // pre-turn clock is also needed by failure recovery
     let turnCallAudit = null;
+    let pendingWorldActionFeedback = null;
+    const turnCallDetails = [];
+    const turnProvider = state.globalSettings?.apiProvider || 'unknown';
+    const worldTurnUsesLocalProvider = isLocalProvider();
+    const persistResolvedTurn = async (options = {}) => {
+        if (worldTurnPersistenceFence?.worldId === world?.id) {
+            worldTurnPersistenceFence.committing = true;
+        }
+        const saved = await saveWorldsState(options);
+        if (pendingWorldActionFeedback) {
+            const committedFeedback = pendingWorldActionFeedback;
+            pendingWorldActionFeedback = null;
+            try { flushWorldActionFeedback(committedFeedback); }
+            catch (feedbackError) { console.warn('World feedback failed after a saved turn:', feedbackError); }
+        }
+        return saved;
+    };
     let labsWorldFrame = null;
+    const recordWorldCall = (kind, model, status, startedAt, usage, outcome = '') => {
+        const tokenCount = value => {
+            if (value === null || value === undefined || value === '') return null;
+            const number = Number(value);
+            return Number.isFinite(number) && number >= 0 ? Math.round(number) : null;
+        };
+        const reportedUsage = usage && typeof usage === 'object' ? {
+            input: tokenCount(usage.prompt_tokens ?? usage.input_tokens),
+            output: tokenCount(usage.completion_tokens ?? usage.output_tokens),
+            total: tokenCount(usage.total_tokens)
+        } : null;
+        const detail = {
+            kind,
+            model: String(model || '').slice(0, 150),
+            status: Number(status) || 0,
+            durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+            usage: reportedUsage && Object.values(reportedUsage).some(value => value !== null)
+                ? reportedUsage : null
+        };
+        turnCallDetails.push(detail);
+        recordWorldModelAttempt(world, sess, { ...detail, provider: turnProvider, usage, outcome }, false);
+    };
+    const fetchWorldTurnJSON = async (kind, body, init) => {
+        const startedAt = performance.now();
+        return HordeWorldModelClient.json({
+            url: apiBase() + '/chat/completions', body, init,
+            // Receipt repair is a non-streaming request. A provider can send
+            // HTTP 200 and then leave its JSON body open forever; the model
+            // client enforces this independently of the turn's idle timer.
+            timeoutMs: kind === 'receiptRepair'
+                ? (isLocalProvider()
+                    ? Math.min(120000, Math.max(45000, localGenerationIdleTimeoutMs() || 120000))
+                    : 45000) : 0,
+            onSettled: detail => recordWorldCall(kind, body.model, detail.status,
+                startedAt, detail.usage, detail.outcome)
+        });
+    };
+    const fetchWorldTurnStream = async (kind, body, init) => {
+        const startedAt = performance.now();
+        return HordeWorldModelClient.stream({
+            url: apiBase() + '/chat/completions', body, init,
+            onFailure: detail => recordWorldCall(kind, body.model, detail.status,
+                startedAt, null, detail.outcome)
+        });
+    };
 
     try {
         world = state.worlds.find(w => w.id === state.activeWorldId);
@@ -23515,6 +27519,12 @@ async function executeWorldTurn(commandOrReroll = null) {
         if (!world || !sess) {
             throw new Error("World state not initialized. Please ensure a world is selected.");
         }
+        worldTurnPersistenceFence = {
+            worldId: world.id,
+            worldManifest: worldPersistenceManifest(world),
+            instance: safeJsonClone(state.worldInstances[world.id]),
+            committing: false
+        };
         normalizeLivingWorldState(world, sess);
         if (sess.pendingChecks?.length && !isReroll && command !== 'init') {
             showToast('Resolve the pending check before taking another action.', 'info');
@@ -23526,6 +27536,7 @@ async function executeWorldTurn(commandOrReroll = null) {
             providerFallback: 0,
             receiptRepair: 0,
             narrativeFollowUp: 0,
+            narrativeRescue: 0,
             chronicleClassifier: 0
         };
         // A failed reroll must restore the currently selected take's live
@@ -23554,6 +27565,7 @@ async function executeWorldTurn(commandOrReroll = null) {
                 turnSnapshot: introSnapshot,
                 stateSource: 'engine_intro',
                 worldAudit: {
+                    turn: introCommit.audit.turn,
                     accepted: introCommit.audit.accepted,
                     informational: introCommit.audit.informational,
                     rejected: introCommit.audit.rejected.length,
@@ -23565,7 +27577,7 @@ async function executeWorldTurn(commandOrReroll = null) {
             introMsg.versionSnapshots = [captureWorldTurnState(world, sess)];
             delete introMsg.postSnapshot;
             delete sess.pendingOriginIntro;
-            await saveState();
+            await persistResolvedTurn();
             renderWorldPlayState();
             return;
         }
@@ -23699,7 +27711,8 @@ async function executeWorldTurn(commandOrReroll = null) {
             const target = getLocationRef(visibleWorld, ex.targetLocationId || getExitTargetName(ex));
             const label = target ? `${getExitDirection(ex) ? `${getExitDirection(ex)} ` : ''}to ${target.name}` : ex.text;
             const routeDetails = [formatWorldTravelMode(ex.mode), ex.routeName || '', ex.travelTime ? `${ex.travelTime}m` : '', ex.cost ? `fare ${ex.cost}` : ''].filter(Boolean);
-            return `${label}${routeDetails.length ? ` (${routeDetails.join(' · ')})` : ''}${ex.isOneWay ? ' [One-Way]' : ''}`;
+            const requirement = worldExitRequirement(sess, ex, loc.id);
+            return `${label}${routeDetails.length ? ` (${routeDetails.join(' · ')})` : ''}${ex.isOneWay ? ' [One-Way]' : ''}${requirement.unlocked ? ' [Unlocked by a check]' : requirement.requiredItem ? ` [Requires ${requirement.requiredItem}${requirement.ok ? ' — held' : ' — not held'}${requirement.allowCheckUnlock ? '; can unlock with check' : ''}; from ${loc.id} to ${target?.id || '?'}]` : requirement.allowCheckUnlock ? ` [Locked; can unlock with check; from ${loc.id} to ${target?.id || '?'}]` : ''}`;
         }).join(', ') : "None";
 
     const archiveQuery = [userInput, locName, locDesc,
@@ -23733,6 +27746,23 @@ async function executeWorldTurn(commandOrReroll = null) {
 
     // Build isolated perspective for present NPCs
     let npcContext = "";
+    const referencedAbsentTargets = findReferencedWorldNpcs(world, sess, userInput)
+        .filter(other => sess.entityStates?.[other.id]?.location !== sess.playerLocation)
+        .slice(0, 4);
+    const questAbsentTargets = (sess.quests || []).some(quest => quest.status === 'active')
+        ? sessionNpcs(world, sess).filter(other =>
+            sess.entityStates?.[other.id]?.location !== sess.playerLocation
+            && worldAbsentNpcIsSearchFocus(sess, other)).slice(0, 4) : [];
+    const knowledgeProtectedTargets = [...new Map([...referencedAbsentTargets, ...questAbsentTargets]
+        .map(other => [other.id, other])).values()].slice(0, 6);
+    // When a player asks about an absent person whose actual whereabouts are
+    // known only to the DM, do not stream unverified dialogue to the screen.
+    // The completed response is checked before it becomes visible/canonical.
+    const knowledgeSensitiveStream = knowledgeProtectedTargets.some(target => {
+        const location = getLocationRef(world, sess.entityStates?.[target.id]?.location);
+        return location && presentNPCs.some(speaker =>
+            !worldNpcHasWhereaboutsEvidence(world, sess, speaker, target, location));
+    });
     const dispositionLabel = (score) => {
         if (score < 15) return 'hostile — wants the player gone or hurt';
         if (score < 35) return 'wary/distrustful';
@@ -23780,7 +27810,11 @@ async function executeWorldTurn(commandOrReroll = null) {
             const qualifier = o.contradicted ? 'CONTRADICTED' : `${source}, ${certainty}% confidence`;
             return `${o.text} [${qualifier}]`;
         });
-        npcContext += `\n[NPC: ${npc.name}] [SIMULATION: ${depth.toUpperCase()}]${description}${personaStr}${activity}${dispoStr}${priorRelationship}${goalStr}${boundaryStr}\nGrounded knowledge: ${groundedKnowledge.join(' | ') || 'No persistent facts yet.'}\nNever upgrade hearsay, suspicion or belief into witnessed fact without new evidence.\n`;
+        const discussedAbsentees = knowledgeProtectedTargets.filter(other => other.id !== npc.id);
+        const absentKnowledge = discussedAbsentees.length
+            ? `\nAbsent people relevant to this scene: ${discussedAbsentees.map(other => other.name).join(', ')}. Their actual location, captivity, survival and private actions in the DM's world data are NOT ${npc.name}'s knowledge. A clue about a direction or a key is not evidence of a particular room or fate. Speak from this NPC's own authored knowledge, witnessed scene, and what the player actually says; distinguish a guess from a fact.`
+            : '';
+        npcContext += `\n[NPC PERSPECTIVE: ${npc.name}] [SIMULATION: ${depth.toUpperCase()}]${description}${personaStr}${activity}${dispoStr}${priorRelationship}${goalStr}${boundaryStr}\nGrounded knowledge: ${groundedKnowledge.join(' | ') || 'No persistent facts yet.'}${absentKnowledge}\nNever upgrade hearsay, suspicion or belief into witnessed fact without new evidence.\n`;
     });
 
     // Absence manifest: every named NPC that is NOT in this scene (capped to keep tokens sane)
@@ -23813,6 +27847,7 @@ async function executeWorldTurn(commandOrReroll = null) {
 
     // Engine events: schedule/population movements queued since last turn —
     // consumed here so arrivals and departures get narrated, never silent.
+    const hadEngineEvents = (sess.engineEvents || []).length > 0;
     let engineEventsPrompt = "";
     if (sess.engineEvents && sess.engineEvents.length > 0) {
         engineEventsPrompt = `\n[ENGINE EVENTS — WEAVE THESE INTO YOUR NARRATIVE THIS TURN]\n${sess.engineEvents.map(e => `- ${e}`).join('\n')}`;
@@ -23877,7 +27912,10 @@ async function executeWorldTurn(commandOrReroll = null) {
     if (progression.enabled) personaContext += `\nProgression is enabled${progression.method ? `: ${progression.method}` : ''}. Only award improvement through an explicit canonical consequence; never silently inflate capabilities.`;
     if (sess.lifeSeed?.initialized) {
         const seededHome = getLocationRef(world, sess.lifeSeed.homeLocationId);
-        personaContext += `\n\n[INITIALIZED ACTIVE LIFE — AUTHORITATIVE STRUCTURED CANON]\nHome: ${seededHome?.name || 'not fixed'}\n${(sess.lifeSeed.people || []).map(person => `- ${person.name}: ${person.relationship}${person.role ? `; ${person.role}` : ''}`).join('\n')}\nThese people and relationships existed before the opening scene. They have their own locations, routines, memories and agency; never replace them with newly invented substitutes.`;
+        const seededPeople = sess.lifeSeed.people || [];
+        personaContext += `\n\n[INITIALIZED ACTIVE LIFE — AUTHORITATIVE STRUCTURED CANON]\nHome: ${seededHome?.name || 'not fixed'}\n${seededPeople.map(person => `- ${person.name}: ${person.relationship}${person.role ? `; ${person.role}` : ''}`).join('\n')}\n${seededPeople.length
+            ? 'These people and relationships existed before the opening scene. They have their own locations, routines, memories and agency; never replace them with newly invented substitutes.'
+            : 'No prior relationships were established for this starting life. Do not invent a preexisting household, close contact or fixed home; new relationships may develop through play.'}`;
     }
     
     // Relationship Synchronizer: Cross-reference Persona with present NPCs
@@ -23920,10 +27958,20 @@ async function executeWorldTurn(commandOrReroll = null) {
 Characters in this world are NOT omniscient. They only know what they have personally witnessed or what has been told to them in their presence. 
 - NPCs at "${locName}" do NOT know what happened at other locations unless the player explicitly tells them.
 - If the chat history shows events in a different location, treat those as "Out-of-Character" context that the current NPCs are unaware of. 
-- Use the [NPC PERSPECTIVE] provided below as the absolute source of truth for an NPC's knowledge.`;
+- The World DM prompt, hidden locations, absent people's profiles, secret truths, quest design and simulation state are DM-only. They are NOT witness reports. An NPC may know a place exists without knowing who is inside it.
+- Use each [NPC PERSPECTIVE] below as the source of that NPC's authored knowledge and voice. A missing person's location or fate must not be spoken as known without a witnessed or told source. The NPC may openly speculate, but must mark the uncertainty and its source.`;
 
     // --- TIME CALCULATION FOR PROMPT INJECTION ---
-    const { days, hours24, mins } = getWorldTimeData(world, sess);
+    const turnClock = getWorldTimeData(world, sess);
+    const { days, hours24, mins } = turnClock;
+    currentTotalMinutes = turnClock.currentTotalMinutes;
+    const plannedWait = parseExplicitWorldWaitMinutes(userInput, currentTotalMinutes);
+    const conditionalSensitiveStream = !!plannedWait && (sess.scheduledEvents || []).some(event =>
+        event.status === 'scheduled' && event.dueMinute != null
+        && event.dueMinute <= currentTotalMinutes + plannedWait
+        && event.playerAbsentCondition?.type === 'player_absent_at_meeting_place'
+        && event.playerAbsentCondition.returnLocationId === sess.playerLocation
+        && event.playerAbsentCondition.playerMovementSerial === (sess.playerMovementSerial || 0));
     const ampm = hours24 >= 12 ? 'PM' : 'AM';
     const hours12 = hours24 % 12 || 12;
     const exactTimeStr = `${hours12}:${mins.toString().padStart(2, '0')} ${ampm}`;
@@ -23957,6 +28005,9 @@ Characters in this world are NOT omniscient. They only know what they have perso
         }
     }
     const canonicalSceneFrame = buildWorldSceneFrame(world, sess);
+    const arrivalPacing = command === 'look'
+        ? classifyWorldArrivalPacing(world, sess, loc, turnSnapshot, presentNPCs, currentTotalMinutes, hadEngineEvents)
+        : 'ordinary';
     const recentCanonicalEvents = (Array.isArray(sess.turnEvents) ? sess.turnEvents : [])
         .slice(-12)
         .map(event => ({
@@ -23986,12 +28037,19 @@ Every response MUST submit exactly one commit_world_turn receipt, including pure
 - Models propose events; the engine commits reality.
 - Every action names actor_id. NPC movement NEVER means player movement.
 - "walks toward", "tries", "plans", "starts", and hypothetical actions are intended/attempted/in_progress, not completed.
+- ${ruleModules.checks ? `If your prose requests or requires a check, the SAME commit_world_turn tool call MUST include root checks:[{label,stat_id,difficulty,on_success,on_failure}] (an inline <world_turn_receipt> fallback instead uses state_updates.checks as that same ARRAY). Use this World's default difficulty ${diceConfig.defaultDifficulty} when no DC was stated. Put success/failure consequences only in those branches; do not narrate an outcome before resolution or ask the player for a raw die roll. Keep unresolved attempts as non-completed events; do not add an improvised inventory item without a separately valid completed transfer.` : 'Checks are disabled in this World; do not request a dice roll in prose.'}
 - scene.player_location_id and entity_updates.location_id are checksums only. They cannot move anyone.
 - A completed player move requires events[type=movement, actor_id=player] and must match the player's own intent, unless an explicit forced/carried/fall/vehicle event names its cause and responsible actor.
 - A completed NPC arrival/departure requires its own movement event.
+- When an NPC explicitly agrees to accompany the player, commit an escort event with actor_id=that NPC, target_id=player, action=join, status=completed, and evidence of their agreement. A request alone is not agreement. The engine then carries this NPC along mapped player travel; action=leave ends it. Do not narrate an absent NPC as accompanying the player unless the escort is already canonical.
+- When the player frees a restrained NPC, use a completed interaction event with actor_id="player", participants:["exact NPC ID"], and evidence of the release; update that NPC's ending activity in entity_updates. If they explicitly agree to follow, add a separate escort join event. Do not invent per-NPC booleans such as tomas_bound in state_updates.
+- When the player actually picks up, receives, consumes, drops, or loses an item, commit an inventory event with actor_id="player", status="completed", action="add" or "consume"/"remove"/"drop", item="exact item name", and narrative evidence. Never put inventory_add or inventory_remove at the receipt root or in state_updates for ordinary inventory actions; those unscoped fields are rejected. Do not claim a pickup succeeded if it was only attempted.
 - Include the complete ending cast in scene.present_character_ids, even when it did not change.
 - If the narrative visits a new place, register it with location_introduced in state_updates and use an actor-scoped movement event.
+- A named route is physically closed only when its location has an explicit route-blocking condition. If authoritative narration says a mapped route is impassable, severed, washed out or gone, commit state_updates.location_state_updates using the exact location ID and add_conditions:["impassable"]. A generic hazard such as "flooded" does not disable travel. A scout's or NPC's report is testimony, not physical fact: keep it attributed and uncertain until observed; never silently turn a claim into a blocked exit.
+- If an unnamed person becomes a named or recurring speaker, register them in state_updates.npc_introduced with a unique id, name, description and persona. They begin at the current scene; use that same id in scene.present_character_ids and entity_updates. Do not invent a new id for an already-authored NPC.
 - When the player truly gains or loses a title, rank, allegiance, legal status, privilege, duty or holding, persist it with player_identity_update. Aspirations, disguises and rumors are not identity changes.
+- If a character gives the player a concrete urgent deadline or a choice with imminent stakes, register it with state_updates.world_events using a stable id, due_in_minutes or due_in_turns, and urgent:true. This is a PLAYER-KNOWN pressure, not proof that a rumor is true: describe the deadline neutrally and add condition_on_trigger only when the threatened change is already established as inevitable. When the player averts, fulfils or redirects it, update/cancel that SAME event id and commit the resulting observable change. If a reported warning already fired, cancelling its reminder alone does not erase the reached consequence: on a later turn supply a specific observed resolution and resolution_event_id naming its completed, evidenced event in this receipt; the resolution must describe the same evidence. Do not leave a claimed urgent threat as prose only or silently forget a choice to help, defer or refuse.
 
 [LOCATION MANIFEST — use these exact IDs in commit_world_turn]
 ${locationManifest}
@@ -24009,6 +28067,7 @@ Weather: ${weather} — weave it into descriptions where natural; it may subtly 
 Description: ${locDesc}${locHidden}
 Exits: ${locExits}
 NPCs Present: ${presentNPCs.map(n => n.name).join(', ') || 'None'}
+NPCs escorting player: ${sessionNpcs(world, sess).filter(npc => sess.entityStates?.[npc.id]?.followingPlayer === true && isNpcActive(sess.entityStates[npc.id])).map(npc => npc.name).join(', ') || 'None'}
 NPCs NOT Present (ABSENT): ${absentNpcManifest || 'None'}${referencedNpcContext}
   ↳ ABSENT characters must NOT appear, speak, or act in this scene. If the story needs one of them here, move them with 'npc_moves' AND narrate their arrival — characters walk in, they do not materialize.${deadNpcManifest ? `
 Dead / Departed (PERMANENT — they can NEVER appear again): ${deadNpcManifest}
@@ -24022,11 +28081,17 @@ Player Condition: ${ruleModules.health || ruleModules.conditions
 Rules Profile: ${gameRules.profileId}. Enabled modules: ${WORLD_RULE_MODULE_KEYS.filter(key => ruleModules[key]).join(', ') || 'none'}. Disabled modules: ${WORLD_RULE_MODULE_KEYS.filter(key => !ruleModules[key]).join(', ') || 'none'}.
 Special rules: vital stat "${ruleModules.health ? (gameRules.vitalStatId || 'none') : 'disabled'}"; zero-health mode "${ruleModules.health ? gameRules.zeroHpMode : 'disabled'}"; currency stat "${ruleModules.commerce ? (gameRules.currencyStatId || 'none') : 'disabled'}" (${gameRules.currencyName}).
 Check Engine: ${ruleModules.checks ? `d${diceConfig.sides}, ${diceConfig.resolution} resolution, ${diceConfig.visibility} visibility, default difficulty ${diceConfig.defaultDifficulty}, stat modifier ${diceConfig.modifierMode}. Submit at most ONE check and put every result-dependent persistent mutation inside its on_success/on_failure object; completed top-level consequences beside a check are rejected. ${diceConfig.resolution === 'player' ? 'End at the moment of uncertainty. The player must resolve the queued check before any other action; the next response receives the canonical result.' : 'The engine resolves it immediately; never invent a roll.'}${diceConfig.visibility === 'hidden' ? ' Keep the die, target and modifier out of narration; reveal only fictional consequences.' : ''}` : 'Disabled — resolve through fiction without dice.'}
+Locked mapped exits: an item requirement is enforced before travel. Only exits marked "can unlock with check" may be picked or forced. For a successful local lock check, put exit_unlocks:[{from_location_id:"${loc?.id || ''}",to_location_id:"<exact adjacent location ID>"}] inside checks[0].on_success, never at the top level or on_failure. Do not narrate travel through the gate until the successful check has opened it. Never supply a roll or force_resolve; the engine owns dice.
 Player Outfit: ${sess.outfit || 'Standard attire'}
 ${questPrompt}${npcContext}${engineEventsPrompt}${threadsPrompt}${livingWorldPrompt}${societyPrompt}`;
     
     if (command === "look") {
-        systemPrompt += "\n\n[IMMEDIATE TASK]\nThe player has just arrived at the location listed in 'CURRENT WORLD STATE'. \n1. DESCRIBE the transition and the new surroundings in detail.\n2. The player is already there: assert the current ID in commit_world_turn but emit no new player movement event.\n3. Focus entirely on narrative and atmosphere.";
+        const arrivalLength = arrivalPacing === 'familiar'
+            ? 'This is a familiar, uneventful route. Use one or two sentences: where the player is now and only what is newly actionable. Do not retell the journey, repeat weather/scenery, or recap unchanged quest stakes.'
+            : arrivalPacing === 'eventful'
+                ? 'Something in this arrival may have changed. Lead with the observable person, event, threat, deadline or consequence and its immediate choice; use only the detail needed to make that change clear. Do not bury it in routine travel prose.'
+                : 'On a first arrival, establish one distinctive detail and the immediate choices in a short paragraph. Do not spend several paragraphs replaying an uneventful journey.';
+        systemPrompt += `\n\n[IMMEDIATE TASK — ARRIVAL PACING]\nThe player has just arrived at the location listed in 'CURRENT WORLD STATE'. ${arrivalLength}\nThe player and any existing escorts have already moved: assert the current ID in commit_world_turn with scene.player_location_changed=false, but emit no duplicate player movement or escort join event. Preserve every real event and consequential state change in the mandatory receipt, even when narration is brief.`;
         userInput = "Describe what I see.";
     } else if (command === "init") {
         systemPrompt += "\n\nThis is the beginning of the journey. Introduce the world and the current scene.";
@@ -24100,70 +28165,6 @@ ${questPrompt}${npcContext}${engineEventsPrompt}${threadsPrompt}${livingWorldPro
 
     showToast('DM is thinking...', 'info');
     
-        // --- History Truncation (Safety Audit: More Conservative) ---
-        const CONTEXT_LIMIT = parseInt(world.contextSize) || 8192;
-        const GEN_LIMIT = parseInt(world.maxTokens) || 2048;
-        
-        // Scale buffer with context size (0.5% or 1000, whichever is larger at scale)
-        const SAFETY_BUFFER = Math.max(1000, Math.ceil(CONTEXT_LIMIT * 0.01)); 
-        
-        // Use a more conservative divider (3.2 instead of 3.5) to account for diverse tokenizers
-        const TOKEN_DIVIDER = 3.2; 
-
-        let systemTokens = Math.ceil(systemPrompt.length / TOKEN_DIVIDER);
-        let injectedTokens = 0;
-        injectedHistory.forEach(inj => injectedTokens += Math.ceil(inj.content.length / TOKEN_DIVIDER));
-        
-        let availableTokens = CONTEXT_LIMIT - systemTokens - injectedTokens - GEN_LIMIT - SAFETY_BUFFER;
-        if (preset && availableTokens <= 0) {
-            const recommendedContext = Math.ceil((systemTokens + injectedTokens + GEN_LIMIT + SAFETY_BUFFER + 2048) / 1024) * 1024;
-            const warningKey = `${world.id}:${preset.id}:${CONTEXT_LIMIT}:${recommendedContext}`;
-            if (lastPresetContextWarningKey !== warningKey) {
-                lastPresetContextWarningKey = warningKey;
-                showToast(`Preset context is too small (${CONTEXT_LIMIT} tokens). Raise World Context Size to at least ${recommendedContext}.`, 'warning');
-            }
-            console.warn(`Horde Engine: preset "${preset.name}" plus engine instructions exceed the configured context (${CONTEXT_LIMIT}); recommended minimum ${recommendedContext}.`);
-        }
-        
-        let historyToSend = [];
-        let latestFreakyWorldStateKept = false;
-        const startIdx = isReroll ? sess.history.length - 2 : sess.history.length - 1;
-        for (let i = startIdx; i >= 0; i--) {
-            const m = sess.history[i];
-            // Version-aware read: never send a rerolled-away take to the API
-            const canonText = canonicalMsgText(m);
-            if (!canonText) continue;
-
-            const isDistant = m.location && m.location !== sess.playerLocation;
-
-            let content = canonText;
-            if (m.role === 'dm' && freakyWorldMacros) {
-                const hasState = /<internal_states\b/i.test(content);
-                content = prepareFreakyPresetHistory(content, !latestFreakyWorldStateKept);
-                if (hasState) latestFreakyWorldStateKept = true;
-            }
-            if (!content) continue;
-            if (isDistant) {
-                const msgLoc = world.locations.find(l => l.id === m.location);
-                const locLabel = msgLoc ? `[Loc: ${msgLoc.name}] ` : '';
-                content = `[DISTANT EVENT (HIDDEN FROM PRESENT NPCs)]: ${locLabel}${content}`;
-            }
-
-            const tokens = Math.ceil(content.length / TOKEN_DIVIDER);
-            if (availableTokens - tokens > 0) {
-                const role = m.role === 'dm' ? 'assistant' : 'user';
-                // Prevent consecutive identical roles
-                if (historyToSend.length > 0 && historyToSend[0].role === role) {
-                    historyToSend[0].content = content + "\n\n" + historyToSend[0].content;
-                } else {
-                    historyToSend.unshift({ role: role, content: content });
-                }
-                availableTokens -= tokens;
-            } else {
-                break;
-            }
-        }
-
         const modularMandate = [
             ruleModules.relationships
                 ? "8. Living Relationships: Persist meaningful earned shifts as completed relationship events with actor_id, target_id, change and cause."
@@ -24175,7 +28176,7 @@ ${questPrompt}${npcContext}${engineEventsPrompt}${threadsPrompt}${livingWorldPro
                 ? "9a. NPC Schedules: Persist altered routines with 'schedule_updates'; characters follow their timetable unless the narrative pins them elsewhere."
                 : '9a. NPC schedules are DISABLED. Move characters only when the on-screen narrative requires it.',
             ruleModules.quests
-                ? "10b. QUESTS: When the player knowingly accepts an objective, use 'quests_update' with exact existing IDs, structured objectives, and promised rewards. The engine detects completion and grants rewards once."
+                ? "10b. QUESTS: When the player knowingly accepts an objective, use 'quests_update' with exact existing IDs, structured objectives, and promised rewards. When direct on-screen evidence fulfills a manual objective, mark it completed with those IDs in the same receipt; do not infer completion from mere co-location. The engine grants declared rewards once."
                 : '10b. The quest engine is DISABLED. Offer organic situations and personal aims without creating quest records, objectives, completion notices, or mechanical rewards.',
             ruleModules.inventory
                 ? "12. Inventory is authoritative. Use completed inventory events with actor_id='player', action and item whenever an item is gained, consumed, given away, lost, dropped or destroyed."
@@ -24206,6 +28207,82 @@ ${modularMandate}
 13. Hooks over Summaries: End most responses on something to react to — a question asked, a sound from the next room, a hand on a weapon — not a tidy summary of what just happened.
 14. If the player supplies a die result while checks are enabled, adjudicate that existing roll rather than rolling again.${directorNotesRequired ? `
 15. DIRECTOR MODE (ACTIVE PRESET — REQUIRED): Follow the active plot-tracking module and append exactly one <details><summary>Plot Momentum</summary>...</details> block after the narrative and any [MEMORY] line. It must be the final element of every response. Do not omit it when tools are used.` : ''}`;
+
+        // Budget the COMPLETE system prompt, the reserved tool schema, and the
+        // current action before older history. Previously this ran before the
+        // final mandate existed; a large World silently sent system-only
+        // requests that billed the player while ignoring their action.
+        const configuredContext = parseInt(world.contextSize, 10) || 32768;
+        const physicalContext = typeof openRouterModels !== 'undefined'
+            ? Number(openRouterModels.find(model => model.id === (world.model || state.globalSettings.defaultModel))?.context_length) || Infinity
+            : Infinity;
+        const CONTEXT_LIMIT = Math.min(configuredContext, physicalContext);
+        const configuredGenLimit = parseInt(world.maxTokens, 10) || 4096;
+        // A familiar empty arrival needs only a small scene and a no-change
+        // receipt. Leave first/eventful arrivals their full output budget.
+        const GEN_LIMIT = arrivalPacing === 'familiar' && !world.reasoning
+            ? Math.min(configuredGenLimit, 2048) : configuredGenLimit;
+        const SAFETY_BUFFER = Math.max(1000, Math.ceil(CONTEXT_LIMIT * 0.01));
+        const TOKEN_DIVIDER = 3.2;
+        // The non-compact schema can exceed 4K estimated tokens. Reserve its
+        // full envelope while selecting history, or the outgoing preflight
+        // starts failing once a long campaign finally fills the history slot.
+        const TOOL_RESERVE = 8192;
+        const injectedTokens = injectedHistory.reduce((sum, inj) => sum + Math.ceil(inj.content.length / TOKEN_DIVIDER), 0);
+        const fixedTokens = Math.ceil((systemPrompt.length + finalMandate.length) / TOKEN_DIVIDER)
+            + injectedTokens + GEN_LIMIT + SAFETY_BUFFER + TOOL_RESERVE + 512;
+        let availableTokens = CONTEXT_LIMIT - fixedTokens;
+        const startIdx = isReroll ? sess.history.length - 2 : sess.history.length - 1;
+        const latestAction = !['init', 'look', 'continue'].includes(command) ? sess.history[startIdx] : null;
+        const latestActionText = latestAction?.role === 'user' ? canonicalMsgText(latestAction) : '';
+        const requiredTokens = Math.ceil(String(latestActionText || '').length / TOKEN_DIVIDER);
+        if (latestAction && !latestActionText) {
+            throw new Error('The current player action could not be read. No model request was sent.');
+        }
+        if (availableTokens <= Math.max(requiredTokens, 256)) {
+            const minimum = Math.ceil((fixedTokens + requiredTokens + 2048) / 1024) * 1024;
+            throw new Error(`World Context Size is too small for this scene (${configuredContext} tokens). Increase it to at least ${minimum} in World Studio → AI Configuration, or use a model with a larger context window. No model request was sent.`);
+        }
+
+        let historyToSend = [];
+        let latestFreakyWorldStateKept = false;
+        // The ledger/episodic memory owns distant continuity. Thousands of
+        // tiny chat messages cost JSON-role overhead even when their content
+        // appears to fit the token estimate, and slow long campaigns badly.
+        let selectedHistoryMessages = 0;
+        for (let i = startIdx; i >= 0 && selectedHistoryMessages < 160; i--) {
+            const m = sess.history[i];
+            const canonText = canonicalMsgText(m);
+            if (!canonText) continue;
+            const isCurrentAction = i === startIdx && m.role === 'user';
+            // A movement action is stored at its origin for witness auditing.
+            // It is still the *current* player action, not a distant event.
+            const isDistant = !isCurrentAction && m.location && m.location !== sess.playerLocation;
+            let content = canonText;
+            if (m.role === 'dm' && freakyWorldMacros) {
+                const hasState = /<internal_states\b/i.test(content);
+                content = prepareFreakyPresetHistory(content, !latestFreakyWorldStateKept);
+                if (hasState) latestFreakyWorldStateKept = true;
+            }
+            if (!content) continue;
+            if (isDistant) {
+                const msgLoc = world.locations.find(location => location.id === m.location);
+                content = `[DISTANT EVENT (HIDDEN FROM PRESENT NPCs)]: ${msgLoc ? `[Loc: ${msgLoc.name}] ` : ''}${content}`;
+            }
+            const tokens = Math.ceil((content.length + 48) / TOKEN_DIVIDER);
+            if (availableTokens - tokens <= 0) {
+                if (isCurrentAction) throw new Error('The current player action exceeds this World’s context budget. Shorten the action or increase World Context Size. No model request was sent.');
+                break;
+            }
+            const role = m.role === 'dm' ? 'assistant' : 'user';
+            if (historyToSend.length > 0 && historyToSend[0].role === role) {
+                historyToSend[0].content = content + '\n\n' + historyToSend[0].content;
+            } else {
+                historyToSend.unshift({ role, content });
+            }
+            availableTokens -= tokens;
+            selectedHistoryMessages++;
+        }
         
         // Splice in-chat preset injections at their configured depth + role
         // (depth = messages from the end) rather than dumping them all up front.
@@ -24233,8 +28310,13 @@ ${modularMandate}
         if (command === "init" || command === "look" || command === "continue") {
             const mandate = command === "init" ? "Introduce the world and current scene."
                 : command === "continue" ? "Continue the scene naturally from exactly where the narration left off. Do not repeat or summarize previous text."
-                : `Describe the transition to ${locName} and the new surroundings. Focus on atmosphere and sensory details.`;
-            messages.push({ role: 'user', content: `[MANDATE: Respond with rich narrative prose only. No OOC talk.]\n\n${mandate}` });
+                : arrivalPacing === 'familiar'
+                    ? `A short arrival at ${locName}: one or two sentences, only new actionable detail; no repeated route description.`
+                    : arrivalPacing === 'eventful'
+                        ? `Show the immediate change at ${locName} and the choice it creates. Give it room if the stakes require it.`
+                        : `Establish ${locName} and the immediate choices in a short paragraph.`;
+            const proseStyle = command === 'look' ? 'Use the arrival pacing above with no OOC talk.' : 'Give rich narrative prose with no OOC talk.';
+            messages.push({ role: 'user', content: `[MANDATE: ${proseStyle} Separately submit the required commit_world_turn receipt, or its tagged fallback if tool calling is unavailable.]\n\n${mandate}` });
         }
 
         // Reroll Anti-Cache & Variance Directive
@@ -24244,7 +28326,18 @@ ${modularMandate}
 
         const controller = new AbortController();
         worldGenController = controller; // expose for the user Stop button
-        const configuredLocalIdleTimeout = isLocalProvider() ? localGenerationIdleTimeoutMs() : 45000;
+        const configuredLocalIdleTimeout = worldTurnUsesLocalProvider ? localGenerationIdleTimeoutMs() : 45000;
+        // Hosted providers may drip SSE keepalives indefinitely. Keep the
+        // existing idle timeout for silent requests, but also bound the whole
+        // hosted turn across fallback and receipt-repair calls. Local models
+        // retain their configurable (including disabled) idle-only policy.
+        if (!worldTurnUsesLocalProvider) {
+            hostedDeadlineId = setTimeout(() => {
+                hostedDeadlineReached = true;
+                generationTimedOut = true;
+                controller.abort();
+            }, WORLD_HOSTED_TURN_DEADLINE_MS);
+        }
         const armGenerationIdleTimeout = (overrideMs = configuredLocalIdleTimeout) => {
             if (timeoutId) clearTimeout(timeoutId);
             activeIdleTimeoutMs = Math.max(0, Number(overrideMs) || 0);
@@ -24300,7 +28393,7 @@ ${modularMandate}
                                 type: "object",
                                 properties: {
                                     id: { type: "string" },
-                                    type: { type: "string", enum: ["movement", "activity", "interaction", "outfit", "inventory", "condition", "time", "observation", "status", "relationship", "quest", "discovery", "environment", "dialogue", "other"] },
+                                    type: { type: "string", enum: ["movement", "escort", "activity", "interaction", "outfit", "inventory", "condition", "time", "observation", "status", "relationship", "quest", "discovery", "environment", "dialogue", "other"] },
                                     actor_id: { type: "string", description: "Exact NPC ID, or 'player'. Required for actor actions. NPC movement can never move the player." },
                                     participants: { type: "array", items: { type: "string" } },
                                     status: { type: "string", enum: ["intended", "attempted", "in_progress", "completed", "cancelled", "failed"] },
@@ -24309,7 +28402,7 @@ ${modularMandate}
                                     movement_mode: { type: "string", enum: ["voluntary", "forced", "carried", "vehicle", "fall", "teleport"] },
                                     caused_by_actor_id: { type: "string", description: "Required with a non-voluntary player movement." },
                                     activity: { type: "string" },
-                                    action: { type: "string" },
+                                    action: { type: "string", description: "For escort events, join when an NPC explicitly agrees to accompany the player; leave when they stop." },
                                     target_id: { type: "string" },
                                     change: { type: "number" },
                                     label: { type: "string" },
@@ -24355,16 +28448,6 @@ ${modularMandate}
                         },
                         location_id: { type: "string", description: "DEPRECATED AND IGNORED. Never use this naked field. Player movement requires an events[] movement with actor_id='player'." },
                         time_skip_minutes: { type: "integer", description: "Advance the world clock by this many minutes (e.g. 480 for 8 hours of sleep, 60 for waiting an hour). Use this when the player's action explicitly takes a long time." },
-                        inventory_add: { type: "array", items: { anyOf: [
-                            { type: "string" },
-                            { type: "object", properties: {
-                                name: { type: "string" }, type: { type: "string", enum: ["weapon", "armor", "clothing", "consumable", "tool", "cyberware", "treasure", "quest", "custom"] },
-                                quantity: { type: "integer", minimum: 1 }, description: { type: "string" }, slot: { type: "string" },
-                                damage: { type: "string" }, damage_type: { type: "string" }, armor: { type: "number" }, value: { type: "number" },
-                                modifiers: { type: "object", additionalProperties: true }
-                            }, required: ["name"] }
-                        ] }, description: "Items added to inventory. Prefer an authored world item name. Use an object only when a newly discovered item needs persistent damage, armor, slot, value or bonuses." },
-                        inventory_remove: { type: "array", items: { type: "string" }, description: "Items that leave the inventory: consumed, given away, sold, lost, destroyed, or used up. ALWAYS call this when the narrative removes an item from the player." },
                         stat_changes: { 
                             type: "object", 
                             description: "Changes to custom player stats. Positive for increase, negative for decrease.",
@@ -24428,7 +28511,7 @@ ${modularMandate}
                                     on_success: {
                                         type: "object",
                                         additionalProperties: true,
-                                        description: "Persistent updates applied only if this check succeeds. Use the same state-update fields as commit_world_turn (inventory_add/remove, stat_changes, quests_update, npc_disposition_changes, etc.)."
+                                        description: "Persistent updates applied only if this check succeeds. Use state-update fields such as inventory_add/remove, stat_changes, quests_update. A local authored check-unlockable exit may be opened with exit_unlocks:[{from_location_id,to_location_id}]. Never supply a roll."
                                     },
                                     on_failure: {
                                         type: "object",
@@ -24617,6 +28700,9 @@ ${modularMandate}
                                     title: { type: "string" },
                                     description: { type: "string" },
                                     status: { type: "string", enum: ["scheduled", "cancelled"] },
+                                    urgent: { type: "boolean", description: "True only for a deadline or threat the player has learned about. It appears as a visible stake until resolved; reuse this event id to cancel it when the player's choice averts it. A warning is not proof that its threatened outcome will occur." },
+                                    resolution: { type: "string", description: "When cancelling an already-triggered warning, state the specific observed outcome that resolved it. Cancelling a reminder without evidence leaves the reached-deadline consequence open." },
+                                    resolution_event_id: { type: "string", description: "ID of a completed, evidenced event in this same receipt proving a later resolution of a reported warning." },
                                     due_in_turns: { type: "integer" },
                                     due_in_minutes: { type: "integer" },
                                     repeat_every_turns: { type: "integer" },
@@ -24628,7 +28714,7 @@ ${modularMandate}
                                     influence_change: { type: "number" }
                                 }
                             },
-                            description: "Schedule, revise, repeat, or cancel future developments. They fire on later player turns."
+                            description: "Schedule, revise, repeat, or cancel future developments. They fire on later player turns. Register a concrete player-known urgent deadline here, and cancel or revise that SAME id when choices change the outcome."
                         },
                         location_state_updates: {
                             type: "array",
@@ -24764,6 +28850,7 @@ ${modularMandate}
                             items: {
                                 type: "object",
                                 properties: {
+                                    id: { type: "string", description: "Stable unique ID for this new NPC; use the same ID in the scene checksum and entity_updates." },
                                     name: { type: "string", description: "Name of the newly introduced character." },
                                     description: { type: "string", description: "A short physical description of the character." },
                                     persona: { type: "string", description: "Their personality, voice, and motivations — REQUIRED if this character will speak or recur. Without it they will be a cardboard extra." },
@@ -24849,12 +28936,10 @@ ${modularMandate}
         // no longer gets two free turns in which state silently disappears.
         const knownToolShy = Array.isArray(state.globalSettings.toolShyModels)
             && state.globalSettings.toolShyModels.includes(modelId);
-        if (command !== 'look' && command !== 'init') {
-            const escapeHatch = `\n\n[TURN RECEIPT DELIVERY FAILSAFE]\nUse commit_world_turn as a real tool call. If and only if this provider cannot emit that tool call, append exactly one block at the end instead:\n<world_turn_receipt>{"scene":{"player_location_id":"${sess.playerLocation}","player_location_changed":false,"present_character_ids":[]},"events":[],"entity_updates":[],"state_updates":{}}</world_turn_receipt>\nThe receipt is mandatory even when nothing changes. Fill it with the same actor-scoped events, full ending cast and updates you would have sent to the tool. Never send both a successful tool call and the tagged block.${knownToolShy ? '\nThis model has previously failed to deliver tool calls, so use the tagged receipt rather than dropping state.' : ''}`;
-            const lastSystem = [...messages].reverse().find(entry => entry.role === 'system');
-            if (lastSystem) lastSystem.content += escapeHatch;
-            else messages.push({ role: 'system', content: escapeHatch });
-        }
+        const escapeHatch = `\n\n[TURN RECEIPT DELIVERY FAILSAFE]\nUse commit_world_turn as a real tool call. If and only if this provider cannot emit that tool call, append exactly one block at the end instead:\n<world_turn_receipt>{"scene":{"player_location_id":"${sess.playerLocation}","player_location_changed":false,"present_character_ids":[]},"events":[],"entity_updates":[],"state_updates":{}}</world_turn_receipt>\nThe receipt is mandatory even when nothing changes. Fill it with the same actor-scoped events, full ending cast and updates you would have sent to the tool. Never send both a successful tool call and the tagged block.${knownToolShy ? '\nThis model has previously failed to deliver tool calls, so use the tagged receipt rather than dropping state.' : ''}`;
+        const lastSystem = [...messages].reverse().find(entry => entry.role === 'system');
+        if (lastSystem) lastSystem.content += escapeHatch;
+        else messages.push({ role: 'system', content: escapeHatch });
 
         const requestBody = {
             model: modelId,
@@ -24884,7 +28969,7 @@ ${modularMandate}
         }
 
         addParam('temperature', temp);
-        addParam('max_tokens', parseInt(world.maxTokens) || 2048);
+        addParam('max_tokens', GEN_LIMIT);
         addParam('top_p', world.topP || 1);
         if (world.freqPenalty) addParam('frequency_penalty', world.freqPenalty);
         if (world.presPenalty) addParam('presence_penalty', world.presPenalty);
@@ -24901,27 +28986,47 @@ ${modularMandate}
             if (world.includeReasoning) requestBody.include_reasoning = true;
         }
 
+        // The tool contract is provider input too. Check the actual outgoing
+        // payload after compacting it; a conservative estimate prevents a
+        // model call that silently drops the action or exceeds its window.
+        const estimatedInputTokens = Math.ceil(JSON.stringify({
+            messages: requestBody.messages, tools: requestBody.tools
+        }).length / TOKEN_DIVIDER);
+        if (estimatedInputTokens + GEN_LIMIT + SAFETY_BUFFER > CONTEXT_LIMIT) {
+            const minimum = Math.ceil((estimatedInputTokens + GEN_LIMIT + SAFETY_BUFFER + 1024) / 1024) * 1024;
+            throw new Error(`This World turn needs about ${minimum} context tokens including its tool contract, but the configured/model limit is ${CONTEXT_LIMIT}. Increase World Context Size or use a larger-context model. No model request was sent.`);
+        }
+        if (latestActionText && !requestBody.messages.some(message =>
+            message.role === 'user' && typeof message.content === 'string'
+                && message.content.includes(latestActionText))) {
+            throw new Error('The current player action was missing from the outgoing World prompt. No model request was sent.');
+        }
+
         let questFallbackMode = false;
         turnCallAudit.main++;
-        let response = await fetch(apiBase() + '/chat/completions', {
+        let activeStreamKind = 'main';
+        let activeStream = await fetchWorldTurnStream(activeStreamKind, requestBody, {
             method: 'POST',
             signal: controller.signal,
             headers: {
                 ...authHeaders(),
                 'Content-Type': 'application/json',
                 ...attributionHeaders()
-            },
-            body: JSON.stringify(requestBody)
+            }
         });
+        let response = activeStream.response;
 
         if (!response.ok) {
-            let errBody = await response.text();
-            if (errBody.includes("tool use") || errBody.includes("commit_world_turn")) {
+            let errBody = await HordeWorldModelClient.readText(response, controller.signal);
+            recordWorldCall(activeStreamKind, modelId, response.status, activeStream.startedAt, null);
+            if ((response.status === 400 || response.status === 422)
+                && /\btools?\b|tool_choice|tool_calls|function[_ -]?call|parallel_tool_calls|commit_world_turn/i.test(errBody)) {
                 console.warn("Horde Engine: Model does not support tools. Retrying in Narrative Rescue mode.");
                 showToast("Model doesn't support tools. Using Narrative Fallback...", "info");
                 // RETRY WITHOUT TOOLS
                 delete requestBody.tools;
-                requestBody.tool_choice = "none";
+                delete requestBody.tool_choice;
+                delete requestBody.parallel_tool_calls;
                 questFallbackMode = ruleModules.quests;
                 const fallbackPlacement = directorNotesRequired
                     ? 'immediately before the required final <details><summary>Plot Momentum</summary> block'
@@ -24931,26 +29036,38 @@ ${modularMandate}
                     index === 0 ? { ...message, content: String(message.content || '') + fallbackInstruction } : message);
                 
                 turnCallAudit.providerFallback++;
-                response = await fetch(apiBase() + '/chat/completions', {
+                activeStreamKind = 'providerFallback';
+                activeStream = await fetchWorldTurnStream(activeStreamKind, requestBody, {
                     method: 'POST',
                     signal: controller.signal,
-                    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                    body: JSON.stringify(requestBody)
+                    headers: { 'Content-Type': 'application/json', ...authHeaders() }
                 });
-                if (!response.ok) errBody = await response.text();
+                response = activeStream.response;
+                if (!response.ok) {
+                    errBody = await HordeWorldModelClient.readText(response, controller.signal);
+                    recordWorldCall(activeStreamKind, modelId, response.status, activeStream.startedAt, null);
+                }
             }
             if (!response.ok) throw new Error(errBody || `API request failed (${response.status})`);
         }
 
-        if (!response.body) throw new Error('No response body from API');
+        if (!response.body) {
+            recordWorldCall(activeStreamKind, modelId, response.status, activeStream.startedAt, null);
+            throw new Error('No response body from API');
+        }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let fullText = "";
         const streamedToolCalls = new Map();
         let streamError = null;       // provider error delivered inside the stream
+        let streamCompleted = false;
         let reasoningSeen = false;    // model emitted hidden reasoning deltas
         let lastFinishReason = null;  // e.g. 'length' = token budget exhausted
+        let streamUsage = null;
+        let sawStreamData = false;
+        let sawCompletionChoice = false;
+        let nonStreamBody = '';
 
         // Create a temporary UI message for streaming
         const aiMsgDiv = document.createElement('div');
@@ -24958,10 +29075,12 @@ ${modularMandate}
         aiMsgDiv.innerHTML = `<div class="msg-bubble"><div class="msg-text"></div></div>`;
         document.getElementById('world-messages-container').appendChild(aiMsgDiv);
         const textTarget = aiMsgDiv.querySelector('.msg-text');
+        if (knowledgeSensitiveStream || conditionalSensitiveStream) textTarget.textContent = 'Writing scene…';
 
         let buffer = "";
         const processWorldStreamLine = line => {
             if (!line.startsWith('data:')) return;
+            sawStreamData = true;
             const data = line.slice(5).trimStart().replace(/\r$/, '');
             if (!data || data === '[DONE]') return;
             try {
@@ -24970,7 +29089,9 @@ ${modularMandate}
                     streamError = new Error(json.error.message || 'Provider error mid-stream');
                     return;
                 }
+                if (json.usage && typeof json.usage === 'object') streamUsage = json.usage;
                 const choice = json.choices?.[0] || {};
+                if (json.choices?.length) sawCompletionChoice = true;
                 const delta = choice.delta || choice.message || {};
                 if (choice.finish_reason) lastFinishReason = choice.finish_reason;
                 if (delta.reasoning || delta.thought) {
@@ -24978,14 +29099,19 @@ ${modularMandate}
                     if (dmTypingLabel && !fullText) dmTypingLabel.textContent = 'DM is thinking deeply...';
                 }
                 const content = Array.isArray(delta.content)
-                    ? delta.content.map(part => part?.text || '').join('')
+                    ? delta.content.map(part => typeof part?.text === 'string'
+                        ? part.text : part?.text?.value || '').join('')
                     : delta.content;
                 if (content) {
                     fullText += content;
-                    textTarget.innerHTML = world.activePresetId === FREAKY_FRANKENSTEIN_5_4_ID
-                        ? renderFreakyPresetMessage(fullText) : parseHordeMarkdown(fullText);
+                    if (!knowledgeSensitiveStream && !conditionalSensitiveStream) {
+                        const visibleStreamText = scrubNarrativeArtifacts(fullText)
+                            .replace(/(?:^|\n)\s*(?:assistant\s+to=)?commit_world_turn\s*\([\s\S]*$/i, '');
+                        textTarget.innerHTML = world.activePresetId === FREAKY_FRANKENSTEIN_5_4_ID
+                            ? renderFreakyPresetMessage(visibleStreamText) : parseHordeMarkdown(visibleStreamText);
+                    }
                     const container = document.getElementById('world-messages-container');
-                    container.scrollTop = container.scrollHeight;
+                    if (worldMessageWindow?.followLatest !== false) container.scrollTop = container.scrollHeight;
                 }
                 const incomingCalls = delta.tool_calls || choice.message?.tool_calls || [];
                 incomingCalls.forEach(tc => accumulateWorldToolCall(streamedToolCalls, tc));
@@ -25004,69 +29130,198 @@ ${modularMandate}
                 console.warn('Horde Engine: ignored malformed stream event', error.message);
             }
         };
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        try {
+            while (true) {
+                const { done, value } = await HordeWorldModelClient.readChunk(reader, controller.signal);
+                if (done) break;
 
-            // IDLE timeout, not wall-clock: reasoning models (DeepSeek Pro, o-series)
-            // legitimately think for 60s+ while streaming reasoning deltas. As long
-            // as ANY data flows, keep the connection alive; only kill true stalls.
-            armGenerationIdleTimeout();
+                // Idle timeout, not wall-clock: reasoning models can legitimately
+                // think for a long time while still streaming useful data.
+                armGenerationIdleTimeout();
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop();
+                const chunkText = decoder.decode(value, { stream: true });
+                if (!sawStreamData) nonStreamBody += chunkText;
+                buffer += chunkText;
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
 
-            for (const line of lines) {
-                processWorldStreamLine(line);
+                for (const line of lines) {
+                    processWorldStreamLine(line);
+                    if (streamError) break;
+                }
                 if (streamError) break;
+                if (sawStreamData) nonStreamBody = '';
+                else if (nonStreamBody.length > 8 * 1024 * 1024) {
+                    streamError = new Error('The model provider returned an oversized non-streaming completion.');
+                    break;
+                }
             }
-            if (streamError) break;
+            // A final SSE event may have no trailing newline.
+            const tail = decoder.decode();
+            buffer += tail;
+            if (!sawStreamData) nonStreamBody += tail;
+            if (buffer.trim()) processWorldStreamLine(buffer);
+            // A few otherwise compatible servers ignore stream:true and send
+            // one ordinary JSON completion. Consume its prose and tool calls
+            // through the same receipt path instead of treating it as empty.
+            if (!sawStreamData && !streamError) {
+                const completion = HordeWorldModelClient.decodeCompletionBody(nonStreamBody);
+                processWorldStreamLine(`data: ${JSON.stringify(completion)}`);
+            }
+            if (sawStreamData && !sawCompletionChoice && !streamError) {
+                streamError = new Error('The model provider sent no chat-completion choice. Retry or choose another model.');
+            }
+            streamCompleted = true;
+        } finally {
+            aiMsgDiv.remove();
+            recordWorldCall(activeStreamKind, modelId, response.status, activeStream.startedAt, streamUsage,
+                controller.signal.aborted ? 'aborted' : streamError || !streamCompleted ? 'stream_error' : 'ok');
         }
-        // TextDecoder and SSE streams are not required to end with a newline.
-        // The old loop silently lost that final event — frequently the closing
-        // braces of a tool call.
-        buffer += decoder.decode();
-        if (buffer.trim()) processWorldStreamLine(buffer);
-
-        // Remove the streaming temp div
-        aiMsgDiv.remove();
 
         if (streamError) throw streamError;
 
+        // No unverified NPC assertion may reach receipt repair, a chronicle
+        // classifier or the saved dialogue. A streamed sensitive scene has
+        // remained buffered up to this point.
+        const earlyKnowledgeSafe = worldRedactUnprovenNpcWhereabouts(world, sess,
+            fullText, submittedInput || userInput);
+        fullText = earlyKnowledgeSafe.text;
+        const pendingKnowledgeRedactions = earlyKnowledgeSafe.claims.map(() =>
+            ({ reason: 'npc_unproven_absent_whereabouts' }));
+
         const toolCalls = [...streamedToolCalls.values()];
         const toolResponses = [];
+        const pendingSecretReveals = [];
         let structuredChronicle = null;
         let successfulStateCall = false;
         let stateCallSeen = false;
         let resolvedCheckThisTurn = false;
+        let resolvedCheckResult = null;
         const receiptPlayerStart = String(turnSnapshot?.session?.playerLocation || sess.playerLocation);
         const receiptMovementPhrase = extractUserMovementTarget(submittedInput || userInput);
         const receiptAuthorizedTarget = receiptMovementPhrase
-            ? resolveWorldMovementTarget(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, receiptPlayerStart, receiptMovementPhrase) : null;
+            ? resolveWorldMovementTarget(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, receiptPlayerStart, receiptMovementPhrase, true, sess) : null;
+        const receiptView = typeof worldForSession === 'function' ? worldForSession(world, sess) : world;
+        const explicitWaypoints = [...String(submittedInput || userInput).matchAll(
+            /\b(?:through|into|across)\s+([^,.;!?]+?)(?=\s+(?:and|then)\s+|[,.;!?]|$)/ig)]
+            .map(match => resolveWorldMovementTarget(receiptView, receiptPlayerStart, match[1], true, sess))
+            .filter(location => location && receiptAuthorizedTarget
+                && findWorldTravelPath(receiptView, receiptPlayerStart, location.id, { session: sess })
+                && findWorldTravelPath(receiptView, location.id, receiptAuthorizedTarget.id, { session: sess }))
+            .map(location => location.id);
         const receiptContext = {
             playerStartLocationId: receiptPlayerStart,
+            precommittedArrival: command === 'look'
+                && turnSnapshot?.receiptCheckpoint?.tail?.audit?.source === 'engine_travel'
+                ? (() => {
+                    const movement = turnSnapshot.receiptCheckpoint.tail.receipt?.events?.find(event =>
+                        event?.type === 'movement' && event?.actor_id === 'player'
+                        && event?.status === 'completed');
+                    return movement ? { from: movement.from_location_id, to: movement.to_location_id } : null;
+                })() : null,
             committedPlayerDestinationId: sess.playerLocation !== receiptPlayerStart ? sess.playerLocation : '',
             playerMovementAuthorized: !!receiptAuthorizedTarget,
             authorizedPlayerDestinationId: receiptAuthorizedTarget?.id || '',
-            narrativeText: fullText
+            authorizedPlayerWaypointIds: explicitWaypoints,
+            narrativeText: stripWorldLedgerDirective(scrubNarrativeArtifacts(fullText)),
+            playerInput: submittedInput || userInput
         };
-        const commitReceiptCandidate = (args, source) => {
-            const beforeReceipt = captureWorldTurnState(world, sess);
-            const committed = commitWorldTurnReceipt(world, sess, args, receiptContext, source);
-            const actionResult = committed.actionResult || {};
-            const movementOk = !actionResult.movementResult || actionResult.movementResult.ok;
-            const transactionsOk = (actionResult.transactionResults || []).every(result => result.success);
-            const checksOk = (actionResult.checkResults || []).every(result =>
-                result.success || (!result.reason && result.failureCost?.applied !== false));
-            const conditionsOk = (actionResult.conditionResults || []).every(result => result.success);
-            const statUpdatesOk = !actionResult.statResult || actionResult.statResult.rejected.length === 0;
-            const modulesOk = (actionResult.moduleRejections || []).length === 0;
-            const auditOk = (committed.audit?.rejected || []).length === 0;
-            const accepted = movementOk && transactionsOk && checksOk && conditionsOk
-                && statUpdatesOk && modulesOk && auditOk;
-            if (!accepted) restoreWorldTurnState(world, sess, beforeReceipt);
-            return { committed, actionResult, accepted, movementOk, transactionsOk, checksOk, conditionsOk, statUpdatesOk, modulesOk };
+        let narratedCheckRequired = normalizeWorldGameRules(world).modules.checks
+            && worldNarrativeRequestsCheck(fullText);
+        const commitReceiptCandidate = (args, source, allowSummarySalvage = true) => {
+            const attempt = attemptWorldStateMutation(world, sess, () => {
+                const knowledgeSafeReceipt = worldWithoutUnprovenNpcObservations(world, sess,
+                    args, submittedInput || userInput);
+                const committed = commitWorldTurnReceipt(world, sess, knowledgeSafeReceipt.receipt,
+                    { ...receiptContext, deferFeedback: true }, source);
+                if (knowledgeSafeReceipt.dropped) committed.audit.knowledgeDrops = knowledgeSafeReceipt.dropped;
+                const actionResult = committed.actionResult || {};
+                const resultTree = [];
+                const collectResult = (result, depth = 0) => {
+                    if (!result || depth > 3) return;
+                    resultTree.push(result);
+                    (result.checkOutcomeResults || []).forEach(child => collectResult(child, depth + 1));
+                };
+                collectResult(actionResult);
+                if (narratedCheckRequired && !resultTree.some(result =>
+                    (result.checkResults || []).length > 0)) committed.audit.rejected.push({
+                    index: -1, type: 'checks', reason: 'unregistered_requested_check',
+                    actor_id: 'player', detail: 'The scene explicitly required a roll, but no check was registered.'
+                });
+                const proposedLedger = normalizeWorldTurnReceipt(world, sess,
+                    knowledgeSafeReceipt.receipt).state_updates.ledger_update;
+                const falseExitClaim = proposedLedger
+                    ? worldLockedExitClaimConflict(world, sess, proposedLedger) : null;
+                if (falseExitClaim) committed.audit.rejected.push({
+                    index: -1, type: 'ledger_update', reason: falseExitClaim.reason,
+                    actor_id: 'player', detail: falseExitClaim.detail
+                });
+                const movementOk = resultTree.every(result => !result.movementResult || result.movementResult.ok);
+                const transactionsOk = resultTree.every(result =>
+                    (result.transactionResults || []).every(transaction => transaction.success));
+                const inventoryOk = resultTree.every(result => (result.inventoryFailures || []).length === 0);
+                const checksOk = resultTree.every(result => (result.checkResults || []).every(check =>
+                    check.success || (!check.reason && check.failureCost?.applied !== false)));
+                const conditionsOk = resultTree.every(result =>
+                    (result.conditionResults || []).every(condition => condition.success));
+                const statUpdatesOk = resultTree.every(result =>
+                    !result.statResult || (result.statResult.rejected || []).length === 0);
+                const modulesOk = resultTree.every(result => (result.moduleRejections || []).length === 0);
+                const requestedWait = !committedMovement && !committedOutfit
+                    ? parseExplicitWorldWaitMinutes(submittedInput || userInput, currentTotalMinutes) : null;
+                if (worldWaitNarrativeContradictsPlayerPresence(world, sess,
+                    submittedInput || userInput, receiptContext.narrativeText, currentTotalMinutes)) {
+                    committed.audit.rejected.push({ index: -1, type: 'narrative',
+                        reason: 'observed_player_reported_missing', actor_id: 'player',
+                        detail: 'The scene observes the present player, then reports that same person missing.' });
+                }
+                worldUnmetConditionalSearchClaims(world, sess, committed.validation,
+                    receiptContext.narrativeText).forEach(conflict => committed.audit.rejected.push({
+                    index: -1, type: 'narrative', actor_id: 'player', ...conflict
+                }));
+                if (requestedWait && worldNarrativeCompletesExplicitWait(receiptContext.narrativeText)) {
+                    const recordedWait = Math.max(0, Number(committed.validation.legacyArgs.time_skip_minutes) || 0,
+                        ...committed.validation.acceptedEvents.filter(event => event.type === 'time')
+                            .map(event => Number(event.minutes_elapsed) || 0));
+                    if (recordedWait + 5 < requestedWait) committed.audit.rejected.push({
+                        index: -1, type: 'time', reason: 'explicit_wait_time_uncommitted', actor_id: 'player',
+                        detail: `The scene says the requested ${requestedWait}-minute wait completed, but the receipt records ${recordedWait} minutes.`
+                    });
+                }
+                const receipt = committed.validation.receipt;
+                const routeAssertions = [receiptContext.narrativeText, receipt.summary,
+                    committed.validation.legacyArgs.ledger_update,
+                    ...committed.validation.acceptedEvents.filter(event => event.type === 'environment'
+                        && event.status === 'completed').map(event => event.evidence)];
+                const uncommittedRoutes = new Map();
+                routeAssertions.forEach(assertion => worldNarratedUncommittedRouteClosures(world, sess, assertion)
+                    .forEach(location => uncommittedRoutes.set(location.id, location)));
+                uncommittedRoutes.forEach(location => committed.audit.rejected.push({
+                    index: -1, type: 'location_state_updates',
+                    reason: 'narrated_route_closure_uncommitted', actor_id: 'player',
+                    detail: `${location.name} (${location.id}) was asserted cut off, but its resulting state has no route-blocking condition.`
+                }));
+                const auditOk = (committed.audit?.rejected || []).length === 0;
+                const accepted = movementOk && transactionsOk && inventoryOk && checksOk && conditionsOk
+                    && statUpdatesOk && modulesOk && auditOk;
+                return { committed, actionResult, accepted, movementOk, transactionsOk,
+                    inventoryOk, inventoryFailures: resultTree.flatMap(result => result.inventoryFailures || []),
+                    checksOk, conditionsOk, statUpdatesOk, modulesOk };
+            }, candidate => candidate.accepted);
+            if (!attempt.accepted && allowSummarySalvage) {
+                const rejected = attempt.result?.committed?.audit?.rejected || [];
+                if (rejected.length === 1 && rejected[0].reason === 'conditional_deadline_not_met'
+                    && rejected[0].summaryOnly === true && isPlainObject(args)) {
+                    // A repair can get the state and visible scene right but
+                    // overstate an unfulfilled promise only in its private
+                    // summary. Retry atomically with that unsupported
+                    // sentence removed; do not discard the witnessed scene.
+                    return commitReceiptCandidate({ ...args, summary: rejected[0].safeSummary },
+                        source, false);
+                }
+            }
+            if (attempt.accepted) pendingWorldActionFeedback = attempt.result.actionResult;
+            return attempt.result;
         };
         for (const call of toolCalls) {
             let responsePayload = { success: true, status: 'Action processed.' };
@@ -25075,8 +29330,11 @@ ${modularMandate}
                 if (call.function.name === 'investigate_secret') {
                     const secret = currentSecrets.find(item => item.label === args.label);
                     if (secret) {
-                        const actionResult = processStructuredActions({ label: args.label }, world, sess);
-                        if (actionResult?.ledgerEntry) structuredChronicle = actionResult.ledgerEntry;
+                        // The secret's text may be returned to the model now,
+                        // but revealing it to the saved player timeline must
+                        // wait for this turn's mandatory receipt. Otherwise a
+                        // tool-only response can mutate canon and then fail.
+                        pendingSecretReveals.push(args.label);
                         responsePayload = { success: true, truth: secret.truth, status: 'SECRET UNLOCKED' };
                     } else {
                         responsePayload = { success: false, status: 'Secret not found' };
@@ -25084,17 +29342,31 @@ ${modularMandate}
                 } else if (call.function.name === 'commit_world_turn') {
                     if (stateCallSeen) throw new Error('Duplicate commit_world_turn ignored; exactly one receipt is allowed per turn.');
                     stateCallSeen = true;
-                    const validEnvelope = isPlainObject(args.scene)
-                        && Array.isArray(args.events) && Array.isArray(args.entity_updates);
+                    const receipt = unwrapWorldTurnReceipt(args) || args;
+                    const validEnvelope = isPlainObject(receipt.scene)
+                        && Array.isArray(receipt.events) && Array.isArray(receipt.entity_updates);
                     if (!validEnvelope) throw new Error('Turn receipt must include scene, events, and entity_updates.');
-                    const candidate = commitReceiptCandidate(args, 'tool_call');
+                    let candidate = commitReceiptCandidate(receipt, 'tool_call');
+                    if (!candidate.accepted) {
+                        const checkOnly = buildSafeCheckOnlyWorldReceipt(world, sess, receipt, receiptContext);
+                        if (checkOnly) {
+                            const salvaged = commitReceiptCandidate(checkOnly, 'tool_call_check_salvage');
+                            if (salvaged.accepted) {
+                                candidate = salvaged;
+                                candidate.committed.audit.salvaged = 'noncommitting_check_attempt_only';
+                            }
+                        }
+                    }
                     const { committed, actionResult } = candidate;
                     const updatedLoc = world.locations.find(location => location.id === sess.playerLocation);
                     const movement = actionResult?.movementResult;
                     const transactionResults = actionResult?.transactionResults || [];
                     const transactionsOk = candidate.transactionsOk;
                     const checkResults = actionResult?.checkResults || [];
-                    if (candidate.accepted && checkResults.some(result => !result.pending && !result.reason)) resolvedCheckThisTurn = true;
+                    if (candidate.accepted) {
+                        resolvedCheckResult = checkResults.find(result => !result.pending && !result.reason) || resolvedCheckResult;
+                        if (resolvedCheckResult) resolvedCheckThisTurn = true;
+                    }
                     const checksOk = candidate.checksOk;
                     const conditionResults = actionResult?.conditionResults || [];
                     const conditionsOk = candidate.conditionsOk;
@@ -25109,6 +29381,7 @@ ${modularMandate}
                         quest_updates: actionResult?.questResult || null,
                         stat_updates: actionResult?.statResult || null,
                         transactions: transactionResults,
+                        inventory_failures: candidate.inventoryFailures || [],
                         checks: checkResults,
                         capability_progress: actionResult?.capabilityProgressResults || [],
                         player_conditions: conditionResults,
@@ -25119,6 +29392,8 @@ ${modularMandate}
                             ? `Movement rejected: ${movement.reason}. Use a destination connected through the exit graph.`
                             : !transactionsOk
                                 ? 'One or more transactions were rejected. Narrate the refusal; do not give/take items or currency.'
+                                : !candidate.inventoryOk
+                                    ? `Inventory change rejected (${candidate.inventoryFailures?.[0]?.reason || 'invalid_item'}). Name one owned item exactly or narrate the failed action.`
                                 : !statUpdatesOk
                                     ? 'One or more stat changes were rejected.'
                                     : !checksOk
@@ -25146,13 +29421,16 @@ ${modularMandate}
         // Providers that print the mandatory receipt instead of calling the
         // tool still pass through the same validator and reducer.
         let inlineStateApplied = false;
-        if (!successfulStateCall && !stateCallSeen) {
+        if (!successfulStateCall) {
             const inlineReceipt = extractInlineWorldTurnReceipt(fullText);
             if (inlineReceipt) {
                 try {
                     const candidate = commitReceiptCandidate(inlineReceipt, 'inline_receipt');
                     if (!candidate.accepted) throw new Error('Inline turn receipt contained rejected or invalid mutations.');
                     if (candidate.actionResult?.ledgerEntry) structuredChronicle = candidate.actionResult.ledgerEntry;
+                    resolvedCheckResult = (candidate.actionResult?.checkResults || []).find(result =>
+                        !result.pending && !result.reason) || resolvedCheckResult;
+                    if (resolvedCheckResult) resolvedCheckThisTurn = true;
                     inlineStateApplied = true;
                     console.warn(`Horde Engine: model emitted its turn receipt as text — recovered and validated it.`);
                 } catch (error) {
@@ -25166,28 +29444,50 @@ ${modularMandate}
         // already-written narrative. This repair request runs only when the
         // provider failed the primary contract.
         let repairedReceiptApplied = false;
-        const receiptRepairNeeded = shouldRepairMissingWorldReceipt(world, command, submittedInput || userInput, fullText);
+        let receiptRepairTimedOut = false;
+        const receiptRepairNeeded = stateCallSeen || !!committedMovement || !!committedOutfit
+            || shouldRepairMissingWorldReceipt(world, command, submittedInput || userInput, fullText);
         if (!successfulStateCall && !inlineStateApplied && fullText.trim() && receiptRepairNeeded) {
             try {
                 if (dmTypingLabel) dmTypingLabel.textContent = 'DM is reconciling the world state...';
                 const repairFrame = buildWorldSceneFrame(world, sess);
-                const repairPrompt = `[WORLD TURN RECEIPT REPAIR]\nThe narrative below has already been shown and MUST NOT be rewritten. Return JSON only for one commit_world_turn receipt with required keys scene, events, entity_updates, state_updates, and summary.\n- Every action names actor_id.\n- NPC movement never changes player location.\n- Intent, attempts, movement toward somewhere, dialogue claims and hypotheticals are not completed events.\n- scene is the complete ENDING checksum.\n- If nothing persistent changed, use empty events/state_updates but still return the current scene.\nAuthoritative pre-repair scene: ${JSON.stringify(repairFrame)}\nPlayer input: ${JSON.stringify(String(submittedInput || userInput).slice(0, 1200))}\nNarrative: ${JSON.stringify(String(fullText).slice(0, 7000))}`;
+                const repairNarrative = scrubNarrativeArtifacts(fullText);
+                const repairNames = `${submittedInput || userInput} ${repairNarrative}`.toLowerCase();
+                const repairKnownActors = sessionNpcs(world, sess).filter(npc =>
+                    repairFrame.present_character_ids.includes(npc.id)
+                    || repairNames.includes(String(npc.name || '').toLowerCase())).slice(0, 30)
+                    .map(npc => ({ id: npc.id, name: npc.name }));
+                const repairKnownLocations = (receiptView.locations || []).slice(0, 80)
+                    .map(location => ({ id: location.id, name: location.name }));
+                const currentRepairLocation = getLocationRef(receiptView, sess.playerLocation);
+                const localCheckExits = (currentRepairLocation?.exits || []).filter(exit =>
+                    exit && typeof exit === 'object' && exit.allowCheckUnlock === true
+                    && resolveWorldExitTarget(receiptView, exit));
+                const repairRollableStats = (world.hudConfig?.stats || []).filter(stat =>
+                    stat.roll?.enabled === true).map(stat => stat.id);
+                const checkRepairInstruction = narratedCheckRequired
+                    ? `\nCRITICAL: The narrative explicitly requests a dice check. The requested roll IS pending state even before an outcome; state_updates:{} and a no-check receipt are invalid. Use state_updates:{"checks":[{"label":"specific action","stat_id":"exact rollable stat ID","difficulty":${diceConfig.defaultDifficulty},"on_success":{},"on_failure":{}}]} — checks MUST be an ARRAY with exactly one object, not a singleton object. The key is stat_id, NEVER rollable_stat_id. Rollable IDs: ${JSON.stringify(repairRollableStats)}. Use the narrative's numeric DC if present; otherwise use this World's default difficulty ${diceConfig.defaultDifficulty}. Put every result-dependent mutation inside the flat on_success/on_failure objects; never nest events, entity_updates or state_updates inside them and never supply a roll or force_resolve. An unresolved attempt has events:[] and entity_updates:[] unless an independent durable action already completed; do not invent an improvised inventory item from narrative materials. The engine will roll or queue the player roll according to this World's configured mode. Represent failure costs only with supported fields; do not invent an item or condition. Local check-unlockable exits: ${JSON.stringify(localCheckExits.map(exit => ({ from_location_id: currentRepairLocation.id, to_location_id: resolveWorldExitTarget(receiptView, exit).id })))}. If this is the gate-opening check, put exactly on_success:{"exit_unlocks":[{"from_location_id":"${currentRepairLocation?.id || ''}","to_location_id":"<exact local ID>"}]} inside the check, never at the receipt top level.`
+                    : '';
+                const waitRepairInstruction = worldWaitReceiptRepairInstruction(submittedInput || userInput,
+                    repairNarrative, currentTotalMinutes);
+                const repairPrompt = `[WORLD TURN RECEIPT REPAIR]\nThe narrative below has already been shown and MUST NOT be rewritten. Return one JSON object only, no prose or code fence. Required top-level keys: scene (object), events (array), entity_updates (array), state_updates (OBJECT, never an array), summary (string).\nscene must have player_location_id, player_location_changed (boolean), present_character_ids (complete NPC ID array). Every event must have type, status and actor_id; movement uses type="movement", status="completed", from_location_id, to_location_id, movement_mode (voluntary|forced|carried|vehicle|fall|teleport), evidence. A completed player pickup uses events:[{type:"inventory",status:"completed",actor_id:"player",action:"add",item:"exact item name",evidence:"completed narrative action"}]; never invent inventory_added or put ordinary inventory_add at the root or in state_updates. An offered or held-out item is not a player pickup until the player takes or accepts it, or the NPC actually puts it in the player's hands; asking about it grants nothing. entity_updates entries use entity_id, location_id, activity, interacting_with.\nKnown NPC IDs and names: ${JSON.stringify(repairKnownActors)}. Use these IDs, not invented aliases. Known location IDs and names: ${JSON.stringify(repairKnownLocations)}. Use exact location ids for lasting conditions. If the narrative newly NAMES an unnamed person, add state_updates.npc_introduced:[{id:"npc_unique_name",name:"Full Name",description:"...",persona:"..."}] and use exactly that id in scene.present_character_ids and entity_updates. A newly introduced NPC starts in the current scene; do not add an invented movement event for their introduction. Anonymous villagers, guards and crowds are not named NPCs; do not invent numbered people for them.\nNPC movement never changes player location. Intent, attempts, dialogue claims and hypotheticals are not completed events. If nothing durable changed, use events:[], entity_updates:[], state_updates:{} and the current scene.${checkRepairInstruction}${waitRepairInstruction}\nAuthoritative player start: ${receiptPlayerStart}. Current location: ${repairFrame.player_location_id}. scene.player_location_changed MUST be ${repairFrame.player_location_id !== receiptPlayerStart}. The player's completed route was already applied locally; do not duplicate it.\nAuthoritative pre-repair scene: ${JSON.stringify(repairFrame)}\nPlayer input: ${JSON.stringify(String(submittedInput || userInput).slice(0, 1200))}\nNarrative: ${JSON.stringify(String(repairNarrative).slice(0, 7000))}`;
                 const repairBody = {
                     model: structuredModelFor(world),
                     stream: false,
-                    max_tokens: 650,
+                    max_tokens: 1100,
                     temperature: 0,
-                    messages: [{ role: 'system', content: repairPrompt }]
+                    messages: [{ role: 'system', content: repairPrompt
+                        + worldRouteClosureReceiptRepairInstruction(world, sess, repairNarrative)
+                        + '\nA factual closure asserted in summary, ledger_update or a completed environment event also requires an exact-ID route-blocking location_state_update. An NPC report alone is unverified testimony.'
+                        + WORLD_RESTRAINT_REPAIR_RULE }]
                 };
                 turnCallAudit.receiptRepair++;
-                const repairResponse = await fetch(apiBase() + '/chat/completions', {
+                const { response: repairResponse, data: repairData } = await fetchWorldTurnJSON('receiptRepair', repairBody, {
                     method: 'POST',
                     signal: controller.signal,
-                    headers: { ...authHeaders(), 'Content-Type': 'application/json', ...attributionHeaders() },
-                    body: JSON.stringify(repairBody)
+                    headers: { ...authHeaders(), 'Content-Type': 'application/json', ...attributionHeaders() }
                 });
                 if (repairResponse.ok) {
-                    const repairData = await repairResponse.json();
                     const repairMessage = repairData.choices?.[0]?.message || {};
                     const repairCall = (repairMessage.tool_calls || []).find(call =>
                         call.function?.name === 'commit_world_turn');
@@ -25196,51 +29496,79 @@ ${modularMandate}
                         : safeParseJSONRepair(String(repairMessage.content || '')
                             .replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''));
                     if (!repairedReceipt) repairedReceipt = extractInlineWorldTurnReceipt(repairMessage.content || '');
+                    repairedReceipt = unwrapWorldTurnReceipt(repairedReceipt);
+                    repairedReceipt = omitUnnamedWorldRepairCrowd(repairedReceipt, repairNarrative);
+                    if (narratedCheckRequired) repairedReceipt = repairWorldSingletonCheckReceipt(world, sess, repairedReceipt)
+                        || repairedReceipt;
+                    if (Array.isArray(repairedReceipt?.state_updates) && !repairedReceipt.state_updates.length) {
+                        repairedReceipt.state_updates = {};
+                    }
+                    if (!committedMovement && !committedOutfit && !isReroll) {
+                        repairedReceipt = restoreExplicitWorldWaitOnReceiptRepair(repairedReceipt,
+                            submittedInput || userInput, repairNarrative, currentTotalMinutes);
+                    }
                     if (isPlainObject(repairedReceipt?.scene)
                         && Array.isArray(repairedReceipt.events)
-                        && Array.isArray(repairedReceipt.entity_updates)) {
+                        && Array.isArray(repairedReceipt.entity_updates)
+                        && isPlainObject(repairedReceipt.state_updates)) {
                         const candidate = commitReceiptCandidate(repairedReceipt, 'repair_receipt');
                         if (candidate.accepted) {
                             if (candidate.actionResult?.ledgerEntry) structuredChronicle = candidate.actionResult.ledgerEntry;
+                            resolvedCheckResult = (candidate.actionResult?.checkResults || []).find(result =>
+                                !result.pending && !result.reason) || resolvedCheckResult;
+                            if (resolvedCheckResult) resolvedCheckThisTurn = true;
                             repairedReceiptApplied = true;
                             console.warn('Horde Engine: missing turn receipt repaired without regenerating the narrative.');
                         }
                     }
                 }
             } catch (repairError) {
-                if (repairError?.name === 'AbortError') throw repairError;
+                // A user Stop still cancels the turn. An idle timeout during
+                // receipt repair must instead reach the canonical no-op
+                // fallback below, discarding the unverified prose and
+                // releasing the send/Stop button.
+                if (repairError?.name === 'AbortError' && !generationTimedOut) throw repairError;
+                receiptRepairTimedOut = generationTimedOut || repairError?.code === 'WORLD_MODEL_TIMEOUT';
                 console.warn('Horde Engine: receipt-only repair failed; freezing unverified state.', repairError.message);
             }
         }
 
-        // Absolute safety floor: the narrative may remain visible, but no
-        // unverified mutation is inferred from it. Record a canonical no-op
-        // receipt and an audit failure so every turn still has a transaction.
+        // Absolute safety floor: record a canonical no-op and audit failure,
+        // then discard the unverified prose before it reaches history or the
+        // next model prompt. A warning badge beside false fiction is not safe.
         let frozenReceiptApplied = false;
-        if (!successfulStateCall && !inlineStateApplied && !repairedReceiptApplied && fullText.trim()) {
-            const frame = buildWorldSceneFrame(world, sess);
-            const noOpReceipt = {
-                summary: 'No model-authored state receipt was available; unverified state was frozen.',
-                scene: {
-                    player_location_id: frame.player_location_id,
-                    player_location_changed: false,
-                    present_character_ids: frame.present_character_ids
-                },
-                events: [],
-                entity_updates: Object.entries(frame.activities).map(([entity_id, details]) => ({
-                    entity_id,
-                    location_id: frame.player_location_id,
-                    activity: details.activity || '',
-                    interacting_with: details.interacting_with || []
-                })),
-                state_updates: {}
-            };
-            const committed = commitWorldTurnReceipt(world, sess, noOpReceipt, receiptContext, 'frozen_no_receipt');
+        let fallbackWaitApplied = 0;
+        const freezeUnverifiedWorldTurn = detail => {
+            const explicitWait = !isReroll && !committedMovement && !committedOutfit
+                && command !== 'init' && command !== 'look' && command !== 'continue'
+                ? parseExplicitWorldWaitMinutes(submittedInput, currentTotalMinutes) : null;
+            const minimumTurn = Math.max(1, Number(world.hudConfig?.timeStep) || 5);
+            const elapsed = explicitWait ? Math.max(explicitWait, minimumTurn) : 0;
+            const waited = elapsed ? commitEngineWorldWait(world, sess, elapsed) : null;
+            let committed = waited;
+            if (waited) {
+                fallbackWaitApplied = elapsed;
+                pendingWorldActionFeedback = waited.actionResult;
+            } else {
+                const frame = buildWorldSceneFrame(world, sess);
+                committed = commitWorldTurnReceipt(world, sess, {
+                    summary: 'No model-authored state receipt was available; unverified state was frozen.',
+                    scene: {
+                        player_location_id: frame.player_location_id,
+                        player_location_changed: frame.player_location_id !== receiptPlayerStart,
+                        present_character_ids: frame.present_character_ids
+                    },
+                    events: [], entity_updates: [], state_updates: {}
+                }, { ...receiptContext, narrativeText: '' }, 'frozen_no_receipt');
+            }
             committed.audit.rejected.push({
                 index: -1, type: 'receipt', reason: 'missing_mandatory_receipt',
-                actor_id: '', detail: 'Narrative preserved; unverified state mutations were frozen.'
+                actor_id: '', detail
             });
             frozenReceiptApplied = true;
+        };
+        if (!successfulStateCall && !inlineStateApplied && !repairedReceiptApplied && fullText.trim()) {
+            freezeUnverifiedWorldTurn('Unverified narrative discarded; only an explicit player wait may advance time.');
         }
         sess.lastTurnStateSource = successfulStateCall ? 'tool_call'
             : inlineStateApplied ? 'inline_rescue'
@@ -25273,7 +29601,8 @@ ${modularMandate}
         // If the AI made a tool call but produced no narrative text,
         // we need a second API call to get the actual story response.
         const toolResultNeedsNarration = toolCalls.some(call => call.function?.name === 'investigate_secret');
-        if (toolCalls.length > 0 && (!fullText.trim() || resolvedCheckThisTurn || toolResultNeedsNarration)) {
+        if (!frozenReceiptApplied && (toolCalls.length > 0 || resolvedCheckThisTurn)
+            && (!hasReadableWorldNarrative(fullText) || resolvedCheckThisTurn || toolResultNeedsNarration)) {
             console.log("Horde Engine: Tool call with no text — requesting narrative follow-up.");
 
             // Update label during follow-up call
@@ -25282,9 +29611,11 @@ ${modularMandate}
             try {
                 const followUpMessages = [
                     ...messages,
-                    { role: 'assistant', content: fullText.trim() || null, tool_calls: toolCalls },
-                    ...toolResponses,
-                    { role: 'user', content: `[SYSTEM: The requested tools have been processed. Now finish the response:\n1. Narrate the authoritative result in vivid, immersive prose.${resolvedCheckThisTurn ? ' A dice check was resolved by the engine: use the tool result exactly, never invent or reroll it, and do not repeat the pre-roll setup.' : ' If a secret was revealed, narrate its discovery.'}\n2. If canon changed and ledger_update was not already supplied, add a one-sentence [MEMORY] line.${directorNotesRequired ? '\n3. DIRECTOR MODE remains required: append the active preset\'s <details><summary>Plot Momentum</summary>...</details> block as the final element.' : ''}]` }
+                    ...(toolCalls.length ? [
+                        { role: 'assistant', content: fullText.trim() || null, tool_calls: toolCalls },
+                        ...toolResponses
+                    ] : []),
+                    { role: 'user', content: `[SYSTEM: The requested tools have been processed.${resolvedCheckResult ? `\n[WORLD KERNEL — AUTHORITATIVE CHECK RESULT] ${JSON.stringify(resolvedCheckResult)}. This result supersedes any earlier rejected receipt; the engine has already applied its declared outcome. Current mapped exits: ${JSON.stringify((getLocationRef(worldForSession(world, sess), sess.playerLocation)?.exits || []).map(exit => ({ to: getExitTargetName(exit), open: worldExitRequirement(sess, exit, sess.playerLocation).ok })))}.` : ''} Now finish the response:\n1. Narrate the authoritative result in vivid, immersive prose.${resolvedCheckThisTurn ? ' A dice check was resolved by the engine: use its authoritative result exactly, never invent or reroll it, and do not repeat the pre-roll setup.' : ' If a secret was revealed, narrate its discovery.'}\n2. If canon changed and ledger_update was not already supplied, add a one-sentence [MEMORY] line.${directorNotesRequired ? '\n3. DIRECTOR MODE remains required: append the active preset\'s <details><summary>Plot Momentum</summary>...</details> block as the final element.' : ''}]` }
                 ];
 
                 const followUpBody = { ...requestBody, messages: sanitizeMessagesForProvider(followUpMessages), stream: false };
@@ -25292,19 +29623,17 @@ ${modularMandate}
                 followUpBody.tool_choice = 'none';
 
                 turnCallAudit.narrativeFollowUp++;
-                const followUpResponse = await fetch(apiBase() + '/chat/completions', {
+                const { response: followUpResponse, data: followUpData } = await fetchWorldTurnJSON('narrativeFollowUp', followUpBody, {
                     method: 'POST',
                     signal: controller.signal,
                     headers: { 
                         ...authHeaders(),
                         'Content-Type': 'application/json',
                         ...attributionHeaders()
-                    },
-                    body: JSON.stringify(followUpBody)
+                    }
                 });
 
                 if (followUpResponse.ok) {
-                    const followUpData = await followUpResponse.json();
                     fullText = followUpData.choices?.[0]?.message?.content || '';
                 }
             } catch(followUpErr) {
@@ -25313,12 +29642,12 @@ ${modularMandate}
             }
         }
 
-        if (questFallbackMode && fullText.trim()) {
+        if (!frozenReceiptApplied && questFallbackMode && fullText.trim()) {
             const fallbackQuestUpdate = extractQuestUpdateDirective(fullText);
             fullText = fallbackQuestUpdate.text;
-            if (fallbackQuestUpdate.updates.length) {
-                applyQuestUpdates(world, sess, fallbackQuestUpdate.updates);
-            }
+            // Legacy quest tags are a display artifact, not a second write
+            // channel. Only state_updates.quests_update in an accepted turn
+            // receipt may change the saved quest ledger.
             questFallbackMode = false;
         }
 
@@ -25327,7 +29656,7 @@ ${modularMandate}
         // (e.g. DeepSeek Pro) spent its entire token budget thinking, or the
         // provider filtered the reply. One plain, tool-free retry with a bigger
         // budget rescues most of these before we give up.
-        if (!fullText.trim() && command !== 'init') {
+        if (!frozenReceiptApplied && !hasReadableWorldNarrative(fullText) && command !== 'init') {
             console.warn(`Horde Engine: empty narrative (finish_reason=${lastFinishReason}, reasoning=${reasoningSeen}) — attempting rescue call.`);
             if (dmTyping) { dmTyping.style.display = 'flex'; if (dmTypingLabel) dmTypingLabel.textContent = 'DM lost their train of thought — retrying...'; }
             try {
@@ -25336,20 +29665,19 @@ ${modularMandate}
                 const rescueBody = {
                     model: modelId,
                     stream: false,
-                    max_tokens: Math.max(1500, parseInt(world.maxTokens) || 2048),
+                    max_tokens: Math.max(1500, parseInt(world.maxTokens) || 4096),
                     messages: sanitizeMessagesForProvider([
                         ...messages,
-                        { role: 'user', content: `[SYSTEM: Your previous attempt produced no readable prose${reasoningSeen ? ' — it was consumed by internal reasoning' : ''}. ${successfulStateCall ? 'The engine has ALREADY applied your state changes — do not call tools again. ' : 'No proposed state receipt was accepted; narrate only what the supplied canonical scene supports. '}Write the narrative response NOW. No tools, JSON, or OOC commentary.${directorNotesRequired ? ' After the prose, append the active preset\'s required <details><summary>Plot Momentum</summary>...</details> Director block.' : ''}]` }
+                        { role: 'user', content: `[SYSTEM: Your previous attempt produced no readable prose${reasoningSeen ? ' — it was consumed by internal reasoning' : ''}. ${successfulStateCall || inlineStateApplied || repairedReceiptApplied ? 'The engine has ALREADY applied your state changes — do not call tools again. ' : 'No proposed state receipt was accepted; narrate only what the supplied canonical scene supports. '}Authoritative tool results: ${JSON.stringify(toolResponses).slice(0, 3000)}. Write the narrative response NOW. No tools, JSON, or OOC commentary.${directorNotesRequired ? ' After the prose, append the active preset\'s required <details><summary>Plot Momentum</summary>...</details> Director block.' : ''}]` }
                     ])
                 };
-                const rescueResp = await fetch(apiBase() + '/chat/completions', {
+                turnCallAudit.narrativeRescue++;
+                const { response: rescueResp, data: rescueData } = await fetchWorldTurnJSON('narrativeRescue', rescueBody, {
                     method: 'POST',
                     signal: controller.signal,
-                    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() },
-                    body: JSON.stringify(rescueBody)
+                    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() }
                 });
                 if (rescueResp.ok) {
-                    const rescueData = await rescueResp.json();
                     fullText = rescueData.choices?.[0]?.message?.content || '';
                     if (fullText.trim()) console.log('Horde Engine: rescue call succeeded.');
                 }
@@ -25359,73 +29687,200 @@ ${modularMandate}
             }
         }
 
+        // A tool-only response may get its first readable prose during the
+        // follow-up or rescue. Keep the same check/receipt invariant for that
+        // later prose, even though the original streamed text was empty.
+        narratedCheckRequired = narratedCheckRequired || (normalizeWorldGameRules(world).modules.checks
+            && worldNarrativeRequestsCheck(fullText));
+        // A tool-only main response can acquire its first readable story in
+        // the rescue path. Validate that final story against the repaired
+        // receipt too, including completed waits and lasting route closures.
+        receiptContext.narrativeText = stripWorldLedgerDirective(scrubNarrativeArtifacts(fullText));
+
         // When the first response was completely empty, receipt repair was
         // deliberately deferred until after narrative rescue. Reconcile the
         // final prose now so an emergency narrative cannot bypass the canonical
         // transaction layer.
-        if (fullText.trim() && !successfulStateCall && !inlineStateApplied
+        if (hasReadableWorldNarrative(fullText) && !successfulStateCall && !inlineStateApplied
             && !repairedReceiptApplied && !frozenReceiptApplied) {
             try {
                 const finalFrame = buildWorldSceneFrame(world, sess);
-                const finalRepairPrompt = `[WORLD TURN RECEIPT REPAIR]\nReturn JSON only. Do not rewrite the narrative. Produce one commit_world_turn receipt with scene, events, entity_updates, state_updates and summary. Actor-scope every action; NPC movement never moves the player; intent/attempt/in_progress does not mutate state; scene is the complete ending checksum.\nAuthoritative scene: ${JSON.stringify(finalFrame)}\nPlayer input: ${JSON.stringify(String(submittedInput || userInput).slice(0, 1200))}\nFinal narrative: ${JSON.stringify(String(fullText).slice(0, 7000))}`;
+                const finalRepairPrompt = `[WORLD TURN RECEIPT REPAIR]\nReturn JSON only. Do not rewrite the narrative. Produce one commit_world_turn receipt with scene, events, entity_updates, state_updates (object) and summary. Actor-scope every action; NPC movement never moves the player; intent/attempt/in_progress does not mutate state; scene is the complete ending checksum. A completed player pickup is an inventory event with actor_id:"player", status:"completed", action:"add", item and evidence; never use inventory_added. An offered or held-out item is not a pickup until the player takes or accepts it, or the NPC puts it in the player's hands; asking grants nothing. Anonymous crowds are not newly named NPCs; do not invent numbered villagers or guards. The player started at ${receiptPlayerStart} and is now at ${finalFrame.player_location_id}; scene.player_location_changed MUST be ${finalFrame.player_location_id !== receiptPlayerStart}. Do not duplicate a locally completed player move.${narratedCheckRequired ? `\nThe narrative explicitly requests a roll. A no-check receipt and state_updates:{} are invalid. Use state_updates.checks as an ARRAY with exactly one object containing stat_id (not rollable_stat_id), label, difficulty, and flat on_success/on_failure outcome objects. Use the stated numeric DC or World default difficulty ${diceConfig.defaultDifficulty} when no DC is stated. Never provide a roll or nest events/entity_updates/state_updates inside a check outcome.` : ''}\nAuthoritative scene: ${JSON.stringify(finalFrame)}\nPlayer input: ${JSON.stringify(String(submittedInput || userInput).slice(0, 1200))}\nFinal narrative: ${JSON.stringify(String(fullText).slice(0, 7000))}`;
                 turnCallAudit.receiptRepair++;
-                const finalRepairResponse = await fetch(apiBase() + '/chat/completions', {
+                const finalRepairBody = {
+                    model: structuredModelFor(world), stream: false, max_tokens: 650, temperature: 0,
+                    messages: [{ role: 'system', content: finalRepairPrompt
+                        + `\nKnown location IDs: ${JSON.stringify((receiptView.locations || []).slice(0, 80)
+                            .map(location => ({ id: location.id, name: location.name })))}.`
+                        + worldWaitReceiptRepairInstruction(submittedInput || userInput, fullText, currentTotalMinutes)
+                        + worldRouteClosureReceiptRepairInstruction(world, sess, fullText)
+                        + '\nA factual closure in summary or completed environment evidence also requires an exact-ID route-blocking location_state_update; NPC reports alone do not.'
+                        + WORLD_RESTRAINT_REPAIR_RULE }]
+                };
+                const { response: finalRepairResponse, data } = await fetchWorldTurnJSON('receiptRepair', finalRepairBody, {
                     method: 'POST',
                     signal: controller.signal,
-                    headers: { ...authHeaders(), 'Content-Type': 'application/json', ...attributionHeaders() },
-                    body: JSON.stringify({
-                        model: structuredModelFor(world), stream: false, max_tokens: 650, temperature: 0,
-                        messages: [{ role: 'system', content: finalRepairPrompt }]
-                    })
+                    headers: { ...authHeaders(), 'Content-Type': 'application/json', ...attributionHeaders() }
                 });
                 if (finalRepairResponse.ok) {
-                    const data = await finalRepairResponse.json();
                     const message = data.choices?.[0]?.message || {};
                     let repaired = safeParseJSONRepair(String(message.content || '')
                         .replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''));
                     if (!repaired) repaired = extractInlineWorldTurnReceipt(message.content || '');
+                    repaired = unwrapWorldTurnReceipt(repaired);
+                    repaired = omitUnnamedWorldRepairCrowd(repaired, receiptContext.narrativeText);
+                    if (narratedCheckRequired) repaired = repairWorldSingletonCheckReceipt(world, sess, repaired)
+                        || repaired;
+                    if (!committedMovement && !committedOutfit && !isReroll) {
+                        repaired = restoreExplicitWorldWaitOnReceiptRepair(repaired,
+                            submittedInput || userInput, receiptContext.narrativeText, currentTotalMinutes);
+                    }
                     if (isPlainObject(repaired?.scene) && Array.isArray(repaired.events)
                         && Array.isArray(repaired.entity_updates)) {
                         const candidate = commitReceiptCandidate(repaired, 'repair_receipt');
                         if (candidate.accepted) {
                             if (candidate.actionResult?.ledgerEntry) structuredChronicle = candidate.actionResult.ledgerEntry;
+                            resolvedCheckResult = (candidate.actionResult?.checkResults || []).find(result =>
+                                !result.pending && !result.reason) || resolvedCheckResult;
+                            if (resolvedCheckResult) resolvedCheckThisTurn = true;
                             repairedReceiptApplied = true;
                         }
                     }
                 }
             } catch (error) {
-                if (error?.name === 'AbortError') throw error;
+                if (error?.name === 'AbortError' && !generationTimedOut) throw error;
+                receiptRepairTimedOut = generationTimedOut || error?.code === 'WORLD_MODEL_TIMEOUT';
                 console.warn('Horde Engine: final narrative receipt repair failed.', error.message);
             }
             if (!repairedReceiptApplied) {
-                const frame = buildWorldSceneFrame(world, sess);
-                const committed = commitWorldTurnReceipt(world, sess, {
-                    summary: 'No model-authored state receipt was available; unverified state was frozen.',
-                    scene: {
-                        player_location_id: frame.player_location_id,
-                        player_location_changed: frame.player_location_id !== receiptPlayerStart,
-                        present_character_ids: frame.present_character_ids
-                    },
-                    events: [],
-                    entity_updates: [],
-                    state_updates: {}
-                }, receiptContext, 'frozen_no_receipt');
-                committed.audit.rejected.push({
-                    index: -1, type: 'receipt', reason: 'missing_mandatory_receipt',
-                    actor_id: '', detail: 'Final narrative preserved; unverified state mutations were frozen.'
-                });
-                frozenReceiptApplied = true;
+                freezeUnverifiedWorldTurn('Final unverified narrative discarded; only an explicit player wait may advance time.');
             }
             sess.lastTurnStateSource = repairedReceiptApplied ? 'receipt_repair' : 'frozen_no_receipt';
+        }
+
+        if (!frozenReceiptApplied && (successfulStateCall || inlineStateApplied || repairedReceiptApplied)) {
+            for (const label of new Set(pendingSecretReveals)) {
+                const actionResult = processStructuredActions({ label }, world, sess);
+                if (actionResult?.ledgerEntry) structuredChronicle = actionResult.ledgerEntry;
+            }
+        }
+
+        if (!frozenReceiptApplied && hasReadableWorldNarrative(fullText)) {
+            fullText = trimDanglingWorldDialogue(fullText);
+        }
+
+        if (!frozenReceiptApplied && hasReadableWorldNarrative(fullText)
+            && (successfulStateCall || inlineStateApplied || repairedReceiptApplied)) {
+            const knowledgeSafe = worldRedactUnprovenNpcWhereabouts(world, sess,
+                fullText, submittedInput || userInput);
+            if (knowledgeSafe.claims.length) {
+                fullText = knowledgeSafe.text;
+                textTarget.textContent = fullText;
+            }
+            if ((pendingKnowledgeRedactions.length || knowledgeSafe.claims.length) && sess.lastTurnAudit)
+                sess.lastTurnAudit.knowledgeRedactions = [...pendingKnowledgeRedactions,
+                    ...knowledgeSafe.claims.map(() => ({ reason: 'npc_unproven_absent_whereabouts' }))];
+        }
+
+        let narrativeConflict = false;
+        const pendingNarratedCheck = !!(sess.pendingChecks?.length || sess.pendingCheck);
+        if (!frozenReceiptApplied && worldNarrativeRequestsCheck(fullText)) {
+            if (!normalizeWorldGameRules(world).modules.checks) {
+                narrativeConflict = true;
+                structuredChronicle = null;
+                fullText = worldChecksDisabledNotice();
+                textTarget.textContent = fullText;
+            } else if (pendingNarratedCheck) {
+                // The pending-check UI owns the roll; a model's "provide a d20"
+                // scaffold must never be mistaken for an already-played scene.
+                fullText = stripWorldCheckScaffolding(fullText);
+                textTarget.textContent = fullText;
+            } else if (resolvedCheckThisTurn) {
+                // A broken follow-up must not ask for a second roll after the
+                // kernel has already committed the first one.
+                fullText = worldResolvedCheckNotice(resolvedCheckResult);
+                textTarget.textContent = fullText;
+            } else {
+                // In particular, a late narrative follow-up can introduce a
+                // check after an otherwise valid no-op receipt. Surface the
+                // missing mechanic explicitly; no silent fictional roll.
+                if (sess.lastTurnAudit) sess.lastTurnAudit.rejected.push({
+                    index: -1, type: 'checks', reason: 'unregistered_requested_check',
+                    actor_id: 'player', detail: 'The final scene requested a roll without a registered check.'
+                });
+                narrativeConflict = true;
+                structuredChronicle = null;
+                fullText = worldMissingCheckNotice();
+                textTarget.textContent = fullText;
+            }
+        }
+        if (!frozenReceiptApplied && hasReadableWorldNarrative(fullText)
+            && !narrativeConflict && (successfulStateCall || inlineStateApplied || repairedReceiptApplied)) {
+            const conflicts = worldFinalNarrativeConflicts(world, turnSnapshot?.session, sess,
+                fullText, submittedInput || userInput);
+            if (conflicts.length) {
+                narrativeConflict = true;
+                if (sess.lastTurnAudit) conflicts.forEach(conflict => sess.lastTurnAudit.rejected.push({
+                    index: -1, type: 'narrative', reason: conflict.reason,
+                    actor_id: 'player', detail: conflict.detail
+                }));
+                structuredChronicle = null;
+                fullText = worldConflictingNarrativeNotice();
+                textTarget.textContent = fullText;
+            }
+        }
+
+        // The final prose may arrive after a valid tool receipt. Recover a
+        // concrete, player-heard deadline that the model omitted from that
+        // receipt, while keeping its threatened outcome explicitly unverified.
+        if (!frozenReceiptApplied && !narrativeConflict && hasReadableWorldNarrative(fullText)) {
+            const recoveredWarning = recoverNarratedUrgentDeadline(world, sess, fullText,
+                submittedInput || userInput);
+            if (recoveredWarning && sess.lastTurnAudit) {
+                sess.lastTurnAudit.recoveredUrgentDeadline = recoveredWarning.id;
+            }
+        }
+
+        // Streaming prose was provisional. Never persist it (or send it back
+        // as context) when the mandatory receipt failed. Likewise, a provider
+        // pseudo-tool payload is not a readable scene even if it is nonempty.
+        if (frozenReceiptApplied) {
+            fullText = fallbackWaitApplied
+                ? worldUnverifiedWaitNotice(world, sess, fallbackWaitApplied)
+                : narratedCheckRequired ? worldMissingCheckNotice()
+                    : `${worldUnverifiedTurnNotice()}${receiptRepairTimedOut
+                        ? hostedDeadlineReached
+                            ? ` The hosted turn reached its ${Math.round(WORLD_HOSTED_TURN_DEADLINE_MS / 1000)}s limit before verification finished.`
+                            : ' The provider timed out while verifying the reply.' : ''}`;
+            structuredChronicle = null;
+            textTarget.textContent = fullText;
+        } else if (fullText.trim() && !hasReadableWorldNarrative(fullText)) {
+            fullText = 'The world state was committed, but the DM sent no readable scene. Review the World state and continue or Reroll.';
+            textTarget.textContent = fullText;
         }
 
         // Hide the persistent typing indicator
         if (dmTyping) dmTyping.style.display = 'none';
 
         // Successful turn: Increment world time ("continue" extends the same moment — no time passes)
-        if (command !== "init" && command !== "look" && command !== "continue" && (!isReroll || restoredRerollSnapshot)) {
+        if (command !== "init" && command !== "look" && command !== "continue"
+            && (!isReroll || restoredRerollSnapshot)
+            && (!frozenReceiptApplied || committedMovement || committedOutfit || fallbackWaitApplied)) {
             if (!sess.turnCount) sess.turnCount = 1;
             sess.turnCount++;
+            const explicitWait = !committedMovement && !committedOutfit
+                ? parseExplicitWorldWaitMinutes(submittedInput || userInput, currentTotalMinutes) : null;
+            const completedExplicitWait = explicitWait && !frozenReceiptApplied
+                && (Number(sess.bonusTimeMinutes) || 0)
+                    - (Number(turnSnapshot?.session?.bonusTimeMinutes) || 0) >= explicitWait;
+            if (fallbackWaitApplied || completedExplicitWait) {
+                // A committed time skip already advanced the clock by the
+                // whole requested duration. Cancel this turn's implicit step
+                // so "wait 12 hours" means exactly 12 hours, not 12h + 5m.
+                const step = Math.max(0, Number(world.hudConfig?.timeStep) || 5);
+                sess.bonusTimeMinutes = Math.max(0, (sess.bonusTimeMinutes || 0) - step);
+            }
+            getWorldTimeData(world, sess);
             // Do not mutate the cast after its prose has already been written.
             // The next turn's pre-generation sync applies this new clock and
             // queues any arrival/departure into the same narrative that shows it.
@@ -25436,7 +29891,8 @@ ${modularMandate}
             // Prefer the structured chronicle field, tolerate legacy [MEMORY]
             // syntax, then repair a missing update with a tiny classifier call.
             let cleanText = fullText;
-            const taggedChronicle = extractWorldLedgerEntry(fullText);
+            const taggedChronicle = narrativeConflict || frozenReceiptApplied
+                ? null : extractWorldLedgerEntry(fullText);
             let extractedChronicle = structuredChronicle || null;
             let chronicleSource = structuredChronicle ? 'structured' : '';
             
@@ -25452,17 +29908,22 @@ ${modularMandate}
             cleanText = stripWorldLedgerDirective(fullText);
 
             const kernelConfig = normalizeWorldKernelConfig(world);
-            if (!extractedChronicle && (!kernelConfig.enabled || kernelConfig.memoryMode === 'semantic')
+            if (!narrativeConflict && !frozenReceiptApplied && !extractedChronicle
+                && (!kernelConfig.enabled || kernelConfig.memoryMode === 'semantic')
                 && command !== 'init' && command !== 'look') {
                 turnCallAudit.chronicleClassifier++;
-                const recovered = await recoverWorldLedgerEntry(structuredModelFor(world), submittedInput || userInput, cleanText, controller.signal);
+                const classifierModel = structuredModelFor(world);
+                const recovered = await recoverWorldLedgerEntry(classifierModel, submittedInput || userInput, cleanText,
+                    controller.signal, diagnostic => recordWorldCall('chronicleClassifier', classifierModel,
+                        diagnostic.status, diagnostic.startedAt, diagnostic.usage, diagnostic.outcome));
                 extractedChronicle = appendWorldLedgerEntry(sess, recovered);
                 if (extractedChronicle) {
                     chronicleSource = 'classifier';
                     console.log(`Horde Engine: Chronicle recovered — ${extractedChronicle}`);
                 }
             }
-            if (!extractedChronicle && !kernelConfig.enabled && command !== 'init' && command !== 'look') {
+            if (!narrativeConflict && !frozenReceiptApplied && !extractedChronicle
+                && !kernelConfig.enabled && command !== 'init' && command !== 'look') {
                 const localFallback = buildLocalNarrativeLedgerFallback(submittedInput || userInput, cleanText);
                 extractedChronicle = appendWorldLedgerEntry(sess, localFallback);
                 if (extractedChronicle) {
@@ -25483,8 +29944,11 @@ ${modularMandate}
             cleanText = cleanText.replace(/\[Loc:.*?\]\s*/gi, '').replace(/\[DISTANT EVENT.*?\]:\s*/gi, '').trim();
             // Scrub tool/engine artifacts models emit as plain text (JSON payloads, tool-call wrappers)
             cleanText = scrubNarrativeArtifacts(cleanText);
-            if (state.globalSettings.slopStripper) cleanText = stripSlop(cleanText);
-            cleanText = applyRegexScripts(cleanText, 'ai');
+            // The failure notice is app-owned safety copy, not model prose.
+            if (!frozenReceiptApplied && !narrativeConflict) {
+                if (state.globalSettings.slopStripper) cleanText = stripSlop(cleanText);
+                cleanText = applyRegexScripts(cleanText, 'ai');
+            }
 
             // Prose scanners are now auditors, never state authorities. A sentence
             // beginning with "The Chapel..." or describing Rowena walking there
@@ -25494,7 +29958,7 @@ ${modularMandate}
             const movedThisTurn = !!startLocation && sess.playerLocation !== startLocation;
             const startOutfit = turnSnapshot?.session?.outfit;
             const outfitChangedThisTurn = startOutfit !== undefined && sess.outfit !== startOutfit;
-            const narratedLocationCandidate = (command !== 'init' && !movedThisTurn)
+            const narratedLocationCandidate = shouldAuditNarratedWorldLocation(command, turnSnapshot, movedThisTurn)
                 ? detectNarratedLocation(world, sess, cleanText) : null;
             const narratedPresenceCandidates = command !== 'init'
                 ? detectNarratedPresence(world, sess, cleanText) : [];
@@ -25543,6 +30007,7 @@ ${modularMandate}
                 location: sess.playerLocation,
                 narrativeAuditWarnings: audit?.rejected?.filter(item => item.type === 'narrative').length || undefined,
                 worldAudit: audit ? {
+                    turn: audit.turn,
                     accepted: audit.accepted,
                     informational: audit.informational,
                     rejected: audit.rejected.length,
@@ -25560,17 +30025,26 @@ ${modularMandate}
                 callAudit: turnCallAudit ? {
                     ...turnCallAudit,
                     foregroundTotal: Object.values(turnCallAudit).reduce((sum, value) => sum + value, 0),
+                    calls: turnCallDetails.slice(0, 20),
                     kernelMode: normalizeWorldKernelConfig(world).enabled ? 'scene_kernel' : 'legacy'
                 } : undefined,
+                turnDurationMs: Math.max(0, Date.now() - worldTurnStartedAt),
                 turnSnapshot,
-                witnesses: endingWitnesses,
+                witnesses: frozenReceiptApplied || narrativeConflict ? [] : endingWitnesses,
+                deferEmbedding: frozenReceiptApplied || narrativeConflict,
                 deferPersist: true
             }, sess, world);
+            dmMsg.visibleRelationshipChanges = worldRelationshipEvidenceLabels(world,
+                worldWitnessedRelationshipEventsForMessage(sess, dmMsg));
+            if (isReroll && Array.isArray(dmMsg.versionTakeMetadata)) {
+                dmMsg.versionTakeMetadata[dmMsg.currentVersion] = captureWorldTakeMetadata(dmMsg);
+            }
             const postSnapshot = captureWorldTurnState(world, sess);
             if (isReroll) {
-                dmMsg.versionSnapshots = Array.isArray(dmMsg.versionSnapshots)
-                    ? dmMsg.versionSnapshots
-                    : [dmMsg.postSnapshot || null];
+                // An older single-take scene may have had its redundant post
+                // copy compacted. Its restored live state is the old take's
+                // base when the player deletes later turns and rerolls it.
+                ensureWorldRerollBaseSnapshot(dmMsg, failureRestoreSnapshot);
                 dmMsg.versionSnapshots.push(postSnapshot);
             } else {
                 dmMsg.versionSnapshots = [postSnapshot];
@@ -25579,9 +30053,11 @@ ${modularMandate}
             // identical postSnapshot beside it doubled every ordinary turn in
             // persisted timelines, especially painfully in large worlds.
             delete dmMsg.postSnapshot;
+            compactWorldHistorySnapshots(world, sess, { keepRecent: 2, maxMessages: 1 });
             const continuityCapability = window.HordeLabs?.taskCapabilities?.()
                 .find(task => task.id === 'continuity_sentinel');
-            if (window.HordeLabs?.policyFor('worlds') === 'audit' && continuityCapability?.available) {
+            if (!frozenReceiptApplied && !narrativeConflict && window.HordeLabs?.policyFor('worlds') === 'audit'
+                && continuityCapability?.available) {
                 void window.HordeLabs.propose('continuity_sentinel', {
                     narrative: cleanText.slice(0, 6500),
                     preFrame: {
@@ -25592,9 +30068,11 @@ ${modularMandate}
                     postFrame: buildWorldSceneFrame(world, sess),
                     proposedReceipt: sess.lastTurnAudit || {},
                     allowedEntityIds: ['player', ...sessionNpcs(world, sess).map(npc => npc.id)]
-                }, { mode: 'worlds', background: true, priority: 15 }).catch(() => {});
+                }, { mode: 'worlds', background: true, priority: 15 })
+                    .then(result => recordWorldLabsResult(world, sess, 'labsContinuitySentinel', result, true))
+                    .catch(() => {});
             }
-            await saveState();
+            await persistResolvedTurn();
         } else if (command === "init") {
             // INIT RESCUE: If the AI failed to introduce the world, provide a basic descriptive fallback
             const fallbackIntro = `You arrive at ${locName}. ${locDesc}\n\n[SYSTEM: The AI failed to generate a custom introduction. You can now take your first action.]`;
@@ -25603,7 +30081,9 @@ ${modularMandate}
                 : commitEngineWorldNoOp(world, sess, 'engine_intro', 'Engine fallback introduction.');
             const fallbackMsg = addWorldMessage('dm', fallbackIntro, {
                 location: sess.playerLocation, turnSnapshot, stateSource: 'engine_intro',
+                turnDurationMs: Math.max(0, Date.now() - worldTurnStartedAt),
                 worldAudit: {
+                    turn: fallbackCommit.audit.turn,
                     accepted: fallbackCommit.audit.accepted,
                     informational: fallbackCommit.audit.informational,
                     rejected: fallbackCommit.audit.rejected.length,
@@ -25614,7 +30094,7 @@ ${modularMandate}
             }, sess, world);
             fallbackMsg.versionSnapshots = [captureWorldTurnState(world, sess)];
             delete fallbackMsg.postSnapshot;
-            await saveState();
+            await persistResolvedTurn();
             fullText = fallbackIntro; // Set fullText so sync logic has something to work with if needed
         } else {
             const why = lastFinishReason === 'length'
@@ -25636,8 +30116,7 @@ ${modularMandate}
         // goals have already advanced locally; this call only seeds future
         // surprises when the configured interval says the queue needs it.
         if (command !== 'init' && !isReroll && shouldRunWorldAgent(world, sess) && hasApiCredentials()) {
-            runWorldAgent(world, sess).then(async () => {
-                await saveState();
+            runWorldAgent(world, sess).then(result => {
                 if (state.activeWorldId === world.id) renderWorldPlayState();
             }).catch(agentError => console.warn('Horde Engine: background world agent skipped —', agentError.message));
         }
@@ -25653,6 +30132,7 @@ ${modularMandate}
     } catch (err) {
         const dmTypingEl = document.getElementById('world-dm-typing');
         if (dmTypingEl) dmTypingEl.style.display = 'none';
+        pendingWorldActionFeedback = null;
 
         // Roll back generated consequences from the failed/aborted turn. A
         // failed reroll restores the previously selected take; a normal turn
@@ -25677,6 +30157,7 @@ ${modularMandate}
                     runLivingWorldTick(world, sess);
                 }
                 sess.turnCount = Math.max(1, parseInt(sess.turnCount) || 1) + 1;
+                getWorldTimeData(world, sess);
                 syncNPCSchedules(world, sess);
                 evaluateQuestProgress(world, sess);
                 const destinationName = target.name || committedMovement.destinationId;
@@ -25690,6 +30171,35 @@ ${modularMandate}
                 }, sess, world);
                 const input = document.getElementById('world-user-input');
                 if (input) input.value = '';
+            }
+        }
+        let waitPreserved = false;
+        if (world && sess && !isReroll && !committedMovement && !committedOutfit
+            && command !== 'init' && command !== 'look' && command !== 'continue') {
+            const explicitWait = parseExplicitWorldWaitMinutes(submittedInput, currentTotalMinutes);
+            if (explicitWait) {
+                const step = Math.max(1, Number(world.hudConfig?.timeStep) || 5);
+                const elapsed = Math.max(explicitWait, step);
+                let waitCommit = null;
+                try { waitCommit = commitEngineWorldWait(world, sess, elapsed); }
+                catch (waitError) { console.warn('World wait fallback could not be committed:', waitError); }
+                if (waitCommit) {
+                    waitPreserved = true;
+                    pendingWorldActionFeedback = waitCommit.actionResult;
+                    const notice = worldUnverifiedWaitNotice(world, sess, elapsed, true);
+                    sess.turnCount = Math.max(1, parseInt(sess.turnCount) || 1) + 1;
+                    sess.bonusTimeMinutes = Math.max(0, (sess.bonusTimeMinutes || 0) - step);
+                    getWorldTimeData(world, sess);
+                    sess.lastTurnStateSource = 'frozen_no_receipt';
+                    addWorldMessage('user', submittedInput, {
+                        location: sess.playerLocation, deferPersist: true
+                    }, sess, world);
+                    addWorldMessage('system', notice, {
+                        location: sess.playerLocation, deferPersist: true
+                    }, sess, world);
+                    const input = document.getElementById('world-user-input');
+                    if (input) input.value = '';
+                }
             }
         }
         if (sess && committedOutfit && !isReroll) {
@@ -25710,22 +30220,39 @@ ${modularMandate}
                 if (input) input.value = '';
             }
         }
-        if (!movementPreserved && !committedOutfit && !command && submittedInput) {
+        if (!movementPreserved && !waitPreserved && !committedOutfit && !command && submittedInput) {
             const input = document.getElementById('world-user-input');
             if (input) input.value = submittedInput;
         }
-        try { if (sess) await saveState(); } catch (saveErr) { console.error('Rollback persistence failed:', saveErr); }
+        if (sess && turnCallDetails.length) {
+            const reason = err.name === 'AbortError'
+                ? (generationTimedOut ? 'Timed-out turn' : 'Stopped turn') : 'Failed turn';
+            sess.worldCallDiagnostics = Array.isArray(sess.worldCallDiagnostics) ? sess.worldCallDiagnostics : [];
+            sess.worldCallDiagnostics.push({
+                at: new Date().toISOString(), reason,
+                durationMs: Math.max(0, Date.now() - worldTurnStartedAt),
+                calls: turnCallDetails.slice(0, 20)
+            });
+            if (sess.worldCallDiagnostics.length > 25) sess.worldCallDiagnostics.splice(0, sess.worldCallDiagnostics.length - 25);
+        }
+        try { if (sess) await persistResolvedTurn(); } catch (saveErr) { console.error('Rollback persistence failed:', saveErr); }
 
-        // A user stop is informational. A configured idle timeout is actionable:
-        // the backend may still be working, so tell the user how to extend it.
+        // A user stop is informational. Distinguish local idle settings from
+        // hosted idle and hard deadlines so the recovery advice is actionable.
         if (err.name === 'AbortError') {
             console.log('World turn aborted');
             if (generationTimedOut) {
                 const seconds = Math.max(1, Math.round(activeIdleTimeoutMs / 1000));
-                const prefix = movementPreserved ? 'Movement saved. ' : '';
-                showToast(`${prefix}Generation received no data for ${seconds}s and was stopped. Increase or disable the local timeout in Settings → AI & Models.`, 'error');
+                const prefix = movementPreserved ? 'Movement saved. ' : waitPreserved ? 'Wait saved. ' : '';
+                const guidance = hostedDeadlineReached
+                    ? `Hosted Worlds turn exceeded ${Math.round(WORLD_HOSTED_TURN_DEADLINE_MS / 1000)}s and was stopped. Retry or choose a faster model; the provider may still be processing the request.`
+                    : worldTurnUsesLocalProvider
+                        ? `Generation received no data for ${seconds}s and was stopped. Increase or disable the local timeout in Settings → AI & Models.`
+                        : `Hosted model sent no data for ${seconds}s and was stopped. Check the provider status or retry.`;
+                showToast(prefix + guidance, 'error');
             } else {
-                showToast(movementPreserved ? 'Movement saved; DM generation stopped.' : 'Generation stopped.', 'info');
+                showToast(movementPreserved ? 'Movement saved; DM generation stopped.'
+                    : waitPreserved ? 'Wait saved; DM generation stopped.' : 'Generation stopped.', 'info');
             }
             renderWorldPlayState();
             return;
@@ -25741,8 +30268,10 @@ ${modularMandate}
                 const fallbackSnapshot = captureWorldTurnState(world, sess);
                 const fallbackMsg = addWorldMessage('dm', fallbackIntro, {
                     location: sess.playerLocation, turnSnapshot: fallbackSnapshot,
+                    turnDurationMs: Math.max(0, Date.now() - worldTurnStartedAt),
                     stateSource: 'engine_intro',
                     worldAudit: {
+                        turn: fallbackCommit.audit.turn,
                         accepted: fallbackCommit.audit.accepted,
                         informational: fallbackCommit.audit.informational,
                         rejected: fallbackCommit.audit.rejected.length,
@@ -25753,15 +30282,18 @@ ${modularMandate}
                 }, sess, world);
                 fallbackMsg.versionSnapshots = [captureWorldTurnState(world, sess)];
                 delete fallbackMsg.postSnapshot;
-                await saveState();
+                await persistResolvedTurn();
                 renderWorldPlayState();
             }
         } else {
-            showToast((movementPreserved ? 'Movement saved. ' : '') + 'Horde Engine Error: ' + friendlyError, 'error');
+            showToast((movementPreserved ? 'Movement saved. ' : waitPreserved ? 'Wait saved. ' : '')
+                + 'Horde Engine Error: ' + friendlyError, 'error');
             renderWorldPlayState();
         }
     } finally {
         if (timeoutId) clearTimeout(timeoutId);
+        if (hostedDeadlineId) clearTimeout(hostedDeadlineId);
+        worldTurnPersistenceFence = null;
         worldTurnInProgress = false;
         worldGenController = null;
         const btn = document.getElementById('world-send-btn');
@@ -25770,6 +30302,7 @@ ${modularMandate}
             btn.disabled = !!ended;
             btn.classList.remove('stop');
             btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
+            btn.setAttribute('aria-label', 'Send message');
         }
     }
 }
@@ -25938,6 +30471,15 @@ function detectNarratedDepartures(world, sess, narrative) {
  * invent geography from prose. Requires a scene-setting frame rather than a bare
  * mention, so "you can see the Great Hall from here" does not relocate anyone.
  */
+function shouldAuditNarratedWorldLocation(command, turnSnapshot, movedThisTurn) {
+    if (command === 'init' || movedThisTurn) return false;
+    // An exit-button click commits mapped travel before the arrival "look"
+    // turn begins. Its opening prose can naturally name the place just left;
+    // that is not a new, uncommitted move back to the origin.
+    return !(command === 'look'
+        && turnSnapshot?.receiptCheckpoint?.tail?.audit?.source === 'engine_travel');
+}
+
 function detectNarratedLocation(world, sess, narrative) {
     const opening = stripSpokenDialogue(narrative).slice(0, 400);
     if (!opening.trim()) return null;
@@ -25947,7 +30489,7 @@ function detectNarratedLocation(world, sess, narrative) {
         const phrase = String(contextualMove[1] || '')
             .split(/\s+(?:and|then|while|as|where|before|after)\s+/i)[0]
             .trim();
-        const contextualTarget = resolveWorldMovementTarget(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, sess.playerLocation, phrase);
+        const contextualTarget = resolveWorldMovementTarget(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, sess.playerLocation, phrase, true, sess);
         if (contextualTarget) return contextualTarget;
     }
     for (const location of world.locations || []) {
@@ -25960,7 +30502,7 @@ function detectNarratedLocation(world, sess, narrative) {
             `\\byou(?:'re| are)?\\s+(?:now\\s+)?(?:step|steps|stepped|walk|walks|walked|enter|enters|entered|move|moved|slip|slipped|duck|ducked|arrive|arrived|stand|standing)\\b[^.!?]{0,40}\\b${escaped}\\b`,
             'i');
         if (!framed.test(opening)) continue;
-        if (!findWorldTravelPath(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, sess.playerLocation, location.id)) continue;
+        if (!findWorldTravelPath(typeof worldForSession === 'function' ? worldForSession(world, sess) : world, sess.playerLocation, location.id, { session: sess })) continue;
         return location;
     }
     return null;
@@ -25971,6 +30513,7 @@ function applyNarratedLocation(world, sess, narrative) {
     if (!target) return null;
     const previous = sess.playerLocation;
     sess.playerLocation = target.id;
+    sess.playerMovementSerial = Math.max(0, parseInt(sess.playerMovementSerial) || 0) + 1;
     console.warn(`Horde Engine: the scene reads as "${target.name}" but no location_id was recorded — moved the player there from ${previous}.`);
     return { from: previous, to: target.id, name: target.name };
 }
@@ -26292,18 +30835,18 @@ function rollForScenePopulation(locationId, persist = true) {
         }
     });
 
-    if (persist) saveState().catch(() => {});
+    if (persist) saveWorldsState().catch(() => {});
 }
 
 // --- Session-scoped world views ---
 // NPCs improvised mid-story (npc_introduced) belong to the timeline that created
-// them; other timelines never see them. Template NPCs (no sessionOrigin) are
-// global. Locations stay global by design: timelines share geography, not people.
+// them; other timelines never see them. Template NPCs and locations (without
+// sessionOrigin) are shared; story-born people and places stay in their timeline.
 function isVisibleToSession(item, sess) {
-    return !item.sessionOrigin || !sess || item.sessionOrigin === sess.id;
+    return !item.sessionOrigin || (!!sess && item.sessionOrigin === sess.id);
 }
 function sessionNpcs(world, sess) {
-    return world.entities.filter(e => e.type === 'npc' && isVisibleToSession(e, sess));
+    return (world.entities || []).filter(e => e.type === 'npc' && isVisibleToSession(e, sess));
 }
 
 function sessionLocations(world, sess) {
@@ -26315,7 +30858,30 @@ function sessionLocations(world, sess) {
 }
 
 function worldForSession(world, sess) {
-    return { ...world, locations: sessionLocations(world, sess), entities: world.entities };
+    return {
+        ...world,
+        locations: sessionLocations(world, sess),
+        entities: (world.entities || []).filter(entity => isVisibleToSession(entity, sess))
+    };
+}
+
+// A proposed turn may be rejected after its state reducer runs. Keep visible
+// feedback outside that tentative mutation so rollback cannot leave a toast or
+// Studio panel claiming that an abandoned change happened.
+function flushWorldActionFeedback(result) {
+    if (!result) return;
+    (result.checkOutcomeResults || []).forEach(flushWorldActionFeedback);
+    (result.feedback || []).forEach(effect => {
+        if (effect.type === 'toast') showToast(effect.message, effect.level);
+        if (effect.type === 'locations' && state.editingWorld?.id === effect.worldId
+            && document.getElementById('w-locations-list') && typeof renderWorldLocations === 'function') {
+            renderWorldLocations();
+        }
+        if (effect.type === 'entities' && state.editingWorld?.id === effect.worldId
+            && document.getElementById('w-entities-list') && typeof renderWorldEntities === 'function') {
+            renderWorldEntities();
+        }
+    });
 }
 
 function addSessionDynamicExit(sess, fromLocationId, targetName) {
@@ -26423,8 +30989,43 @@ const CHECK_GUARDED_ACTION_FIELDS = Object.freeze([
     'npc_relationship_updates', 'npc_observations', 'world_events',
     'location_state_updates', 'faction_updates', 'economy_updates',
     'schedule_updates', 'player_preference_updates', 'relationship_update',
-    'relationship_event', 'memory_write', 'ledger_update'
+    'relationship_event', 'memory_write', 'ledger_update', 'exit_unlocks'
 ]);
+
+function applyWorldExitUnlocks(world, sess, requests) {
+    if (!Array.isArray(requests)) return [];
+    const view = typeof worldForSession === 'function' ? worldForSession(world, sess) : world;
+    const current = getLocationRef(view, sess.playerLocation);
+    if (!current) return [];
+    if (!isPlainObject(sess.unlockedExits)) sess.unlockedExits = {};
+    const results = [];
+    // A resolved check can open one local, explicitly check-unlockable exit.
+    // It cannot silently unlock a distant gate or one the author made key-only.
+    requests.slice(0, 1).forEach(request => {
+        const fromId = String(request?.from_location_id || '').trim();
+        const toId = String(request?.to_location_id || '').trim();
+        if (fromId !== current.id || !toId) return;
+        const target = (view.locations || []).find(location => location.id === toId);
+        if (!target) return;
+        const exit = (current.exits || []).find(candidate =>
+            candidate && typeof candidate === 'object' && candidate.allowCheckUnlock === true
+            && resolveWorldExitTarget(view, candidate)?.id === target.id);
+        if (!exit) return;
+        const key = worldExitUnlockKey(current.id, exit.targetLocationId || getExitTargetName(exit));
+        if (!key) return;
+        sess.unlockedExits[key] = true;
+        const reverse = (target.exits || []).find(candidate =>
+            candidate && typeof candidate === 'object' && candidate.allowCheckUnlock === true
+            && String(candidate.requiredItem || '').trim() === String(exit.requiredItem || '').trim()
+            && resolveWorldExitTarget(view, candidate)?.id === current.id);
+        if (reverse) {
+            const reverseKey = worldExitUnlockKey(target.id, reverse.targetLocationId || getExitTargetName(reverse));
+            if (reverseKey) sess.unlockedExits[reverseKey] = true;
+        }
+        results.push({ from_location_id: current.id, to_location_id: target.id, unlocked: true });
+    });
+    return results;
+}
 
 function sanitizeCheckOutcomeActions(raw) {
     if (!isPlainObject(raw)) return null;
@@ -26445,6 +31046,18 @@ function processStructuredActions(args) {
     const world = explicitWorld || state.worlds.find(w => w.id === state.activeWorldId);
     const sess = explicitSession || getCurrentWorldSession();
     if (!world || !sess) return null;
+    const feedback = [];
+    const actionToast = (message, level) => {
+        if (movementAuthority.deferFeedback) feedback.push({ type: 'toast', message, level });
+        else showToast(message, level);
+    };
+    const actionStudioRefresh = type => {
+        if (movementAuthority.deferFeedback) feedback.push({ type, worldId: world.id });
+        else if (type === 'locations' && state.editingWorld?.id === world.id
+            && document.getElementById('w-locations-list') && typeof renderWorldLocations === 'function') renderWorldLocations();
+        else if (type === 'entities' && state.editingWorld?.id === world.id
+            && document.getElementById('w-entities-list') && typeof renderWorldEntities === 'function') renderWorldEntities();
+    };
     normalizeLivingWorldState(world, sess);
     normalizePlayerRulesState(world, sess);
     const modules = normalizeWorldGameRules(world).modules;
@@ -26456,6 +31069,7 @@ function processStructuredActions(args) {
     let checkOutcomeResults = [];
     let capabilityProgressResults = [];
     let conditionResults = [];
+    const inventoryFailures = [];
     const moduleRejections = [];
     const rejectDisabledField = (field, module) => {
         if (args[field] !== undefined && args[field] !== null
@@ -26474,8 +31088,15 @@ function processStructuredActions(args) {
         checkResults.forEach((result, index) => {
             if (result.pending || result.reason) return;
             const requested = requestedChecks[index] || {};
-            const branch = sanitizeCheckOutcomeActions(result.success ? requested.on_success : requested.on_failure);
-            if (branch) checkOutcomeResults.push(processStructuredActions(branch, world, sess));
+            const rawBranch = result.success ? requested.on_success : requested.on_failure;
+            if (isPlainObject(rawBranch) && Object.keys(rawBranch).some(key =>
+                !CHECK_GUARDED_ACTION_FIELDS.includes(key))) {
+                moduleRejections.push({ field: 'checks', module: 'checks', reason: 'unsupported_check_outcome_field' });
+                return;
+            }
+            const branch = sanitizeCheckOutcomeActions(rawBranch);
+            if (branch) checkOutcomeResults.push(processStructuredActions(branch, world, sess,
+                { ...movementAuthority, authorizedCheckOutcome: result.success === true }));
         });
         const guarded = { ...args };
         delete guarded.checks;
@@ -26490,6 +31111,19 @@ function processStructuredActions(args) {
 
     if (Array.isArray(args.capability_progress) && args.capability_progress.length) {
         capabilityProgressResults = applyWorldCapabilityProgress(world, sess, args.capability_progress);
+    }
+
+    const exitUnlockResults = movementAuthority.authorizedCheckOutcome === true
+        ? applyWorldExitUnlocks(world, sess, args.exit_unlocks)
+        : [];
+    if (args.exit_unlocks !== undefined && movementAuthority.authorizedCheckOutcome !== true) {
+        moduleRejections.push({ field: 'exit_unlocks', module: 'checks', reason: 'requires_successful_check' });
+    } else if (args.exit_unlocks !== undefined && !exitUnlockResults.length) {
+        moduleRejections.push({ field: 'exit_unlocks', module: 'checks', reason: 'no_local_check_unlockable_exit' });
+        actionToast('That check did not open a mapped exit here. Check the exit setup and location IDs.', 'warning');
+    } else if (exitUnlockResults.length) {
+        const opened = getLocationRef(world, exitUnlockResults[0].to_location_id);
+        actionToast(`${opened?.name || 'Exit'} unlocked. You can now travel through it.`, 'success');
     }
 
     // --- DYNAMIC WORLD GROWTH: register new locations FIRST so a move to
@@ -26523,10 +31157,8 @@ function processStructuredActions(args) {
                 addSessionDynamicExit(sess, anchor.id, newLoc.name);
             }
             world.locations.push(newLoc);
-            showToast(`🗺️ New location discovered: ${newLoc.name}`, 'success');
-            if (document.getElementById('w-locations-list') && typeof renderWorldLocations === 'function' && state.editingWorld?.id === world.id) {
-                renderWorldLocations();
-            }
+            actionToast(`🗺️ New location discovered: ${newLoc.name}`, 'success');
+            actionStudioRefresh('locations');
         });
     }
 
@@ -26538,7 +31170,7 @@ function processStructuredActions(args) {
         } else if (targetLoc) {
             movementResult = movePlayerAlongWorldPath(world, sess, targetLoc);
             if (movementResult.moved) {
-                showToast(`Moved to ${targetLoc.name}`, 'info');
+                actionToast(`Moved to ${targetLoc.name}`, 'info');
             } else if (!movementResult.ok) {
                 console.warn(`Horde Engine: rejected unreachable player move from ${sess.playerLocation} to ${targetLoc.id}`);
             }
@@ -26555,7 +31187,7 @@ function processStructuredActions(args) {
             const hrs = Math.floor(skip / 60);
             const mins = skip % 60;
             let timeStr = hrs > 0 ? `${hrs}h${mins > 0 ? ` ${mins}m` : ''}` : `${mins}m`;
-            showToast(`Time advanced by ${timeStr}`, 'info');
+            actionToast(`Time advanced by ${timeStr}`, 'info');
             // The clock just jumped past events scheduled inside the skipped
             // window (a dawn raid during an eight-hour sleep). Fire them now,
             // in the turn that skipped, rather than one action later.
@@ -26581,7 +31213,7 @@ function processStructuredActions(args) {
             }[result.reason] || result.reason;
             console.warn(`Horde Engine: transaction refused (${result.type} ${result.item}) — ${explanation}.`);
             if (result.reason === 'currency_not_configured' || result.reason === 'no_market_and_no_price') {
-                showToast(`Purchase not settled: ${explanation}.`, 'warning');
+                actionToast(`Purchase not settled: ${explanation}.`, 'warning');
             }
         });
     }
@@ -26594,26 +31226,52 @@ function processStructuredActions(args) {
         args.inventory_add.forEach(value => {
             const item = globalThis.HordeRpgMechanics?.normalizeItem(value) || value;
             const name = globalThis.HordeRpgMechanics?.itemName(item) || String(item || '');
-            if (!globalThis.HordeRpgMechanics?.findItem(sess.inventory, name)) {
-                sess.inventory.push(item);
-                showToast(`Item taken: ${name}`, 'info');
-            }
+            // Keep duplicate acquisitions as distinct units. Commerce and
+            // check failure costs count inventory entries, and collapsing a
+            // second pickup into the first entry would make that unit unsellable.
+            sess.inventory.push(item);
+            actionToast(`Item taken: ${name}`, 'info');
         });
     }
 
     if (modules.inventory && args.inventory_remove && Array.isArray(args.inventory_remove)) {
         args.inventory_remove.forEach(item => {
             const target = String(item || '').trim().toLowerCase();
-            if (!target) return;
-            // Fuzzy match: the LLM may say "potion" for "healing potion"
+            if (!target) {
+                inventoryFailures.push({ item: '', reason: 'invalid_item' });
+                return;
+            }
+            // Exact names can have multiple units; remove one. A short name
+            // such as "draught" is safe only when it resolves to one kind of
+            // item, otherwise the model must name which draught it consumed.
             const nameOf = value => (globalThis.HordeRpgMechanics?.itemName(value) || String(value || '')).toLowerCase();
             let idx = sess.inventory.findIndex(i => nameOf(i) === target);
-            if (idx === -1) idx = sess.inventory.findIndex(i => nameOf(i).includes(target) || target.includes(nameOf(i)));
-            if (idx !== -1) {
-                const removed = sess.inventory.splice(idx, 1)[0];
-                Object.keys(sess.equipment || {}).forEach(slot => { if (sess.equipment[slot] === removed?.id) sess.equipment[slot] = null; });
-                showToast(`Item removed: ${globalThis.HordeRpgMechanics?.itemName(removed) || removed}`, 'info');
+            if (idx === -1) {
+                const matches = sess.inventory.map((value, index) => ({ index, name: nameOf(value) }))
+                    .filter(value => value.name.includes(target) || target.includes(value.name));
+                if (new Set(matches.map(value => value.name)).size > 1) {
+                    inventoryFailures.push({ item: String(item || '').slice(0, 120), reason: 'ambiguous_item' });
+                    return;
+                }
+                idx = matches[0]?.index ?? -1;
             }
+            if (idx !== -1) {
+                const existing = globalThis.HordeRpgMechanics?.normalizeItem(sess.inventory[idx])
+                    || (typeof sess.inventory[idx] === 'string'
+                        ? { name: sess.inventory[idx], quantity: 1 }
+                        : { ...sess.inventory[idx] });
+                const quantity = Math.max(1, Number(existing.quantity) || 1);
+                if (quantity > 1) {
+                    existing.quantity = quantity - 1;
+                    sess.inventory[idx] = existing;
+                } else {
+                    const removed = sess.inventory.splice(idx, 1)[0];
+                    Object.keys(sess.equipment || {}).forEach(slot => {
+                        if (sess.equipment[slot] === removed?.id) sess.equipment[slot] = null;
+                    });
+                }
+                actionToast(`Item removed: ${globalThis.HordeRpgMechanics?.itemName(existing) || item}`, 'info');
+            } else inventoryFailures.push({ item: String(item || '').slice(0, 120), reason: 'item_not_owned' });
         });
     }
 
@@ -26625,7 +31283,7 @@ function processStructuredActions(args) {
 
     if (args.outfit_update) {
         sess.outfit = args.outfit_update;
-        showToast('Outfit Updated', 'info');
+        actionToast('Outfit Updated', 'info');
     }
 
     if (isPlainObject(args.player_identity_update)) {
@@ -26677,20 +31335,20 @@ function processStructuredActions(args) {
         const reason = String(update.reason || '').trim().slice(0, 240);
         if (reason) {
             appendWorldLedgerEntry(sess, `Status changed: ${reason}`);
-            showToast('Social position changed', 'info');
+            actionToast('Social position changed', 'info');
         }
     }
 
     if (args.ledger_update) {
         ledgerEntry = appendWorldLedgerEntry(sess, args.ledger_update);
-        if (ledgerEntry) showToast('Ledger Updated', 'info');
+        if (ledgerEntry) actionToast('Ledger Updated', 'info');
     }
 
     if (args.label) {
         if (!sess.revealedSecrets) sess.revealedSecrets = [];
         if (!sess.revealedSecrets.includes(args.label)) {
             sess.revealedSecrets.push(args.label);
-            showToast(`Secret Uncovered: ${args.label}`, 'success');
+            actionToast(`Secret Uncovered: ${args.label}`, 'success');
         }
     }
 
@@ -26702,10 +31360,10 @@ function processStructuredActions(args) {
             if (existing) {
                 existing.text = t.text;
                 if (t.status) existing.status = t.status;
-                if (t.status === 'resolved') showToast(`🧵 Thread resolved: ${t.text.slice(0, 50)}`, 'success');
+                if (t.status === 'resolved') actionToast(`🧵 Thread resolved: ${t.text.slice(0, 50)}`, 'success');
             } else {
                 sess.threads.push({ id: t.id, text: String(t.text).slice(0, 200), status: t.status || 'open', turnOpened: sess.turnCount || 1 });
-                showToast(`🧵 New story thread`, 'info');
+                actionToast(`🧵 New story thread`, 'info');
             }
         });
     }
@@ -26755,12 +31413,33 @@ function processStructuredActions(args) {
             if (!update || (!update.id && !update.title)) return;
             const id = String(update.id || livingId('event', update.title)).slice(0, 80);
             let event = sess.scheduledEvents.find(item => item.id === id);
+            const trustedDeadline = WORLD_ENGINE_DEADLINE_META.get(update);
+            if (event?.conditionResolution === 'player_present'
+                && event.conditionResolvedTurn === (sess.turnCount || 1)) {
+                // The engine has already resolved the conditional promise as
+                // false. A receipt may acknowledge cancellation, but cannot
+                // re-arm it, change its deadline, or claim it fired under a
+                // different status in this same turn.
+                const isAcknowledgement = update.status === 'cancelled'
+                    && !['due_in_turns', 'due_in_minutes', 'repeat_every_turns',
+                        'repeat_every_minutes', 'condition_on_trigger', 'influence_change']
+                        .some(key => update[key] !== undefined);
+                if (!isAcknowledgement) moduleRejections.push({ field: 'world_events',
+                    module: 'livingWorld', reason: 'conditional_deadline_not_met', id });
+                return;
+            }
             if (!event) {
                 event = {
                     id,
                     title: String(update.title || 'Unnamed event').slice(0, 120),
                     description: String(update.description || update.title || 'Something changes in the world.').slice(0, 500),
                     status: 'scheduled',
+                    urgent: update.urgent === true,
+                    reportedWarning: update.reported_warning === true,
+                    reportedWarningSpeaker: String(update.reported_warning_speaker || '').slice(0, 80),
+                    narratedWarningSourceKey: String(trustedDeadline?.sourceKey || '').slice(0, 500),
+                    playerAbsentCondition: trustedDeadline?.condition
+                        ? safeJsonClone(trustedDeadline.condition) : null,
                     dueTurn: update.due_in_turns !== undefined
                         ? (sess.turnCount || 1) + Math.max(1, parseInt(update.due_in_turns) || 1)
                         : (update.due_in_minutes !== undefined ? null : (sess.turnCount || 1) + 1),
@@ -26781,6 +31460,26 @@ function processStructuredActions(args) {
             if (update.title !== undefined) event.title = String(update.title).slice(0, 120);
             if (update.description !== undefined) event.description = String(update.description).slice(0, 500);
             if (['scheduled', 'cancelled'].includes(update.status)) event.status = update.status;
+            if (update.urgent !== undefined) event.urgent = update.urgent === true;
+            if (update.reported_warning === true) event.reportedWarning = true;
+            if (update.reported_warning_speaker) event.reportedWarningSpeaker = String(update.reported_warning_speaker).slice(0, 80);
+            if (trustedDeadline?.sourceKey) event.narratedWarningSourceKey = String(trustedDeadline.sourceKey).slice(0, 500);
+            if (trustedDeadline?.condition) event.playerAbsentCondition = safeJsonClone(trustedDeadline.condition);
+            if (update.status === 'cancelled') {
+                (sess.consequences || []).forEach(item => {
+                    if (item.type !== 'deadline' || !String(item.sourceEventId || '').startsWith(`deadline_${id}_`)
+                        || item.state === 'resolved') return;
+                    // A reported warning can fire during a long player wait
+                    // before this same receipt reaches world_events. The
+                    // model may cancel the scheduled reminder because the
+                    // hour passed, but that does not resolve the newly
+                    // reached consequence or verify its predicted harm.
+                    if (event.reportedWarning) return;
+                    item.state = 'resolved';
+                    item.updatedTurn = sess.turnCount || 1;
+                    item.resolvedTurn = sess.turnCount || 1;
+                });
+            }
             if (update.due_in_turns !== undefined) {
                 event.dueTurn = (sess.turnCount || 1) + Math.max(1, parseInt(update.due_in_turns) || 1);
                 if (update.due_in_minutes === undefined) event.dueMinute = null;
@@ -26831,7 +31530,8 @@ function processStructuredActions(args) {
                 return {
                     id: String(item.id || livingId('condition', label)).slice(0, 80),
                     label,
-                    expiresTurn: duration > 0 ? (sess.turnCount || 1) + duration : null
+                    expiresTurn: duration > 0 ? (sess.turnCount || 1) + duration : null,
+                    ...(item.blocksTravel === true || item.blocks_travel === true ? { blocksTravel: true } : {})
                 };
             };
             if (Array.isArray(update.set_conditions)) locState.conditions = update.set_conditions.map(makeCondition).filter(Boolean);
@@ -26980,7 +31680,7 @@ function processStructuredActions(args) {
             });
             const npc = world.entities.find(e => e.id === rid);
             const icon = sc.status === 'dead' ? '☠️' : (sc.status === 'gone' ? '🚪' : '✨');
-            showToast(`${icon} ${npc ? npc.name : 'NPC'} is now ${sc.status}`, 'info');
+            actionToast(`${icon} ${npc ? npc.name : 'NPC'} is now ${sc.status}`, 'info');
         });
     }
 
@@ -27012,7 +31712,7 @@ function processStructuredActions(args) {
                     delete entState.journey;
                     entState.location = targetLoc.id;
                     entState.pinnedUntilTurn = (sess.turnCount || 1) + 6;
-                    showToast(`${npc ? npc.name : 'NPC'} moved to ${targetLoc.name}.`, 'info');
+                    actionToast(`${npc ? npc.name : 'NPC'} moved to ${targetLoc.name}.`, 'info');
                 } else if (entState.location === targetLoc.id) {
                     entState.pinnedUntilTurn = (sess.turnCount || 1) + 6;
                 } else if (!startNpcJourney(world, sess, npc, targetLoc, move.reason,
@@ -27042,7 +31742,11 @@ function processStructuredActions(args) {
             const existing = world.entities.find(e => isVisibleToSession(e, sess) && e.name.toLowerCase() === npc.name.trim().toLowerCase());
             if (!existing) {
                 // Generate and inject a brand new NPC
-                const newId = 'ent_' + Date.now() + Math.floor(Math.random() * 1000);
+                const requestedId = String(npc.id || '');
+                const newId = /^[a-z][a-z0-9_-]{2,99}$/i.test(requestedId)
+                    && !['player', 'user', 'pc', 'protagonist'].includes(requestedId.toLowerCase())
+                    && !world.entities.some(entity => entity.id === requestedId)
+                    ? requestedId : 'ent_' + Date.now() + Math.floor(Math.random() * 1000);
                 // Home: only if the narrative states one — meeting someone at an inn
                 // must NOT make them a resident of the inn. No home = wanderer.
                 const statedHome = npc.home_location ? findFuzzyLocation(npc.home_location, sessionLocations(world, sess)) : null;
@@ -27072,11 +31776,8 @@ function processStructuredActions(args) {
                     }]
                 };
                 
-                showToast(`New character introduced: ${newNpc.name}`, 'success');
-                // Re-render studio entities if visible
-                if (typeof renderWorldEntities === 'function' && document.getElementById('w-entities-list')) {
-                    renderWorldEntities();
-                }
+                actionToast(`New character introduced: ${newNpc.name}`, 'success');
+                actionStudioRefresh('entities');
             }
         });
     }
@@ -27124,7 +31825,7 @@ function processStructuredActions(args) {
             }
             const npc = world.entities.find(e => e.id === rid);
             console.log(`Horde Engine: Goal ${goal ? 'set' : 'cleared'} for ${npc ? npc.name : rid}${goal ? ` — ${goal}` : ''}`);
-            if (goal) showToast(`🎯 ${npc ? npc.name : 'An NPC'} has an agenda...`, 'info');
+            if (goal) actionToast(`🎯 ${npc ? npc.name : 'An NPC'} has an agenda...`, 'info');
         });
     }
 
@@ -27148,7 +31849,7 @@ function processStructuredActions(args) {
                 });
             }
             const npc = world.entities.find(e => e.id === rid);
-            showToast(`${npc ? npc.name : 'NPC'} ${change > 0 ? '❤️ +' : '💔 '}${change}`, change > 0 ? 'success' : 'info');
+            actionToast(`${npc ? npc.name : 'NPC'} ${change > 0 ? '❤️ +' : '💔 '}${change}`, change > 0 ? 'success' : 'info');
         });
     }
 
@@ -27213,7 +31914,10 @@ function processStructuredActions(args) {
         checkOutcomeResults,
         capabilityProgressResults,
         conditionResults,
+        exitUnlockResults,
+        inventoryFailures,
         moduleRejections,
+        feedback,
         playerState: safeJsonClone(normalizePlayerRulesState(world, sess))
     };
 }
@@ -27231,7 +31935,7 @@ async function renderWorldMap() {
 
     try {
         const sess = getCurrentWorldSession();
-        const presentation = normalizeWorldPresentation(world);
+        const presentation = worldPresentationForDisplay(world);
         const mapSkin = worldMediaSource(world, presentation.mapSkinAssetId);
         const effectiveMode = ['classic', 'cinematic'].includes(sess?.presentationMode)
             ? sess.presentationMode : (presentation.enabled ? presentation.mode : 'classic');
@@ -27252,11 +31956,60 @@ async function renderWorldMap() {
     }
 }
 
+function showStartupStorageRecovery(error) {
+    if (!HordeDB.db || document.getElementById('startup-recovery-screen')) return;
+    const screen = document.createElement('section');
+    screen.id = 'startup-recovery-screen';
+    screen.setAttribute('role', 'alertdialog');
+    screen.setAttribute('aria-modal', 'true');
+    screen.setAttribute('aria-labelledby', 'startup-recovery-title');
+    const card = document.createElement('div');
+    card.className = 'startup-recovery-card';
+    const title = document.createElement('h1');
+    title.id = 'startup-recovery-title';
+    title.textContent = 'Saved data needs recovery';
+    const explanation = document.createElement('p');
+    explanation.textContent = 'Horde Studio could not read part of your saved library. It has stopped normal startup rather than writing over that data.';
+    const detail = document.createElement('p');
+    detail.className = 'startup-recovery-detail';
+    detail.textContent = String(error?.message || error || 'Unknown storage error');
+    const guidance = document.createElement('p');
+    guidance.textContent = 'You can restore a full backup here. If it contains Virtual Human lives already present in your local service, restore them on a clean service profile; existing lives are never silently overwritten.';
+    const actions = document.createElement('div');
+    actions.className = 'startup-recovery-actions';
+    const choose = document.createElement('button');
+    choose.type = 'button';
+    choose.className = 'btn-primary';
+    choose.textContent = 'Choose full backup to restore';
+    const reload = document.createElement('button');
+    reload.type = 'button';
+    reload.className = 'btn-secondary';
+    reload.textContent = 'Try loading again';
+    reload.onclick = () => window.location.reload();
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.hordebackup,.json';
+    input.hidden = true;
+    choose.onclick = () => input.click();
+    input.onchange = async () => {
+        const file = input.files?.[0];
+        input.value = '';
+        if (file) await importFullBackup(file);
+    };
+    actions.append(choose, reload, input);
+    card.append(title, explanation, detail, guidance, actions);
+    screen.append(card);
+    document.body.classList.add('startup-recovery-mode');
+    document.body.append(screen);
+    choose.focus();
+}
+
 // Start
 init().catch(error => {
     console.error('Initialization failed:', error);
     window.__hordeRuntimeErrors.push({ message: `Initialization failed: ${String(error?.message || error)}`, stack: String(error?.stack || '') });
     showToast(`Unable to start Horde Studio: ${error.message || error}`, 'error');
+    if (!hordePrimaryStateLoaded) showStartupStorageRecovery(error);
 });
 
 /** --- REFERENCE SANITIZER & SCHEDULER MODULE --- **/
@@ -27304,6 +32057,337 @@ function getWorldTimeData(world, sess) {
     const mins = totalMinutesToday % 60;
     
     return { days, hours24, mins, totalMinutesToday, currentTotalMinutes, timeStep, startMinutes };
+}
+
+function describeWorldEventDeadline(world, sess, event, clock = null) {
+    const now = clock || getWorldTimeData(world, sess);
+    if (event?.dueMinute != null) {
+        const remaining = Math.ceil(Number(event.dueMinute) - now.currentTotalMinutes);
+        if (remaining <= 0) return 'due now';
+        if (remaining <= 120) return `in ${remaining} min`;
+        const minute = Number(event.dueMinute);
+        const day = Math.floor(minute / 1440) + 1;
+        const hour24 = Math.floor((minute % 1440) / 60);
+        const hour12 = hour24 % 12 || 12;
+        return `Day ${day}, ${hour12}:${String(minute % 60).padStart(2, '0')} ${hour24 >= 12 ? 'PM' : 'AM'}`;
+    }
+    if (event?.dueTurn != null) {
+        const remaining = Number(event.dueTurn) - (sess.turnCount || 1);
+        return remaining <= 0 ? 'due now' : `in ${remaining} turn${remaining === 1 ? '' : 's'}`;
+    }
+    return 'time unknown';
+}
+
+function worldEventMinutesRemaining(world, sess, event, clock = null) {
+    const now = clock || getWorldTimeData(world, sess);
+    if (event?.dueMinute != null) return Math.max(0, Number(event.dueMinute) - now.currentTotalMinutes);
+    if (event?.dueTurn != null) return Math.max(0, Number(event.dueTurn) - (sess.turnCount || 1)) * now.timeStep;
+    return Number.MAX_SAFE_INTEGER;
+}
+
+function parseWorldSpokenClockHour(value, dayPart) {
+    const spoken = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+        seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+    const raw = String(value || '').toLowerCase();
+    const hour = Object.hasOwn(spoken, raw) ? spoken[raw] : Number(raw);
+    if (!Number.isInteger(hour) || hour < 1 || hour > 12) return null;
+    const part = String(dayPart || '').toLowerCase();
+    return hour % 12 + (['afternoon', 'evening', 'night'].includes(part) ? 12 : 0);
+}
+
+function worldConditionalSearchPromise(world, sess, narrative, speakerName, anchorIndex = 0) {
+    const name = String(speakerName || '').trim().toLowerCase();
+    const speakers = sessionNpcs(world, sess).filter(npc => String(npc.name || '').trim().toLowerCase() === name);
+    if (speakers.length !== 1 || !sess.playerLocation
+        || sess.entityStates?.[speakers[0].id]?.location !== sess.playerLocation) return null;
+    const visible = String(narrative || '').split(/<details\b/i)[0].slice(0, 12000);
+    const index = Math.max(0, Math.min(visible.length, Number(anchorIndex) || 0));
+    const nearby = visible.slice(Math.max(0, index - 160), Math.min(visible.length, index + 190));
+    const absent = /\bif\s+(?:you|the\s+(?:player|ranger))\s+(?:(?:aren['’]?t|are\s+not|isn['’]?t|is\s+not)\s+back|(?:haven['’]?t|have\s+not|hasn['’]?t|has\s+not|don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:return\w*|come\s+back|send|sent)\b)/i;
+    if (!absent.test(nearby) || !/\b(?:search|party|watch|men|guards|scouts|dispatch|pull)\b/i.test(nearby)) return null;
+    return {
+        type: 'player_absent_at_meeting_place',
+        returnLocationId: sess.playerLocation,
+        promisorId: speakers[0].id,
+        playerMovementSerial: Math.max(0, parseInt(sess.playerMovementSerial) || 0),
+        action: 'search_party'
+    };
+}
+
+function worldDeadlineNarrativeSourceKey(narrative, anchorIndex) {
+    const visible = String(narrative || '').split(/<details\b/i)[0].slice(0, 12000);
+    const index = Number(anchorIndex);
+    if (!Number.isInteger(index) || index < 0 || index >= visible.length) return '';
+    const start = visible.lastIndexOf('\n', index) + 1;
+    const next = visible.indexOf('\n', index);
+    return visible.slice(start, next < 0 ? visible.length : next)
+        .trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 500);
+}
+
+// Provenance for metadata derived by the engine from witnessed dialogue.
+// Tool arguments are model-authored and cannot mark themselves as trusted.
+const WORLD_ENGINE_DEADLINE_META = new WeakMap();
+
+function reconcileNarratedWorldDeadlines(world, sess, receipt, legacyArgs, narrative, playerInput = '') {
+    const updates = legacyArgs?.world_events;
+    if (!Array.isArray(updates) || !updates.length) return [];
+    updates.forEach(update => {
+        if (!isPlainObject(update)) return;
+        WORLD_ENGINE_DEADLINE_META.delete(update);
+        delete update.player_absent_condition;
+        delete update.narrated_warning_source_key;
+    });
+    if (!narrative) return [];
+    const namedHours = { midnight: 0, dawn: 6, daybreak: 6, sunrise: 6, 'first light': 6,
+        noon: 12, dusk: 18, sunset: 18 };
+    const claims = [...String(narrative).split(/<details\b/i)[0].slice(0, 12000).matchAll(
+        /\b(deadline\s+(?:is|was|falls?\s+at)|by|before|at)\s+(?:(tomorrow|tonight|the\s+next\s+day)\s+)?(?:the\s+)?(midnight|dawn|daybreak|sunrise|first\s+light|noon|dusk|sunset)\b/ig)]
+        .map(match => ({ index: match.index, phrase: match[0], qualifier: String(match[2] || '').toLowerCase(),
+            label: String(match[3] || '').toLowerCase(), explicitDeadline: /^deadline\b/i.test(match[1]) }));
+    claims.push(...[...String(narrative).split(/<details\b/i)[0].slice(0, 12000).matchAll(
+        /\b(?:if|when|once)\s+(?:(tomorrow|tonight)\s+)?(?:the\s+)?(midnight|dawn|daybreak|sunrise|noon|dusk|sunset)\s+(?:comes?|breaks?|arrives?)\b/ig)]
+        .map(match => ({ index: match.index, phrase: match[0], qualifier: String(match[1] || '').toLowerCase(),
+            label: String(match[2] || '').toLowerCase(), explicitDeadline: false })));
+    claims.push(...[...String(narrative).split(/<details\b/i)[0].slice(0, 12000).matchAll(
+        /\b(deadline\s+(?:is|was|falls?\s+at)|by|before|at)\s+(?:(tomorrow|tonight)\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})(?::(\d{2})|\s+o['’]?clock)?\s+(?:(tomorrow|tonight)\s+)?(morning|afternoon|evening|night)\b/ig)]
+        .map(match => ({ index: match.index, phrase: match[0], qualifier: String(match[5] || match[2] || '').toLowerCase(),
+            label: `${match[3]} ${match[6]}`.toLowerCase(),
+            hour24: parseWorldSpokenClockHour(match[3], match[6]), minute: Number(match[4] || 0),
+            explicitDeadline: /^deadline\b/i.test(match[1]) }))
+        .filter(claim => claim.hour24 != null && claim.minute <= 59));
+    const urgent = updates.filter(update => update?.urgent === true && update.status !== 'cancelled');
+    // Some models answer an explicit player request with a short assent such
+    // as “First light, then,” while putting the full agreement in ledger_update
+    // and an arbitrary turn count in world_events. The player, visible reply,
+    // and same receipt must independently agree on ONE named time before we
+    // convert that turn count to clock minutes. Neither a lone prose mention
+    // nor the model's ledger by itself can move a deadline.
+    if (urgent.length === 1) {
+        const playerRequest = String(playerInput || '');
+        const ledger = String(receipt?.state_updates?.ledger_update
+            || legacyArgs?.ledger_update || '');
+        const visible = String(narrative).split(/<details\b/i)[0].slice(0, 12000);
+        if (/\b(?:agreed|promised|committed|confirmed|scheduled|pledged)\b/i.test(ledger)
+            && !/\b(?:refused|declined|rejected|cancelled|wouldn't|won't)\b/i.test(ledger)
+            && !/\b(?:agreed|promised|committed|confirmed|scheduled|pledged)\s+(?:not|never)\b/i.test(ledger)) {
+            const corroborated = Object.keys(namedHours).filter(label => {
+                const pattern = new RegExp(`\\b${label.replace(/\s+/g, '\\s+')}\\b`, 'i');
+                return pattern.test(playerRequest) && pattern.test(visible) && pattern.test(ledger);
+            });
+            if (corroborated.length === 1) {
+                const matching = claims.filter(claim => claim.label === corroborated[0]);
+                if (matching.length === 1) matching[0].corroboratedAgreement = true;
+                else if (!matching.length) claims.push({ index: visible.toLowerCase().indexOf(corroborated[0]),
+                    phrase: corroborated[0], qualifier: '',
+                    label: corroborated[0], explicitDeadline: false,
+                    corroboratedAgreement: true });
+            }
+        }
+    }
+    if (!claims.length) return [];
+    const declaredSkip = Math.max(0, Math.min(14400, Number(legacyArgs.time_skip_minutes) || 0),
+        ...(receipt.events || []).filter(event => event?.type === 'time' && event.status === 'completed')
+            .map(event => Math.max(0, Math.min(14400, Number(event.minutes_elapsed ?? event.minutes) || 0))));
+    const now = getWorldTimeData(world, sess).currentTotalMinutes + declaredSkip;
+    const corrections = [];
+    urgent.forEach(update => {
+        const title = `${update.title || ''} ${update.description || ''}`.toLowerCase();
+        const linked = claims.filter(claim => new RegExp(`\\b${claim.label}\\b`, 'i').test(title));
+        const candidates = linked.length ? linked : urgent.length === 1
+            ? claims.filter(claim => claim.explicitDeadline || claim.corroboratedAgreement) : [];
+        if (candidates.length !== 1) return;
+        const claim = candidates[0];
+        const dayStart = Math.floor(now / 1440) * 1440;
+        let dueMinute = dayStart + (claim.hour24 ?? namedHours[claim.label]) * 60 + (claim.minute || 0);
+        if (claim.qualifier === 'tomorrow' || claim.qualifier === 'the next day') dueMinute += 1440;
+        else if (dueMinute <= now) dueMinute += 1440;
+        const requestedDelay = dueMinute - now;
+        if (requestedDelay <= 0 || requestedDelay > 1440) return;
+        const originalDelay = Number(update.due_in_minutes);
+        const sourceKey = worldDeadlineNarrativeSourceKey(narrative, claim.index);
+        if (sourceKey) {
+            update.narrated_warning_source_key = sourceKey;
+            WORLD_ENGINE_DEADLINE_META.set(update, { sourceKey });
+        }
+        if (claim.corroboratedAgreement && /\bif\b/i.test(String(receipt?.state_updates?.ledger_update
+            || legacyArgs?.ledger_update || ''))) {
+            // An "if you have not returned" promise is a review point, not
+            // proof the NPC will depart. Preserve that uncertainty through
+            // the clock tick; the later receipt may show what actually happened.
+            update.reported_warning = true;
+            const visible = String(narrative).split(/<details\b/i)[0].slice(0, 12000);
+            const ledger = String(receipt?.state_updates?.ledger_update
+                || legacyArgs?.ledger_update || '');
+            const speakers = sessionNpcs(world, sess).filter(npc => {
+                const name = String(npc.name || '');
+                return name.length >= 4 && visible.includes(name) && ledger.includes(name);
+            });
+            if (speakers.length === 1) {
+                update.reported_warning_speaker = speakers[0].name;
+                const anchor = visible.toLowerCase().indexOf(claim.label);
+                const condition = worldConditionalSearchPromise(world, sess, visible,
+                    speakers[0].name, Math.max(0, anchor));
+                if (condition) {
+                    update.player_absent_condition = condition;
+                    WORLD_ENGINE_DEADLINE_META.set(update, {
+                        ...WORLD_ENGINE_DEADLINE_META.get(update), condition });
+                }
+            }
+        }
+        if (Number.isFinite(originalDelay) && Math.abs(originalDelay - requestedDelay) <= 5
+            && update.due_in_turns === undefined) return;
+        update.due_in_minutes = requestedDelay;
+        delete update.due_in_turns;
+        corrections.push({ id: String(update.id || update.title || '').slice(0, 80),
+            from_minutes: Number.isFinite(originalDelay) ? originalDelay : null,
+            to_minutes: requestedDelay, anchor: claim.phrase.slice(0, 60) });
+    });
+    return corrections;
+}
+
+function recoverNarratedUrgentDeadline(world, sess, narrative, playerInput = '') {
+    if (!normalizeWorldGameRules(world).modules.livingWorld || !sess || !narrative) return null;
+    // A model may speak a concrete warning but omit world_events from its
+    // otherwise valid receipt. Recover an explicit future time paired with
+    // nearby stakes, or a first-light search promise corroborated by the
+    // player's request and a named NPC's affirmative reply. This records a
+    // player-known deadline to reassess,
+    // never the threatened injury, death, or environmental change as fact.
+    // The provider may print a pseudo tool call after its prose. Never mine
+    // its technical arguments for a player-heard warning: those often contain
+    // model summaries and can invent or shift the deadline.
+    const visible = String(stripWorldLedgerDirective(scrubNarrativeArtifacts(narrative)))
+        .split(/<details\b/i)[0].slice(0, 12000);
+    const now = getWorldTimeData(world, sess);
+    const pattern = /\b(?:(?:deadline\s+(?:is|was|falls?\s+at)|by|before|at|within|in)\s+(?:(tomorrow|tonight)\s+)?(?:the\s+)?(midnight|dawn|daybreak|sunrise|first\s+light|morning|noon|sunset|dusk|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|\d+\s*(?:minutes?|hours?))|(?:if|when|once)\s+(?:(tomorrow|tonight)\s+)?(?:the\s+)?(midnight|dawn|daybreak|sunrise|first\s+light|morning|noon|sunset|dusk)\s+(?:comes?|breaks?|arrives?))\b/ig;
+    const numericPattern = /\b(?:deadline\s+(?:is|was|falls?\s+at)|by|before|at)\s+(?:(tomorrow|tonight)\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})(?::(\d{2})|\s+o['’]?clock)?\s+(?:(tomorrow|tonight)\s+)?(morning|afternoon|evening|night)\b/ig;
+    const timeClaims = [...visible.matchAll(pattern)].map(match => ({
+        index: match.index, phrase: match[0], qualifier: String(match[1] || match[3] || '').toLowerCase(),
+        unit: String(match[2] || match[4] || '').toLowerCase().replace(/\./g, '').trim()
+    }));
+    timeClaims.push(...[...visible.matchAll(numericPattern)].map(match => ({
+        index: match.index, phrase: match[0], qualifier: String(match[4] || match[1] || '').toLowerCase(),
+        hour24: parseWorldSpokenClockHour(match[2], match[5]), minute: Number(match[3] || 0)
+    })).filter(claim => claim.hour24 != null && claim.minute <= 59));
+    const requestedFirstLightSearch = /\bfirst\s+light\b/i.test(playerInput)
+        && /\b(?:search|search\s+party|scouts?|find)\b/i.test(playerInput)
+        && /\bif\s+i\s+(?:(?:am|['’]m)\s+not\s+back|(?:do\s+not|don['’]?t|have\s+not|haven['’]?t)\s+(?:return|come\s+back))\b/i.test(playerInput);
+    if (requestedFirstLightSearch) {
+        // "First light, you have it" is a precise assent to the player's
+        // requested hour even when the speaker restates it poetically as
+        // "by the time the sun hits the road." Do not infer a clock time
+        // from that metaphor on its own.
+        [...visible.matchAll(/\bfirst\s+light\b/gi)].forEach(match => {
+            if (!timeClaims.some(claim => Math.abs(claim.index - match.index) <= 10)) {
+                timeClaims.push({ index: match.index, phrase: match[0], qualifier: '', unit: 'first light' });
+            }
+        });
+    }
+    timeClaims.sort((a, b) => a.index - b.index);
+    const stakes = /\b(?:risk\w*|danger|deadline|drown\w*|dead|die|kill\w*|flood\w*|collapse\w*|fail\w*|expire|close\w*|miss\w*|lose|lost|gone|trap\w*|stranded|block\w*|attack\w*|burn\w*|destroy\w*|rescue|save|swallow\w*|sink\w*|impassable|unreachable|surviv\w*|breath\w*|sick\w*|foul\w*|poison\w*|plague\w*)\b|too late|cut off/i;
+    for (const claim of timeClaims) {
+        const nearby = visible.slice(Math.max(0, claim.index - 160), Math.min(visible.length, claim.index + 300));
+        const speaker = visible.slice(0, claim.index).match(/(?:^|\n)\s*([A-Z][A-Za-z.' -]{1,48}):\s*[“"]?[^\n“"]*$/)?.[1]?.trim() || '';
+        const spokenLine = worldDeadlineNarrativeSourceKey(visible, claim.index);
+        const playerAbsentCondition = worldConditionalSearchPromise(world, sess, visible, speaker, claim.index);
+        const conditionalStart = spokenLine.search(/\bif\s+(?:you|the\s+(?:player|ranger))\b/i);
+        const affirmativeSearch = conditionalStart >= 0
+            && /\b(?:i|we)\s*(?:['’]ll|\s+will|\s+am\s+going\s+to)\s+(?:pull|send|dispatch|take|gather|assemble|organiz|lead|search|sweep)\w*\b/i
+                .test(spokenLine.slice(conditionalStart));
+        const agreedFirstLightSearch = requestedFirstLightSearch
+            && claim.unit === 'first light' && playerAbsentCondition && affirmativeSearch;
+        if (requestedFirstLightSearch && claim.unit === 'first light'
+            && playerAbsentCondition && !affirmativeSearch) continue;
+        if (!stakes.test(nearby) && !agreedFirstLightSearch) continue;
+        const qualifier = claim.qualifier;
+        const unit = claim.unit || '';
+        let dueMinute = null;
+        const duration = unit.match(/^(\d+)\s*(minute|hour)s?$/);
+        if (claim.hour24 != null) {
+            const today = Math.floor(now.currentTotalMinutes / 1440) * 1440;
+            dueMinute = today + claim.hour24 * 60 + claim.minute;
+            if (qualifier === 'tomorrow') dueMinute += 1440;
+            else if (dueMinute <= now.currentTotalMinutes) dueMinute += 1440;
+        } else if (duration) {
+            const count = Number(duration[1]);
+            if (count < 1 || count > 48) continue;
+            dueMinute = now.currentTotalMinutes + count * (duration[2] === 'hour' ? 60 : 1);
+        } else {
+            const namedHours = { midnight: 0, dawn: 6, daybreak: 6, sunrise: 6, 'first light': 6,
+                morning: 8, noon: 12, sunset: 18, dusk: 18 };
+            let hour24;
+            let minute = 0;
+            if (Object.hasOwn(namedHours, unit)) hour24 = namedHours[unit];
+            else {
+                const numeric = unit.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
+                if (!numeric || Number(numeric[1]) > 12 || Number(numeric[2] || 0) > 59) continue;
+                hour24 = Number(numeric[1]) % 12 + (numeric[3] === 'pm' ? 12 : 0);
+                minute = Number(numeric[2] || 0);
+            }
+            const today = Math.floor(now.currentTotalMinutes / 1440) * 1440;
+            dueMinute = today + hour24 * 60 + minute;
+            if (qualifier === 'tomorrow') dueMinute += 1440;
+            else if (dueMinute <= now.currentTotalMinutes) dueMinute += 1440;
+        }
+        if (!Number.isFinite(dueMinute) || dueMinute <= now.currentTotalMinutes) continue;
+        const sentenceStart = Math.max(visible.lastIndexOf('.', claim.index - 1),
+            visible.lastIndexOf('\n', claim.index - 1), visible.lastIndexOf('"', claim.index - 1),
+            visible.lastIndexOf('“', claim.index - 1));
+        const subject = visible.slice(sentenceStart + 1, claim.index)
+            .replace(/^\s*[^:\n]{1,50}:\s*/, '').trim().replace(/^[“"'\s]+/, '').slice(0, 66);
+        const label = claim.phrase.replace(/\s+/g, ' ').trim();
+        const spokenTail = visible.slice(claim.index + claim.phrase.length, claim.index + 240)
+            .split(/[”"\n]/)[0].trim();
+        const clauses = spokenTail.replace(/^[\s,.;:—-]+/, '').split(/[.!?]+/)
+            .map(clause => clause.trim()).filter(Boolean);
+        const actionClause = clauses.find(clause =>
+            /\b(?:send|dispatch|report|rescu|evacuat|warn|order|close|block|burn|search|march|pull|lead|take)\w*\b/i.test(clause));
+        const nextClause = actionClause
+            || clauses.find(clause =>
+                /\b(?:fall\s+sick|die|drown|collapse)\b/i.test(clause))
+            || clauses[0] || '';
+        const actionStart = nextClause.search(/\b(?:I(?:['’]ll| will| must| have to| am)|we(?:['’]ll| will| must| have to| are))\b/i);
+        const conciseClause = actionClause && actionStart >= 0 ? nextClause.slice(actionStart) : nextClause;
+        const shorten = (value, limit) => value.length > limit
+            ? `${value.slice(0, limit).replace(/\s+\S*$/, '').replace(/[\s,;:—-]+$/, '')}…`
+            : value;
+        const choice = actionClause && conciseClause.length >= 8 ? shorten(conciseClause, 68)
+            : subject && subject.length > 5 ? shorten(subject, 60)
+                : nextClause.length >= 8 ? shorten(nextClause, 68) : '';
+        const topic = choice ? `${speaker ? `${speaker}: ` : ''}${choice}` : speaker || 'urgent choice';
+        const title = `Warning: ${topic} · ${label}`.slice(0, 120);
+        const idPrefix = `warning_${String(topic || label).toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 45)}_`;
+        const id = `${idPrefix}${dueMinute}`.slice(0, 80);
+        const sourceKey = worldDeadlineNarrativeSourceKey(visible, claim.index);
+        const existing = (sess.scheduledEvents || []).find(event => event.id === id
+            || (event.reportedWarning && String(event.id || '').startsWith(idPrefix))
+            || (sourceKey && event.narratedWarningSourceKey === sourceKey
+                && event.status === 'scheduled' && event.urgent === true
+                && event.dueMinute != null && Math.abs(event.dueMinute - dueMinute) <= 5)
+            || (playerAbsentCondition && event.status === 'scheduled' && event.urgent === true
+                && event.dueMinute != null && Math.abs(event.dueMinute - dueMinute) <= 5
+                && event.playerAbsentCondition?.type === playerAbsentCondition.type
+                && event.playerAbsentCondition.promisorId === playerAbsentCondition.promisorId
+                && event.playerAbsentCondition.returnLocationId === playerAbsentCondition.returnLocationId
+                && event.playerAbsentCondition.action === playerAbsentCondition.action));
+        if (existing) return existing;
+        if (!Array.isArray(sess.scheduledEvents)) sess.scheduledEvents = [];
+        const event = {
+            id, title,
+            description: `${speaker || 'A character'} warned: “${(`${subject && subject.length > 5 ? `${subject} ` : ''}${label}${spokenTail}`).slice(0, 220)}” At the deadline, verify the situation; the predicted harm is not automatically true.`.slice(0, 500),
+            status: 'scheduled', urgent: true, reportedWarning: true,
+            reportedWarningSpeaker: speaker.slice(0, 80), dueTurn: null, dueMinute,
+            narratedWarningSourceKey: sourceKey,
+            playerAbsentCondition,
+            repeatEveryTurns: 0, repeatEveryMinutes: 0, locationId: null,
+            conditionOnTrigger: '', conditionDurationTurns: 0,
+            factionId: '', influenceChange: 0, lastTriggeredTurn: 0
+        };
+        sess.scheduledEvents.push(event);
+        sess.scheduledEvents = sess.scheduledEvents.slice(-500);
+        return event;
+    }
+    return null;
 }
 
 const WORLD_WEEKDAYS = Object.freeze(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']);
@@ -27373,13 +32457,13 @@ function getExitTravelTime(world, fromId, toId) {
     return getWorldTravelLeg(world, fromId, toId)?.travelTime || 0;
 }
 
-function getWorldTravelLeg(world, fromId, toId) {
+function getWorldTravelLeg(world, fromId, toId, session = null) {
     const from = getLocationRef(world, fromId);
     const to = getLocationRef(world, toId);
     if (!from || !to) return null;
     const exit = (from.exits || []).filter(candidate => {
         const target = getLocationRef(world, candidate?.targetLocationId || getExitTargetName(candidate));
-        return target?.id === to.id;
+        return target?.id === to.id && worldExitRequirement(session, candidate, from.id).ok;
     }).sort((a, b) => Math.max(0, Number(a?.travelTime) || 0)
         - Math.max(0, Number(b?.travelTime) || 0))[0];
     const details = exit && typeof exit === 'object' ? exit : {};
@@ -27429,14 +32513,47 @@ function movePlayerAlongWorldPath(world, sess, targetLocation, options = {}) {
         || resolveWorldExitTarget(travelWorld, options.exit)?.id !== targetLocation.id)) {
         return { ok: false, moved: false, reason: 'invalid_exit', path: [] };
     }
+    const destinationBlock = worldLocationTravelBlock(sess, targetLocation.id);
+    if (destinationBlock && sess.playerLocation !== targetLocation.id) {
+        return { ok: false, moved: false, reason: 'impassable_destination',
+            blockedLocationName: targetLocation.name, blockedLabel: destinationBlock.label,
+            path: [] };
+    }
+    if (selectedExit) {
+        const requirement = worldExitRequirement(sess, options.exit, origin.id);
+        if (!requirement.ok) return { ok: false, moved: false,
+            reason: requirement.reason, requiredItem: requirement.requiredItem,
+            allowCheckUnlock: requirement.allowCheckUnlock, path: [] };
+    }
     const path = selectedExit
         ? (sess.playerLocation === targetLocation.id ? [sess.playerLocation] : [sess.playerLocation, targetLocation.id])
-        : findWorldTravelPath(travelWorld, sess.playerLocation, targetLocation.id);
-    if (!path) return { ok: false, moved: false, reason: 'unreachable', path: [] };
+        : findWorldTravelPath(travelWorld, sess.playerLocation, targetLocation.id, { session: sess });
+    if (!path) {
+        const guardedPath = findWorldTravelPath(travelWorld, sess.playerLocation,
+            targetLocation.id, { ignoreRequirements: true });
+        const blockedId = guardedPath?.slice(1).find(id => worldLocationTravelBlock(sess, id));
+        if (blockedId) {
+            const blockedLocation = getLocationRef(travelWorld, blockedId);
+            const block = worldLocationTravelBlock(sess, blockedId);
+            return { ok: false, moved: false, reason: 'impassable_destination',
+                blockedLocationName: blockedLocation?.name || blockedId,
+                blockedLabel: block?.label || 'impassable', path: [] };
+        }
+        const blockingExit = guardedPath?.slice(1).map((id, index) => {
+            const from = getLocationRef(travelWorld, guardedPath[index]);
+            const exit = (from?.exits || []).find(exit =>
+                resolveWorldExitTarget(travelWorld, exit)?.id === id
+                && !worldExitRequirement(sess, exit, from.id).ok);
+            return exit ? { exit, fromId: from.id } : null;
+        }).find(Boolean);
+        const requirement = worldExitRequirement(sess, blockingExit?.exit, blockingExit?.fromId);
+        return { ok: false, moved: false, reason: requirement.ok ? 'unreachable' : requirement.reason,
+            requiredItem: requirement.requiredItem, allowCheckUnlock: requirement.allowCheckUnlock, path: [] };
+    }
     if (path.length === 1) return { ok: true, moved: false, reason: 'already_there', path };
 
     const previousLocation = sess.playerLocation;
-    const travelLegs = path.slice(1).map((toId, index) => getWorldTravelLeg(travelWorld, path[index], toId)).filter(Boolean);
+    const travelLegs = path.slice(1).map((toId, index) => getWorldTravelLeg(travelWorld, path[index], toId, sess)).filter(Boolean);
     if (selectedExit && travelLegs[0]) {
         const details = typeof options.exit === 'object' ? options.exit : {};
         Object.assign(travelLegs[0], {
@@ -27446,7 +32563,24 @@ function movePlayerAlongWorldPath(world, sess, targetLocation, options = {}) {
         });
     }
     const travelMinutes = travelLegs.reduce((total, leg) => total + leg.travelTime, 0);
+    const followersMoved = sessionNpcs(travelWorld, sess)
+        .filter(npc => {
+            const npcState = sess.entityStates?.[npc.id];
+            return npcState?.followingPlayer === true && npcState.location === previousLocation
+                && !npcState.journey && isNpcActive(npcState);
+        }).map(npc => npc.id);
     sess.playerLocation = targetLocation.id;
+    // A monotonic marker lets short-lived conditional promises distinguish
+    // "the player never left" from "the player went away and quietly returned".
+    // Direct travel and receipt-driven travel both pass through this reducer.
+    sess.playerMovementSerial = Math.max(0, parseInt(sess.playerMovementSerial) || 0) + 1;
+    followersMoved.forEach(id => {
+        const npcState = sess.entityStates[id];
+        npcState.lastKnownLocation = previousLocation;
+        npcState.location = targetLocation.id;
+        npcState.currentActivity = 'Travelling with the player.';
+        npcState.pinnedUntilTurn = Math.max(Number(npcState.pinnedUntilTurn) || 0, (sess.turnCount || 1) + 6);
+    });
     if (travelMinutes > 0) {
         sess.bonusTimeMinutes = (sess.bonusTimeMinutes || 0) + travelMinutes;
         if (options.showTravelToast !== false) showToast(`🕒 Travel time: +${travelMinutes}m`, 'info');
@@ -27459,7 +32593,8 @@ function movePlayerAlongWorldPath(world, sess, targetLocation, options = {}) {
         destination: targetLocation.id,
         path,
         travelMinutes,
-        travelLegs
+        travelLegs,
+        followersMoved
     };
 }
 
@@ -28072,6 +33207,7 @@ function normalizeAuthoredWorld(world) {
     normalizeWorldRelationships(world);
     normalizeWorldSandboxConfig(world);
     normalizeWorldGameRules(world);
+    normalizeWorldStartingQuests(world);
     normalizeWorldKernelConfig(world);
     world.worldAgent = normalizeWorldAgentConfig(world);
     return world;
@@ -28233,10 +33369,12 @@ function normalizeLivingWorldState(world, sess) {
     syncRelationshipsWithWorld(world, sess);
     syncLocationStatesWithWorld(world, sess);
     if (!Array.isArray(sess.scheduledEvents)) sess.scheduledEvents = [];
+    sess.playerMovementSerial = Math.max(0, parseInt(sess.playerMovementSerial) || 0);
     if (!sess.locationStates || typeof sess.locationStates !== 'object' || Array.isArray(sess.locationStates)) sess.locationStates = {};
     if (!sess.npcRelationships || typeof sess.npcRelationships !== 'object' || Array.isArray(sess.npcRelationships)) sess.npcRelationships = {};
     if (!sess.npcScheduleOverrides || typeof sess.npcScheduleOverrides !== 'object' || Array.isArray(sess.npcScheduleOverrides)) sess.npcScheduleOverrides = {};
     if (!isPlainObject(sess.dynamicExits)) sess.dynamicExits = {};
+    if (!isPlainObject(sess.unlockedExits)) sess.unlockedExits = {};
     if (!Array.isArray(sess.factions)) sess.factions = [];
     if (!sess.economy || typeof sess.economy !== 'object' || Array.isArray(sess.economy)) sess.economy = {};
     if (!sess.economy.currency) sess.economy.currency = 'coin';
@@ -28298,11 +33436,26 @@ function normalizeLivingWorldState(world, sess) {
         };
     }
 
+    const scheduledNpcIds = new Set(sessionNpcs(world, sess).map(npc => npc.id));
     sess.scheduledEvents = sess.scheduledEvents.slice(0, 500).map((event, index) => ({
         id: String(event?.id || `event_${index + 1}`).slice(0, 80),
         title: String(event?.title || 'Unnamed event').slice(0, 120),
         description: String(event?.description || event?.title || 'Something changes in the world.').slice(0, 500),
         status: ['scheduled', 'triggered', 'cancelled'].includes(event?.status) ? event.status : 'scheduled',
+        urgent: event?.urgent === true,
+        reportedWarning: event?.reportedWarning === true,
+        reportedWarningSpeaker: String(event?.reportedWarningSpeaker || '').slice(0, 80),
+        narratedWarningSourceKey: String(event?.narratedWarningSourceKey || '').slice(0, 500),
+        playerAbsentCondition: event?.playerAbsentCondition?.type === 'player_absent_at_meeting_place'
+            && getLocationRef(world, event.playerAbsentCondition.returnLocationId)
+            && scheduledNpcIds.has(event.playerAbsentCondition.promisorId)
+            ? { type: 'player_absent_at_meeting_place',
+                returnLocationId: getLocationRef(world, event.playerAbsentCondition.returnLocationId).id,
+                promisorId: String(event.playerAbsentCondition.promisorId).slice(0, 80),
+                playerMovementSerial: Math.max(0, parseInt(event.playerAbsentCondition.playerMovementSerial) || 0),
+                action: 'search_party' } : null,
+        conditionResolution: event?.conditionResolution === 'player_present' ? 'player_present' : '',
+        conditionResolvedTurn: Math.max(0, parseInt(event?.conditionResolvedTurn) || 0),
         dueTurn: event?.dueTurn == null ? null : Math.max(1, parseInt(event.dueTurn) || 1),
         dueMinute: event?.dueMinute == null ? null : Math.max(0, parseInt(event.dueMinute) || 0),
         repeatEveryTurns: Math.max(0, parseInt(event?.repeatEveryTurns) || 0),
@@ -28326,7 +33479,8 @@ function normalizeLivingWorldState(world, sess) {
             return {
                 id: String(item.id || livingId('condition', item.label || index)).slice(0, 80),
                 label: String(item.label || 'Changed').slice(0, 120),
-                expiresTurn: item.expiresTurn == null ? null : Math.max(1, parseInt(item.expiresTurn) || 1)
+                expiresTurn: item.expiresTurn == null ? null : Math.max(1, parseInt(item.expiresTurn) || 1),
+                ...(item.blocksTravel === true ? { blocksTravel: true } : {})
             };
         });
         state.controlFactionId = state.controlFactionId ? String(state.controlFactionId).slice(0, 80) : '';
@@ -28569,13 +33723,20 @@ function authoredStartingRelationshipSeeds(world, origin) {
 }
 
 function fallbackTimelineLifePlan(world, sess, persona, origin) {
-    const source = `${persona?.name || ''} ${persona?.text || ''} ${origin?.name || ''} ${origin?.role || ''} ${origin?.description || ''}`;
+    const source = `${persona?.name || ''} ${persona?.text || ''} ${origin?.name || ''} ${origin?.role || ''} ${origin?.socialRank || ''} ${origin?.description || ''}`;
     const student = /student|school|new kid|teen|child|pupil|apprentice/i.test(source);
     const doctorFamily = /parents?.{0,24}(?:doctors?|dcotors?|physicians?|medical)|(?:doctor|physician|medical) parents?/i.test(source);
-    const home = chooseTimelineHome(world, source);
+    // A failed model request is not permission to invent an established local
+    // network for an itinerant or newly arrived player. Authored ties are
+    // merged back by applyTimelineLifePlan; leave everything else unclaimed.
+    const itinerant = !student && /\b(?:itinerant|wanderer|wandering|travell?er|nomad|drifter|mercenary|ranger|outsider|stranger)\b/i.test(source);
+    const home = getLocationRef(world, origin?.homeLocationId) || (itinerant ? null : chooseTimelineHome(world, source));
     const school = (world.locations || []).find(location => /school|academy|college|classroom/i.test(`${location.name} ${location.description || ''}`));
     const hospital = (world.locations || []).find(location => /hospital|clinic|medical|infirmary|healer/i.test(`${location.name} ${location.description || ''}`));
-    const modern = /200[0-9]|suburb|school|phone|mall|doctor|hospital/i.test(`${world.name} ${world.description}`);
+    const adultWorkplace = (world.locations || []).find(location => location.id !== sess.playerLocation
+        && /bullpen|workroom|workspace|workshop|staff room|market|shop|guild hall/i.test(location.name || ''));
+    // Word boundaries matter: "small fantasy" contains "mall".
+    const modern = /\b(?:20\d\d|suburb(?:an)?|schools?|phone|mall|doctors?|hospitals?)\b/i.test(`${world.name} ${world.description}`);
     const surnames = modern ? ['Mercer', 'Bennett', 'Shah', 'Morales', 'Sullivan', 'Chen'] : ['Vale', 'Mere', 'Ashford', 'Thorne', 'Reed', 'Hale'];
     const firsts = modern ? ['Morgan', 'Alex', 'Dana', 'Jordan', 'Casey', 'Taylor', 'Jamie', 'Riley'] : ['Mara', 'Tomas', 'Elin', 'Rowan', 'Anwen', 'Gareth', 'Ilya', 'Mira'];
     const pick = (values, salt) => values[Math.floor(stableWorldRoll(`${world.id}|${sess.id}|${salt}`) * values.length) % values.length];
@@ -28610,23 +33771,46 @@ function fallbackTimelineLifePlan(world, sess, persona, origin) {
             goal: ['Find a place in the local social scene.', 'Protect a friendship while pursuing a private ambition.', 'Stay socially influential without showing insecurity.'][index],
             schedule: school ? [{ time: '08:00', locationId: school.id, activity: 'attending school', days: ['weekday'] }] : []
         }));
-    } else {
+    } else if (!itinerant) {
         ['trusted local contact', 'neighbor', 'work or community acquaintance'].forEach((relation, index) => people.push({
             id: `anchor_${index + 1}`, name: `${pick(firsts, `adult_${index}`)} ${pick(surnames, `adult_s_${index}`)}`,
             relationship_to_player: relation, role: modern ? ['friend', 'neighbor', 'coworker'][index] : ['confidant', 'neighbor', 'local associate'][index],
             description: `A persistent ${relation} connected to the player's ordinary life.`,
             persona: ['Loyal, candid, and willing to challenge bad decisions.', 'Helpful, nosy, and deeply informed about the area.', 'Capable, busy, and balancing friendship against personal ambition.'][index],
             home_location_id: '', disposition: [76, 61, 55][index],
+            day_location_id: index === 2 ? (adultWorkplace?.id || '') : '',
             goal: 'Pursue a personal goal that occasionally intersects the player’s life.',
             schedule: []
         }));
     }
+    // Stable random picks can collide. A social graph must not contain two
+    // unrelated people with the same generated full name.
+    const usedNames = new Set([persona?.name, ...(world.entities || []).map(entity => entity.name)]
+        .map(name => String(name || '').trim().toLowerCase()).filter(Boolean));
+    people.forEach((person, index) => {
+        let candidate = person.name;
+        if (usedNames.has(candidate.toLowerCase())) {
+            const familyName = candidate.split(/\s+/).slice(-1)[0];
+            candidate = firsts.map(first => `${first} ${familyName}`)
+                .find(name => !usedNames.has(name.toLowerCase()))
+                || firsts.flatMap(first => surnames.map(last => `${first} ${last}`))
+                    .find(name => !usedNames.has(name.toLowerCase()))
+                || `${candidate} ${index + 1}`;
+        }
+        person.name = candidate;
+        usedNames.add(candidate.toLowerCase());
+    });
     return {
-        summary: `${student ? 'Household and school circle' : 'Home and local social circle'} initialized from the selected identity.`,
+        summary: itinerant
+            ? 'No unverified home or local relationships were invented for this itinerant starting life.'
+            : `${student ? 'Household and school circle' : 'Home and local social circle'} initialized from the selected identity.`,
+        unfixed_home: itinerant && !home,
         home: home ? { location_id: home.id } : {
-            name: `${surname} Home`,
-            description: 'A household home grounded in the player’s stated background and starting circumstances.',
-            connects_to: origin?.startLocationId || sess.playerLocation
+            ...(itinerant ? {} : {
+                name: `${surname} Home`,
+                description: 'A household home grounded in the player’s stated background and starting circumstances.',
+                connects_to: origin?.startLocationId || sess.playerLocation
+            })
         },
         people,
         relationships: student ? [{ a: 'family_1', b: 'family_2', label: 'co-parents', score: 72, reason: 'They share a household and responsibility for the player.' }] : []
@@ -28647,12 +33831,12 @@ async function requestTimelineLifePlan(world, sess, persona, origin) {
         messages: [
             { role: 'system', content: `You initialize a persistent life inside an existing sandbox world. Convert the player's Persona and Starting Life into concrete simulation state without contradicting either.
 
-Reuse existing location_id and existing_npc_id whenever they genuinely fit. AUTHOR-SELECTED home, household, groups and player relationships in the user message are fixed canon: include every selected NPC with exactly the selected relationship and do not substitute, omit or weaken any of them. Fill only what the author left open. Create new people when the Persona states additional family or close relationships that do not already exist. A student should normally have a plausible household plus 3-6 school/social connections; an adult should have household/local/work anchors. Every recurring person needs a role, relationship to the player, distinct personality, personal goal, home when knowable, and a weekly routine using ONLY location IDs in the manifest. If the Persona says the parents are doctors and the family is wealthy, those exact facts must become structured people, workplaces, schedules and an affluent home—not flavor text.
+Reuse existing location_id and existing_npc_id whenever they genuinely fit. AUTHOR-SELECTED home, household, groups and player relationships in the user message are fixed canon: include every selected NPC with exactly the selected relationship and do not substitute, omit or weaken any of them. Fill only what the author left open. Create new people when the Persona states additional family or close relationships that do not already exist. A student should normally have a plausible household plus 3-6 school/social connections; an established local adult may have household/local/work anchors. An itinerant, outsider, stranger or newly arrived adult with no authored ties may have no prior local contacts and no fixed home: return people [] and unfixed_home true rather than inventing a neighbor, coworker or family house. Existing NPCs can be encountered through play without becoming retroactive friends. Every recurring person needs a role, relationship to the player, distinct personality, personal goal, home when knowable, and a weekly routine using ONLY location IDs in the manifest. If the Persona says the parents are doctors and the family is wealthy, those exact facts must become structured people, workplaces, schedules and an affluent home—not flavor text.
 
 Return only JSON:
-{"summary":"...","home":{"location_id":"existing id or blank","name":"new home name only if needed","description":"...","connects_to":"existing id","parent_location_id":"existing id"},"people":[{"id":"temporary stable key","existing_npc_id":"optional existing id","name":"...","relationship_to_player":"mother/father/sibling/friend/classmate/rival/coworker/etc","role":"...","description":"...","persona":"...","home_location_id":"existing id or $HOME","day_location_id":"existing school/work id","goal":"...","disposition":0,"schedule":[{"time":"07:00","locationId":"existing id or $HOME","activity":"...","days":["weekday"]}]}],"relationships":[{"a":"temporary person id","b":"temporary person id","label":"...","score":0,"reason":"..."}]}
+{"summary":"...","unfixed_home":false,"home":{"location_id":"existing id or blank","name":"new home name only if needed","description":"...","connects_to":"existing id","parent_location_id":"existing id"},"people":[{"id":"temporary stable key","existing_npc_id":"optional existing id","name":"...","relationship_to_player":"mother/father/sibling/friend/classmate/rival/coworker/etc","role":"...","description":"...","persona":"...","home_location_id":"existing id or $HOME","day_location_id":"existing school/work id","goal":"...","disposition":0,"schedule":[{"time":"07:00","locationId":"existing id or $HOME","activity":"...","days":["weekday"]}]}],"relationships":[{"a":"temporary person id","b":"temporary person id","label":"...","score":0,"reason":"..."}]}
 
-Disposition and relationship scores are -100..100. Generate 4-10 people, never an anonymous crowd. Do not create a new town or duplicate an existing suitable house, school, hospital or workplace.` },
+Disposition and relationship scores are -100..100. Generate 4-10 people only if established ties support them; zero is valid for a true outsider. Never an anonymous crowd. Do not create a new town or duplicate an existing suitable house, school, hospital or workplace.` },
             { role: 'user', content: `${source}\n\nWORLD: ${world.name}\n${world.description || ''}\n\nLOCATIONS:\n${locations}\n\nEXISTING PEOPLE AVAILABLE FOR REAL CONNECTIONS:\n${people || 'none'}` }
         ]
     };
@@ -28660,15 +33844,27 @@ Disposition and relationship scores are -100..100. Generate 4-10 people, never a
     if (!isLocalProvider() && modelInfo?.supported_parameters?.some(parameter => STRUCTURED_PARAM_FLAGS.includes(parameter))) {
         body.response_format = { type: 'json_object' };
     }
-    const response = await fetch(apiBase() + '/chat/completions', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() },
-        body: JSON.stringify(body)
-    });
-    if (!response.ok) throw new Error((await response.json().catch(() => ({})))?.error?.message || response.statusText);
-    const message = (await response.json())?.choices?.[0]?.message || {};
+    // Life setup must not hold the first-run screen open indefinitely when a
+    // provider stalls. The deterministic initializer preserves the selected
+    // life and is preferable to an unplayable timeline.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+    let response;
+    let payload;
+    try {
+        ({ response, data: payload } = await HordeWorldModelClient.json({
+            url: apiBase() + '/chat/completions', body,
+            init: { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() },
+                signal: controller.signal }
+        }));
+    } finally {
+        clearTimeout(timeout);
+    }
+    if (!response.ok) throw new Error(payload?.error?.message || response.statusText);
+    const message = payload?.choices?.[0]?.message || {};
     const content = Array.isArray(message.content) ? message.content.map(part => part?.text || '').join(' ') : (message.content || message.reasoning || '');
     const plan = extractJSON(String(content));
-    if (!plan || !Array.isArray(plan.people) || plan.people.length < 1) throw new Error('Model returned no valid people array');
+    if (!plan || !Array.isArray(plan.people)) throw new Error('Model returned no valid people array');
     return plan;
 }
 
@@ -28676,7 +33872,9 @@ function applyTimelineLifePlan(world, sess, persona, origin, rawPlan, source = '
     const plan = isPlainObject(rawPlan) ? rawPlan : {};
     const sourceText = `${persona?.text || ''} ${origin?.description || ''}`;
     const authoredHome = getLocationRef(world, origin?.homeLocationId);
-    let home = authoredHome || getLocationRef(world, plan.home?.location_id || plan.home?.name) || chooseTimelineHome(world, sourceText);
+    const unfixedHome = plan.unfixed_home === true && !authoredHome;
+    let home = authoredHome || getLocationRef(world, plan.home?.location_id || plan.home?.name)
+        || (unfixedHome ? null : chooseTimelineHome(world, sourceText));
     const createdLocationIds = [];
     if (!home && plan.home?.name) {
         const anchor = getLocationRef(world, plan.home.connects_to || plan.home.parent_location_id || origin?.startLocationId || sess.playerLocation);
@@ -28693,7 +33891,7 @@ function applyTimelineLifePlan(world, sess, persona, origin, rawPlan, source = '
         world.locations.push(home);
         createdLocationIds.push(home.id);
     }
-    home = home || getLocationRef(world, origin?.startLocationId || sess.playerLocation);
+    home = home || (unfixedHome ? null : getLocationRef(world, origin?.startLocationId || sess.playerLocation));
     const idMap = new Map();
     const seededPeople = [];
     const rawPeople = (Array.isArray(plan.people) ? plan.people : []).filter(isPlainObject).slice(0, 16)
@@ -28757,7 +33955,7 @@ function applyTimelineLifePlan(world, sess, persona, origin, rawPlan, source = '
                     .map(alias => String(alias).trim().slice(0, 80)).filter(Boolean),
                 description: String(raw.description || `A persistent ${raw.relationship_to_player || 'person'} in the player's life.`).slice(0, 700),
                 persona: String(raw.persona || '').slice(0, 1200), isMajor: true,
-                homeLocation: (rawHome || defaultHome)?.id || '', startLocation: (rawDay || rawHome || defaultHome)?.id || sess.playerLocation,
+                homeLocation: (rawHome || defaultHome)?.id || '', startLocation: (rawDay || rawHome || defaultHome)?.id || '',
                 goal: String(raw.goal || 'Maintain their own life while responding honestly to the player.').slice(0, 240), goalAutonomy: 'medium',
                 goalSteps: [], schedule, secrets: [], sessionOrigin: sess.id
             };
@@ -28766,11 +33964,15 @@ function applyTimelineLifePlan(world, sess, persona, origin, rawPlan, source = '
         idMap.set(key, npc.id);
         const seededHome = raw.home_location_id === '$HOME' ? home : getLocationRef(world, raw.home_location_id);
         const seededDay = getLocationRef(world, raw.day_location_id);
-        const location = seededDay || seededHome || getLocationRef(world, npc.startLocation || npc.homeLocation) || home || getLocationRef(world, sess.playerLocation);
         const relationship = String(raw.relationship_to_player || npc.relationshipToPlayer || 'acquaintance').slice(0, 100);
+        // Unlocated acquaintances begin offstage. Placing every unspecified
+        // friend and neighbor in the player's opening room invented a crowd.
+        const location = seededDay || seededHome || getLocationRef(world, npc.startLocation || npc.homeLocation)
+            || (/parent|guardian|spouse|sibling|child|roommate|household|family/i.test(relationship) ? home : null);
         const disposition = livingClamp(raw.disposition == null ? (/parent|guardian|spouse|sibling|close friend/i.test(relationship) ? 82 : 58) : raw.disposition, 0, 100);
         sess.entityStates[npc.id] = {
-            ...(sess.entityStates[npc.id] || {}), location: location?.id || sess.playerLocation,
+            ...(sess.entityStates[npc.id] || {}), location: location?.id || '',
+            offstage: !location,
             disposition, relationshipToPlayer: relationship,
             observations: [{ id: `obs_seed_${npc.id}`, text: `Has an established ${relationship} relationship with the player from before this timeline began.`, source: 'life_seed', confidence: 1, turn: 0 }]
         };
@@ -28824,16 +34026,33 @@ function applyTimelineLifePlan(world, sess, persona, origin, rawPlan, source = '
     return sess.lifeSeed;
 }
 
+function minimalTimelineOriginPlan(world, sess, persona, origin) {
+    const hasAuthoredTies = !!(origin?.homeLocationId || origin?.householdId
+        || origin?.groupIds?.length || origin?.startingRelationships?.length);
+    // An unconnected outsider with no Persona has no prior household or
+    // social graph to generate. Do not spend provider credits on a large JSON
+    // request that can only fabricate a past or time out during first-run.
+    if (persona || hasAuthoredTies) return null;
+    const plan = fallbackTimelineLifePlan(world, sess, persona, origin);
+    return plan.unfixed_home && plan.people.length === 0 ? plan : null;
+}
+
 async function initializeTimelineLife(world, sess, persona) {
     const origin = (world.startingLives || []).find(life => life.id === sess.originId) || null;
     let plan;
     let source = 'model';
-    try {
-        plan = await requestTimelineLifePlan(world, sess, persona, origin);
-    } catch (error) {
-        console.warn('Timeline life model generation failed; using deterministic initializer:', error.message);
-        plan = fallbackTimelineLifePlan(world, sess, persona, origin);
-        source = 'deterministic_fallback';
+    const minimalPlan = minimalTimelineOriginPlan(world, sess, persona, origin);
+    if (minimalPlan) {
+        plan = minimalPlan;
+        source = 'deterministic_origin';
+    } else {
+        try {
+            plan = await requestTimelineLifePlan(world, sess, persona, origin);
+        } catch (error) {
+            console.warn('Timeline life model generation failed; using deterministic initializer:', error.message);
+            plan = minimalPlan || fallbackTimelineLifePlan(world, sess, persona, origin);
+            source = 'deterministic_fallback';
+        }
     }
     const result = applyTimelineLifePlan(world, sess, persona, origin, plan, source);
     showToast(`Active life initialized · ${result.people.length} persistent people`, 'success');
@@ -29551,11 +34770,28 @@ function runLivingWorldTick(world, sess) {
         const turnDue = !clockCatchUpOnly && event.dueTurn != null && turn >= event.dueTurn;
         const minuteDue = event.dueMinute != null && time.currentTotalMinutes >= event.dueMinute;
         if (!turnDue && !minuteDue) return;
+        const absence = event.playerAbsentCondition;
+        if (absence?.type === 'player_absent_at_meeting_place'
+            && sess.playerLocation === absence.returnLocationId
+            && Math.max(0, parseInt(sess.playerMovementSerial) || 0) === absence.playerMovementSerial) {
+            // The player demonstrably never left the meeting place. This
+            // condition cannot become true merely because a long wait crossed
+            // the clock deadline. Do not publish a search, create a deadline
+            // consequence, or ask the DM to narrate one.
+            event.status = 'cancelled';
+            event.conditionResolution = 'player_present';
+            event.conditionResolvedTurn = turn;
+            const place = getLocationRef(world, absence.returnLocationId)?.name || 'the meeting place';
+            queueEngineEvent(sess, `The player remained at ${place} through ${event.title}; the conditional search promise did not activate.`);
+            return;
+        }
         event.lastTriggeredTurn = turn;
         eventCount++;
         const location = world.locations.find(item => item.id === event.locationId);
         const where = location ? ` at ${location.name}` : '';
-        const newsText = `${event.title}${where}: ${event.description}`;
+        const newsText = event.reportedWarning
+            ? `${event.title}: the warned time has passed; the outcome is unverified.`
+            : `${event.title}${where}: ${event.description}`;
         // Anyone standing where it happened knows it happened. A worldwide event
         // (no location) is public by nature and needs no carrier to travel.
         const atPlayer = !event.locationId || event.locationId === sess.playerLocation;
@@ -29563,10 +34799,31 @@ function runLivingWorldTick(world, sess) {
             id: `news_${event.id}_${turn}`, locationId: event.locationId,
             factionId: event.factionId, type: 'event',
             knownBy: event.locationId ? witnessesAt(npcIndex, sess, event.locationId, '', turn, 1) : [],
-            playerWitnessed: atPlayer
+            playerWitnessed: atPlayer,
+            playerVisible: atPlayer
         });
 
-        if (event.conditionOnTrigger && event.locationId) {
+        if (event.urgent) {
+            createWorldConsequence(world, sess, {
+                type: 'deadline',
+                title: `Deadline reached: ${event.title}`,
+                detail: event.reportedWarning
+                    ? 'The warned time passed. The predicted outcome has not been verified.'
+                    : atPlayer
+                    ? (event.conditionOnTrigger
+                        ? `${event.conditionOnTrigger} at ${location?.name || 'this place'}.`
+                        : 'The deadline passed. What changed must be shown in the scene.')
+                    : 'The deadline passed. The outcome elsewhere is not yet known.',
+                locationId: event.locationId || '',
+                sourceEventId: `deadline_${event.id}_${turn}`,
+                severity: 70,
+                escalateAfterTurns: 0,
+                decayAfterTurns: 0,
+                visibility: 'private'
+            });
+        }
+
+        if (!event.reportedWarning && event.conditionOnTrigger && event.locationId) {
             const locState = sess.locationStates[event.locationId] || {
                 conditions: [], controlFactionId: '', danger: 0, prosperity: 50, resources: {}
             };
@@ -29582,7 +34839,9 @@ function runLivingWorldTick(world, sess) {
             if (faction) faction.influence = livingClamp(faction.influence + event.influenceChange, 0, 100);
         }
         if (!event.locationId || event.locationId === sess.playerLocation) {
-            queueEngineEvent(sess, `${newsText} Narrate its immediate, observable consequences.`);
+            queueEngineEvent(sess, event.reportedWarning
+                ? `${newsText} Check what can actually be observed or learned now; do not invent the warned harm as fact.`
+                : `${newsText} Narrate its immediate, observable consequences.`);
         }
 
         if (event.repeatEveryTurns > 0 || event.repeatEveryMinutes > 0) {
@@ -29897,9 +35156,12 @@ function getLivingWorldPrompt(world, sess, presentNPCs = []) {
         }
     }
     const upcoming = sess.scheduledEvents.filter(event => event.status === 'scheduled')
-        .sort((a, b) => (a.dueTurn ?? 999999) - (b.dueTurn ?? 999999))
+        .sort((a, b) => worldEventMinutesRemaining(world, sess, a)
+            - worldEventMinutesRemaining(world, sess, b))
         .slice(0, 6);
-    if (upcoming.length) lines.push(`Future events: ${upcoming.map(event => `${event.title} (turn ${event.dueTurn ?? '?'})`).join('; ')}.`);
+    if (upcoming.length) lines.push(`Future events: ${upcoming.map(event =>
+        `${event.urgent ? 'PLAYER-KNOWN URGENT: ' : ''}${event.title} [id ${event.id}] (${describeWorldEventDeadline(world, sess, event)})${event.reportedWarning ? ` — reported claim only: ${event.description}` : ''}${event.playerAbsentCondition?.action === 'search_party' ? ` — CONDITIONAL: search only if the player is absent from ${getLocationRef(world, event.playerAbsentCondition.returnLocationId)?.name || 'the meeting place'} at the deadline; if they remain there, the promise does not activate. Do not call them missing while they are in the scene.` : ''}`
+    ).join('; ')}. Resolve or revise a player-known deadline by updating its existing id; do not silently reset it.`);
     const activeConsequences = (sess.consequences || [])
         .filter(item => item.state !== 'resolved' && item.visibility !== 'hidden').slice(-8);
     if (activeConsequences.length) {
@@ -30130,24 +35392,27 @@ Propose 1 to 3 developments. Return ONLY this JSON, no prose or fences:
  "npc_relationship_updates":[{"source_npc_id":"<id>","target_npc_id":"<id>","change":<integer>,"reason":"<short>"}]}
 Omit any array you are not using. Current turn is ${turn}; schedule events a few turns out, not in the past.`;
 
-    const response = await fetch(apiBase() + '/chat/completions', {
+    const model = config.model || structuredModelFor(world);
+    const { response, data, diagnostic } = await fetchWorldObservedJSON(world, sess, 'worldAgent', {
+        model,
+        max_tokens: 1200,
+        messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: buildWorldAgentDigest(world, sess) }
+        ]
+    }, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({
-            model: config.model || structuredModelFor(world),
-            max_tokens: 1200,
-            messages: [
-                { role: 'system', content: system },
-                { role: 'user', content: buildWorldAgentDigest(world, sess) }
-            ]
-        })
+        headers: { 'Content-Type': 'application/json', ...authHeaders() }
     });
     if (!response.ok) {
-        throw new Error((await response.json().catch(() => ({})))?.error?.message || response.statusText);
+        throw new Error(data?.error?.message || response.statusText);
     }
-    const content = (await response.json())?.choices?.[0]?.message?.content || '';
+    const content = data?.choices?.[0]?.message?.content || '';
     const parsed = parseWorldAgentPayload(content);
-    if (!parsed) throw new Error('World agent returned no usable JSON');
+    if (!parsed) {
+        if (diagnostic()) diagnostic().outcome = 'invalid_output';
+        throw new Error('World agent returned no usable JSON');
+    }
 
     // The player may have rerolled, reset, deleted this timeline, or advanced
     // it while the background request was in flight. Never apply a development
@@ -30155,32 +35420,52 @@ Omit any array you are not using. Current turn is ${turn}; schedule events a few
     const liveInstance = state.worldInstances?.[world.id];
     const timelineStillExists = liveInstance?.sessions?.includes(sess);
     if (!timelineStillExists || (Number(sess._worldEpoch) || 0) !== startEpoch
-        || Math.max(1, parseInt(sess.turnCount) || 1) !== turn) {
+        || Math.max(1, parseInt(sess.turnCount) || 1) !== turn
+        || worldTurnInProgress || worldMutationInProgress) {
         console.warn('Horde Engine: discarded stale World Agent response after timeline changed.');
         return { applied: false, stale: true, turn, developments: [] };
     }
 
     const { actions, dropped } = sanitizeWorldAgentActions(parsed);
     if (dropped) console.warn(`Horde Engine: world agent proposed ${dropped} out-of-scope field(s); ignored.`);
-    if (!Object.keys(actions).length) return { applied: false, turn, developments: [] };
-
-    const beforeActions = captureWorldTurnState(world, sess);
-    const actionResult = processStructuredActions(actions, world, sess);
-    if (actionResult?.moduleRejections?.length) {
-        restoreWorldTurnState(world, sess, beforeActions);
-        return { applied: false, turn, developments: [], rejected: actionResult.moduleRejections };
+    worldMutationInProgress = true;
+    try {
+        if (!Object.keys(actions).length) {
+            await saveWorldsState({ worldId: world.id }); // persist the attempted interval
+            return { applied: false, turn, developments: [] };
+        }
+        const attempt = attemptWorldStateMutation(world, sess, () => {
+            const actionResult = processStructuredActions(actions, world, sess, { deferFeedback: true });
+            const developments = (Array.isArray(parsed.developments) ? parsed.developments : [])
+                .map(item => String(item?.summary || item || '').trim()).filter(Boolean).slice(0, 5);
+            if (!actionResult?.moduleRejections?.length) developments.forEach((summary, index) => {
+                addWorldNews(sess, summary, {
+                    id: `news_agent_${turn}_${index}`, type: 'world', playerVisible: false,
+                    knownBy: [] // nobody has heard yet; it must reach the player naturally
+                });
+            });
+            return { actionResult, developments };
+        }, result => !result.actionResult?.moduleRejections?.length);
+        if (!attempt.accepted) {
+            await saveWorldsState({ worldId: world.id }); // retain interval, not rejected actions
+            return { applied: false, turn, developments: [],
+                rejected: attempt.result.actionResult.moduleRejections };
+        }
+        try {
+            await saveWorldsState({ worldId: world.id });
+            attempt.commit();
+        } catch (error) {
+            attempt.rollback();
+            throw error;
+        }
+        try { flushWorldActionFeedback(attempt.result.actionResult); }
+        catch (feedbackError) { console.warn('World Agent feedback failed after save:', feedbackError); }
+        console.log(`Horde Engine: World Agent applied ${Object.keys(actions).join(', ')} on turn ${turn}`);
+        return { applied: true, turn, developments: attempt.result.developments,
+            fields: Object.keys(actions), actionResult: attempt.result.actionResult };
+    } finally {
+        worldMutationInProgress = false;
     }
-
-    const developments = (Array.isArray(parsed.developments) ? parsed.developments : [])
-        .map(item => String(item?.summary || item || '').trim()).filter(Boolean).slice(0, 5);
-    developments.forEach((summary, index) => {
-        addWorldNews(sess, summary, {
-            id: `news_agent_${turn}_${index}`, type: 'world', playerVisible: false,
-            knownBy: []   // nobody has heard yet; it must reach the player like anything else
-        });
-    });
-    console.log(`Horde Engine: World Agent applied ${Object.keys(actions).join(', ')} on turn ${turn}`);
-    return { applied: true, turn, developments, fields: Object.keys(actions) };
 }
 
 function parseWorldAgentPayload(raw) {
@@ -30311,7 +35596,7 @@ function syncNPCSchedules(world, sess) {
 
             // ARBITRATION: the narrative outranks the timetable. If the DM moved
             // this NPC recently, the schedule may not teleport them away.
-            if (isNpcPinned(sess, entState)) return;
+            if (entState.followingPlayer === true || isNpcPinned(sess, entState)) return;
 
             const loc = getLocationRef(worldForSession(world, sess), activeBlock.locationId);
             if (loc) activeCount++;
@@ -30396,20 +35681,20 @@ Design this NPC's believable weekly routine: 5-10 time blocks covering ordinary 
 Return ONLY this JSON, nothing else:
 {"schedule": [{"time": "07:00", "locationId": "<id from list>", "activity": "<short specific activity>", "days": ["weekday"]}]}`;
 
-    const response = await fetch(apiBase() + '/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({
+    const { response, data: schedulePayload } = await HordeWorldModelClient.json({
+        url: apiBase() + '/chat/completions',
+        init: { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() } },
+        body: {
             model: world.model || state.globalSettings.defaultModel,
             max_tokens: 900,
             messages: [
                 { role: 'system', content: 'You are a world-simulation designer. You output only valid JSON.' },
                 { role: 'user', content: prompt }
             ]
-        })
+        }
     });
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error?.message || response.statusText);
-    const raw = (await response.json()).choices?.[0]?.message?.content || '';
+    if (!response.ok) throw new Error(schedulePayload?.error?.message || response.statusText);
+    const raw = schedulePayload?.choices?.[0]?.message?.content || '';
     const parsed = extractJSON(raw);
     const blocks = Array.isArray(parsed) ? parsed : parsed.schedule;
     if (!Array.isArray(blocks) || blocks.length === 0) throw new Error('Model returned no schedule blocks');
@@ -30594,6 +35879,12 @@ function buildWorldLintReport(world) {
             const target = (getExitTargetName(ex) || '').trim().toLowerCase();
             const t = locByKey[target];
             if (t) adj[l.id].push(t.id);
+            const description = typeof ex === 'string' ? ex
+                : [ex?.text, ex?.description].filter(Boolean).join(' ');
+            if (/\b(?:locked|padlocked|barred|sealed|requires? (?:a|the) key)\b/i.test(description)
+                && !String(ex?.requiredItem || '').trim() && ex?.allowCheckUnlock !== true) {
+                push('warning', 'Exits', `"${l.name || l.id}" has an exit described as locked, but no required item or check unlock is set. It remains traversable. Configure the exit gate in Locations.`);
+            }
         });
         // An exit the author drew as two-way but which only exists on one side.
         // The Studio creates the reciprocal exit when you edit it by hand, but a
@@ -31316,11 +36607,10 @@ async function worldArchitectJSON(world, model, messages, maxTokens = 8000, expe
             messages: sanitizeMessagesForProvider(retryMessages, model)
         };
         if (useResponseFormat) requestBody.response_format = { type: 'json_object' };
-        const response = await fetch(apiBase() + '/chat/completions', {
-            method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() },
-            body: JSON.stringify(requestBody)
+        const { response, data: payload } = await HordeWorldModelClient.json({
+            url: apiBase() + '/chat/completions', body: requestBody,
+            init: { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() } }
         });
-        const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
             lastError = new Error(payload?.error?.message || `Director request failed (${response.status}).`);
             // Some otherwise capable OpenAI-compatible servers reject the
@@ -31736,7 +37026,7 @@ function calibrateStructuralFindings(world, preset) {
     }
 
     // 2. Context large enough for the preset plus the world's own text.
-    const needed = estimateWorldPromptTokens(world, preset) + (parseInt(world.maxTokens) || 2048) + 2048;
+    const needed = estimateWorldPromptTokens(world, preset) + (parseInt(world.maxTokens) || 4096) + 2048;
     const recommended = Math.max(8192, Math.ceil(needed / 1024) * 1024);
     const current = parseInt(world.contextSize) || 0;
     if (current < recommended) {
@@ -32299,10 +37589,10 @@ async function generateAgendaBeats(entity, button) {
     const original = button ? button.textContent : '';
     if (button) { button.disabled = true; button.textContent = '⏳'; }
     try {
-        const response = await fetch(apiBase() + '/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() },
-            body: JSON.stringify({
+        const { response, data: beatPayload } = await HordeWorldModelClient.json({
+            url: apiBase() + '/chat/completions',
+            init: { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() } },
+            body: {
                 model: structuredModelFor(world),
                 max_tokens: 1200,
                 response_format: { type: 'json_object' },
@@ -32316,12 +37606,12 @@ Also suggest one follow-up aim they would take up once this one resolves.
 Reply with only this JSON: {"beats":["...","..."],"next_goal":"..."}` },
                     { role: 'user', content: `WORLD: ${world.name}\n${world.description ? `PREMISE: ${String(world.description).slice(0, 300)}\n` : ''}CHARACTER: ${entity.name}\n${entity.description ? `ABOUT: ${String(entity.description).slice(0, 600)}\n` : ''}${entity.persona ? `MANNER: ${String(entity.persona).slice(0, 600)}\n` : ''}THEIR GOAL: ${entity.goal}\n\nWrite their beats.` }
                 ]
-            })
+            }
         });
         if (!response.ok) {
-            throw new Error((await response.json().catch(() => ({})))?.error?.message || response.statusText);
+            throw new Error(beatPayload?.error?.message || response.statusText);
         }
-        const message = (await response.json())?.choices?.[0]?.message || {};
+        const message = beatPayload?.choices?.[0]?.message || {};
         let text = message.content || '';
         if (Array.isArray(text)) text = text.map(part => part?.text || '').join(' ');
         if (!String(text).trim() && message.reasoning) text = String(message.reasoning);
@@ -33215,13 +38505,12 @@ async function runCalibrationBatch(world, pass, batch, carriedFactions) {
         // reliable way to stop a model narrating its way past the token limit.
         if (useJsonMode) body.response_format = { type: 'json_object' };
 
-        const response = await fetch(apiBase() + '/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() },
-            body: JSON.stringify(body)
+        const { response, data: calibrationPayload } = await HordeWorldModelClient.json({
+            url: apiBase() + '/chat/completions', body,
+            init: { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(), ...attributionHeaders() } }
         });
         if (!response.ok) {
-            const errorText = (await response.json().catch(() => ({})))?.error?.message || response.statusText;
+            const errorText = calibrationPayload?.error?.message || response.statusText;
             // Not every model accepts json_object; fall back rather than fail.
             if (useJsonMode && /response_format|json_object|json mode|not support/i.test(String(errorText))) {
                 console.warn('Horde Engine: model rejected JSON mode, retrying without it.');
@@ -33229,7 +38518,7 @@ async function runCalibrationBatch(world, pass, batch, carriedFactions) {
             }
             throw new Error(errorText);
         }
-        const choice = (await response.json())?.choices?.[0] || {};
+        const choice = calibrationPayload?.choices?.[0] || {};
         const message = choice.message || {};
         if (choice.finish_reason === 'length') truncated = true;
         let text = message.content || '';
@@ -33524,7 +38813,7 @@ function wireWorldMigrationControls(world) {
             if (state.worldInstances?.[world.id]) normalizeMigratedWorldInstance(migrated, state.worldInstances[world.id]);
             worldMigrationPreviewState = null;
             worldMediaDirty = true;
-            await saveState();
+            await saveState({ allWorldInstances: true });
             renderWorldStudio();
             renderWorldAudit();
             showToast(`World upgraded safely to schema ${WORLD_SCHEMA_VERSION}.`, 'success');
@@ -33541,7 +38830,7 @@ function wireWorldMigrationControls(world) {
             // storage error happened after one write, persist the restored
             // snapshot as a best-effort compensating transaction so a reload
             // cannot expose a half-applied migration.
-            try { await saveState(); }
+            try { await saveState({ allWorldInstances: true }); }
             catch (rollbackError) { console.error('World migration rollback could not be persisted:', rollbackError); }
             renderWorldStudio();
             renderWorldAudit();
@@ -34181,18 +39470,22 @@ Return ONLY JSON:
         if (extraNudge) messages.push({ role: 'user', content: extraNudge });
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000);
-        const response = await fetch(apiBase() + '/chat/completions', {
-            method: 'POST',
-            signal: controller.signal,
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({
+        let response;
+        let auditPayload;
+        try {
+            ({ response, data: auditPayload } = await HordeWorldModelClient.json({
+                url: apiBase() + '/chat/completions',
+                init: { method: 'POST', signal: controller.signal,
+                    headers: { 'Content-Type': 'application/json', ...authHeaders() } },
+                body: {
                 model: structuredModelFor(world),
                 max_tokens: 4000, // reasoning models eat budget before emitting content
                 messages
-            })
-        }).finally(() => clearTimeout(timeout));
-        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error?.message || response.statusText);
-        const msg = (await response.json()).choices?.[0]?.message;
+                }
+            }));
+        } finally { clearTimeout(timeout); }
+        if (!response.ok) throw new Error(auditPayload?.error?.message || response.statusText);
+        const msg = auditPayload?.choices?.[0]?.message;
         return msg?.content || '';
     };
 
@@ -34584,39 +39877,47 @@ async function consolidateSessionEpisodicMemoryRun(session, config) {
         const consolidationModel = state.globalSettings?.consolidationModel
             || (isLocalProvider() ? state.globalSettings.defaultModel : 'google/gemini-flash-1.5-8b');
 
-        const response = await fetch(apiBase() + '/chat/completions', {
+        const consolidationBody = {
+            model: consolidationModel,
+            max_tokens: isChatMemory ? 1100 : 500,
+            messages: [
+                {
+                    role: 'system',
+                    content: isChatMemory ? `You are Horde Chronos, a precise long-term memory archivist for roleplay.
+Return ONLY valid JSON with this shape:
+{"summary":"2-4 factual sentences describing the scene","memories":[{"type":"fact|relationship|state|thread","key":"stable_subject:attribute","text":"one atomic durable fact","importance":0.0,"confidence":0.0,"status":"active|resolved|disputed","scope":"timeline|relationship|canon","characterIds":["names or ids"],"witnessedBy":["names or ids"]}]}
+Record only durable changes: decisions, promises, relationships, discoveries, secrets, injuries, possessions, locations, goals, identities, and unresolved threads. Each memory must contain one fact. Use the same key when a newer fact replaces an older state. Mark concluded threads resolved. Distinguish narrator canon from what characters personally witnessed. Do not invent details and do not include ordinary banter or transient mood.`
+                        : `You are "Horde Chronos" — a narrative memory archivist.
+Summarize the roleplay segment below in AT MOST 3 short sentences (roughly 60 words). Capture only the key events, decisions, secrets revealed, and status changes. Third person, factual, no embellishment. Finish every sentence — never trail off.
+Begin your response with: [EPISODIC ARCHIVE]:`
+                },
+                { role: 'user', content: `Roleplay segment:\n\n${sliceText}` }
+            ]
+        };
+        const requestOptions = {
             method: 'POST',
             headers: {
                 ...authHeaders(),
                 'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: consolidationModel,
-                max_tokens: isChatMemory ? 1100 : 500,
-                messages: [
-                    {
-                        role: 'system',
-                        content: isChatMemory ? `You are Horde Chronos, a precise long-term memory archivist for roleplay.
-Return ONLY valid JSON with this shape:
-{"summary":"2-4 factual sentences describing the scene","memories":[{"type":"fact|relationship|state|thread","key":"stable_subject:attribute","text":"one atomic durable fact","importance":0.0,"confidence":0.0,"status":"active|resolved|disputed","scope":"timeline|relationship|canon","characterIds":["names or ids"],"witnessedBy":["names or ids"]}]}
-Record only durable changes: decisions, promises, relationships, discoveries, secrets, injuries, possessions, locations, goals, identities, and unresolved threads. Each memory must contain one fact. Use the same key when a newer fact replaces an older state. Mark concluded threads resolved. Distinguish narrator canon from what characters personally witnessed. Do not invent details and do not include ordinary banter or transient mood.`
-                            : `You are "Horde Chronos" — a narrative memory archivist.
-Summarize the roleplay segment below in AT MOST 3 short sentences (roughly 60 words). Capture only the key events, decisions, secrets revealed, and status changes. Third person, factual, no embellishment. Finish every sentence — never trail off.
-Begin your response with: [EPISODIC ARCHIVE]:`
-                    },
-                    { role: 'user', content: `Roleplay segment:\n\n${sliceText}` }
-                ]
-            })
+            }
+        };
+        const observed = isChatMemory ? null
+            : await fetchWorldObservedJSON(config, session, 'memoryConsolidation', consolidationBody, requestOptions);
+        const response = observed?.response || await fetch(apiBase() + '/chat/completions', {
+            ...requestOptions, body: JSON.stringify(consolidationBody)
         });
 
         if (!response.ok) {
-            const errBody = await response.text();
+            const errBody = observed ? JSON.stringify(observed.data || {}) : await response.text();
             throw new Error(`Consolidation API ${response.status}: ${errBody.slice(0, 200)}`);
         }
 
-        const data = await response.json();
+        const data = observed?.data || await response.json();
         let rawMemory = data.choices?.[0]?.message?.content?.trim();
-        if (!rawMemory) throw new Error('Consolidation model returned empty content');
+        if (!rawMemory) {
+            if (observed?.diagnostic()) observed.diagnostic().outcome = 'empty_output';
+            throw new Error('Consolidation model returned empty content');
+        }
         const extracted = isChatMemory ? parseStructuredChatMemory(rawMemory) : { summary: rawMemory, memories: [] };
         let summary = extracted.summary || rawMemory;
 
@@ -34658,7 +39959,8 @@ Begin your response with: [EPISODIC ARCHIVE]:`
             pendingEmbeddings = inserted;
             totalMemories = continuity.records.filter(record => record.status !== 'superseded').length;
         } else {
-            const embedding = await HordeVectorMemory.getCachedEmbedding(summary);
+            const embedding = await HordeVectorMemory.getCachedEmbedding(summary,
+                diagnostic => recordWorldEmbeddingAttempt(config, session, 'memoryEmbedding', diagnostic));
             session.episodicMemories = session.episodicMemories || [];
             session.episodicMemories.push({
                 text: summary, embedding,
@@ -34669,7 +39971,10 @@ Begin your response with: [EPISODIC ARCHIVE]:`
         }
         session.lastConsolidatedIndex = chunkEnd;
 
-        await saveState();
+        // World instances use their own persistence path; saving only the
+        // shared app shell would lose a background archive after reload.
+        if (isChatMemory) await saveState();
+        else await saveWorldsState({ worldId: config.id });
 
         // Raw structured records are already durable. Vector enrichment is a
         // second phase, so closing the app or losing the embedding provider can
@@ -34965,7 +40270,10 @@ async function renderVectorMemoryList(filterQuery = "") {
                 }
             }
             
-            const queryVec = await HordeVectorMemory.getCachedEmbedding(filterQuery);
+            const queryVec = await HordeVectorMemory.getCachedEmbedding(filterQuery,
+                isWorld ? diagnostic => recordWorldEmbeddingAttempt(
+                    state.worlds.find(item => item.id === state.activeWorldId), getCurrentWorldSession(),
+                    'inspectorSearch', diagnostic) : null);
             if (queryVec && !HordeVectorMemory.isFallbackActive) {
                 displayList = candidates.map(cand => {
                     let score = 0;
@@ -35121,7 +40429,10 @@ async function renderVectorMemoryList(filterQuery = "") {
                     if (!newText) return showToast('Memory text cannot be empty', 'error');
                     ref.text = newText;
                     try {
-                        ref.embedding = await getEmbedding(newText);
+                        ref.embedding = await getEmbedding(newText,
+                            isWorld ? diagnostic => recordWorldEmbeddingAttempt(
+                                state.worlds.find(item => item.id === state.activeWorldId), getCurrentWorldSession(),
+                                'memoryEditEmbedding', diagnostic) : null);
                         ref.embeddingNamespace = HordeVectorMemory.namespace();
                         ref.updatedAt = Date.now();
                     } catch (e) {

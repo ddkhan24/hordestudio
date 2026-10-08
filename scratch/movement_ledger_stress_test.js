@@ -42,6 +42,7 @@ const functionNames = [
     'findFuzzyLocation',
     'canTravelDirectly',
     'resolveWorldExitTarget',
+    'worldLocationTravelBlock',
     'resolveWorldContainmentParent',
     'findWorldTravelPath',
     'resolveWorldMovementTarget',
@@ -84,6 +85,8 @@ const context = {
     showToast(message) { toasts.push(message); },
     rollForScenePopulation() {},
     normalizePlayerRulesState() { return { status: 'active', conditions: [] }; },
+    sessionNpcs(world) { return (world.entities || []).filter(entity => entity.type === 'npc'); },
+    isNpcActive(actor) { return !!actor && !['dead', 'gone'].includes(actor.status); },
     resolveNpcId(world, ref) {
         const query = String(ref || '').toLowerCase();
         return world.entities.find(entity =>

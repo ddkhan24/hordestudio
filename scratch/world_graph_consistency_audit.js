@@ -37,7 +37,11 @@ test('session world view owns dynamic exits and timeline-created locations', () 
     const context = buildContext(vm, ['worldForSession', 'resolveWorldExitTarget'], {
         isPlainObject: value => value && typeof value === 'object' && !Array.isArray(value)
     });
-    const world = { entities: [], locations: [
+    const world = { entities: [
+        { id: 'template_person', type: 'npc' },
+        { id: 'person_a', type: 'npc', sessionOrigin: 'a' },
+        { id: 'person_b', type: 'npc', sessionOrigin: 'b' }
+    ], locations: [
         { id: 'square', name: 'Square', exits: [] },
         { id: 'secret_a', name: 'Secret Room', sessionOrigin: 'a', exits: [] },
         { id: 'secret_b', name: 'Secret Room', sessionOrigin: 'b', exits: [] }
@@ -45,6 +49,10 @@ test('session world view owns dynamic exits and timeline-created locations', () 
     const session = { id: 'a', dynamicExits: { square: [{ targetLocationId: 'secret_a' }] } };
     const view = context.worldForSession(world, session);
     assert.deepEqual(Array.from(view.locations, location => location.id), ['square', 'secret_a']);
+    assert.deepEqual(Array.from(view.entities, entity => entity.id), ['template_person', 'person_a']);
+    assert.equal(world.entities.length, 3, 'the projected view must not remove another timeline’s records');
+    assert.deepEqual(Array.from(context.worldForSession(world, null).entities, entity => entity.id), ['template_person'],
+        'missing session context must not expose all timelines');
     assert.equal(context.resolveWorldExitTarget(view, view.locations[0].exits[0]).id, 'secret_a');
 });
 
@@ -143,10 +151,63 @@ test('turn snapshots restore only the active timeline dynamic geography', () => 
     };
     const session = { id: 'a', name: 'A', history: [], ledger: '', dynamicExits: {}, _memEpoch: 0, _worldEpoch: 0 };
     const snapshot = context.captureWorldTurnState(world, session);
-    assert.equal(snapshot.schema, 3);
+    assert.equal(snapshot.schema, 5);
     world.locations.push({ id: 'ghost', name: 'Ghost', sessionOrigin: 'a' });
     context.restoreWorldTurnState(world, session, snapshot);
     assert.deepEqual(Array.from(world.locations, location => location.id), ['authored', 'other', 'kept']);
+});
+
+test('turn snapshots store the latest audit once and restore old snapshots', () => {
+    const context = buildContext(vm, ['captureWorldTurnState', 'restoreWorldTurnState'], {
+        safeJsonClone: json,
+        isPlainObject: value => value && typeof value === 'object' && !Array.isArray(value),
+        bumpMemoryEpoch: () => {},
+        bumpWorldEpoch: () => {}
+    });
+    const world = { entities: [], locations: [] };
+    const audit = { world_state_version: 7, rejected: [{ reason: 'example' }] };
+    const session = { id: 'a', name: 'A', history: [], worldStateVersion: 7,
+        lastTurnAudit: audit,
+        worldTurnReceipts: [{ receipt: { turn_id: 'turn_7' }, audit }] };
+    const snapshot = context.captureWorldTurnState(world, session);
+    assert.equal(snapshot.schema, 5);
+    assert.equal(Object.hasOwn(snapshot.session, 'lastTurnAudit'), false);
+    assert.deepEqual(snapshot.receiptCheckpoint.tail.audit, audit);
+    session.lastTurnAudit = { world_state_version: 8 };
+    session.worldTurnReceipts.push({ receipt: { turn_id: 'turn_8' }, audit: { world_state_version: 8 } });
+    assert.equal(context.restoreWorldTurnState(world, session, snapshot), true);
+    assert.deepEqual(session.lastTurnAudit, audit);
+    assert.equal(session.worldTurnReceipts.at(-1).receipt.turn_id, 'turn_7');
+    assert.equal(session.lastTurnAudit, session.worldTurnReceipts.at(-1).audit,
+        'a restored audit must remain the selected receipt audit, not diverge on later annotation');
+
+    const oldSnapshot = json(snapshot);
+    oldSnapshot.schema = 4;
+    oldSnapshot.session.lastTurnAudit = { world_state_version: 6, source: 'old_snapshot' };
+    session.lastTurnAudit = null;
+    assert.equal(context.restoreWorldTurnState(world, session, oldSnapshot), true);
+    assert.equal(session.lastTurnAudit.source, 'old_snapshot');
+});
+
+test('deleting one timeline removes only its story-born people and places', () => {
+    const context = buildContext(vm, ['removeWorldTimelineOwnedContent'], {});
+    const world = {
+        locations: [
+            { id: 'square', name: 'Square', exits: ['to Secret A', 'to Secret B'] },
+            { id: 'secret_a', name: 'Secret A', sessionOrigin: 'a', exits: [] },
+            { id: 'secret_b', name: 'Secret B', sessionOrigin: 'b', exits: [] }
+        ],
+        entities: [
+            { id: 'author', type: 'npc' },
+            { id: 'npc_a', type: 'npc', sessionOrigin: 'a' },
+            { id: 'npc_b', type: 'npc', sessionOrigin: 'b' }
+        ]
+    };
+    context.removeWorldTimelineOwnedContent(world, 'a');
+    assert.deepEqual(Array.from(world.locations, location => location.id), ['square', 'secret_b']);
+    assert.deepEqual(Array.from(world.entities, entity => entity.id), ['author', 'npc_b']);
+    assert.deepEqual(Array.from(world.locations[0].exits), ['to Secret B']);
+    assert.match(app, /removeWorldTimelineOwnedContent\(world, removedSession\.id\)/);
 });
 
 test('play and prompt paths resolve exits against the same session world view', () => {

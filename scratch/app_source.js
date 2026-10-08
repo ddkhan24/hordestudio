@@ -197,7 +197,7 @@ function constInitializerIsInert(source) {
     if (/\b(document|window|localStorage|sessionStorage|indexedDB|navigator|state)\b/.test(withoutObjectKeys)) return false;
     // A call is fine only if it is one of the shapes we recognise as inert.
     const calls = body.match(/\b[A-Za-z_$][\w$.]*\s*\(/g) || [];
-    return calls.every(call => /^(Object\.freeze|Object\.entries|Object\.keys|Object\.values|Object\.fromEntries|[A-Za-z_$][\w$]*\.map|Set|Map|Array|String|Number|Boolean|RegExp|Symbol)\s*\($/.test(call));
+    return calls.every(call => /^(Object\.freeze|Object\.entries|Object\.keys|Object\.values|Object\.fromEntries|[A-Za-z_$][\w$]*\.map|Set|Map|WeakMap|Array|String|Number|Boolean|RegExp|Symbol)\s*\($/.test(call));
 }
 
 // name -> { kind, index, source }. Built once; every suite shares it.

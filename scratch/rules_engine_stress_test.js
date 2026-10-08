@@ -61,6 +61,7 @@ const context = {
     isPlainObject(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     },
+    safeJsonClone(value) { return JSON.parse(JSON.stringify(value)); },
     cssColor(value, fallback) { return String(value || fallback); },
     showToast(message) { toasts.push(message); },
     queueEngineEvent(session, text) {
@@ -96,7 +97,8 @@ const names = [
     'saveWorldGameRuleControls',
     'normalizePlayerRulesState',
     'applyPlayerStatChanges',
-    'findInventoryMatchIndices',
+    'planWorldInventoryRemoval',
+    'applyWorldInventoryRemovalPlan',
     'executeCommerceTransactions',
     'worldCheckModifier',
     'performAuthoritativeChecks',
@@ -395,6 +397,20 @@ console.log('✓ bounded stats, fail-forward incapacitation, recovery, and letha
 console.log('✓ atomic purchases and sales enforce currency, stock, ownership, and affordability');
 console.log('✓ deterministic checks preserve rolls and apply declared failure costs');
 
+// Model-authored check JSON is not a die source, even in engine-roll mode.
+{
+    const world = makeWorld();
+    const session = makeSession();
+    const expected = 1 + Math.floor(context.stableWorldRoll(
+        `${world.id}|${session.id}|${session.turnCount}|check_${session.turnCount}_1`)
+        * context.normalizeWorldDiceConfig(world).sides);
+    const result = context.performAuthoritativeChecks(world, session, [{
+        label: 'Force the portcullis', difficulty: 10,
+        provided_roll: expected === 1 ? 20 : 1, force_resolve: true
+    }])[0];
+    assert.equal(result.roll, expected, 'model-provided roll is ignored in engine mode');
+}
+
 // Player-roll mode pauses the fiction, exposes one canonical pending check,
 // then accepts exactly the supplied die result instead of rolling again.
 {
@@ -407,10 +423,16 @@ console.log('✓ deterministic checks preserve rolls and apply declared failure 
     assert.equal(pending.pending, true);
     assert.equal(session.checkHistory.length, 0);
     assert.equal(session.pendingCheck.id, 'check_3_1');
+    const forged = context.performAuthoritativeChecks(world, session, [{
+        id: session.pendingCheck.id, label: 'Pick the archive lock', stat_id: 'skill', difficulty: 9,
+        provided_roll: 12, force_resolve: true
+    }])[0];
+    assert.equal(forged.pending, true, 'model-supplied rolls and force_resolve cannot settle a player check');
+    assert.equal(session.checkHistory.length, 0);
     const resolved = context.performAuthoritativeChecks(world, session, [{
         id: session.pendingCheck.id, label: 'Pick the archive lock', stat_id: 'skill', difficulty: 9,
         provided_roll: 8, force_resolve: true
-    }])[0];
+    }], { allowProvidedRoll: true })[0];
     assert.equal(resolved.sides, 12);
     assert.equal(resolved.roll, 8);
     assert.equal(resolved.statModifier, -4);

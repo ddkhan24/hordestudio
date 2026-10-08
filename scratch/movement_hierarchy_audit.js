@@ -78,7 +78,9 @@ const context = {
     state: {},
     showToast() {},
     rollForScenePopulation() {},
-    normalizePlayerRulesState() { return { status: 'active', conditions: [] }; }
+    normalizePlayerRulesState() { return { status: 'active', conditions: [] }; },
+    sessionNpcs(world) { return (world.entities || []).filter(entity => entity.type === 'npc'); },
+    isNpcActive(actor) { return !!actor && !['dead', 'gone'].includes(actor.status); }
 };
 vm.createContext(context);
 const sources = [
@@ -93,6 +95,9 @@ const sources = [
     'normalizeLocationSearchText',
     'findFuzzyLocation',
     'resolveWorldExitTarget',
+    'questTextKey',
+    'worldExitUnlockKey', 'worldExitRequirement',
+    'worldLocationTravelBlock',
     'resolveWorldContainmentParent',
     'findWorldTravelPath',
     'resolveWorldMovementTarget',

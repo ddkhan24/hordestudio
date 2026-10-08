@@ -1,0 +1,130 @@
+{
+  "_format": "horde-world",
+  "_version": 2,
+  "id": "world_saltglass_watch_live_audit",
+  "name": "The Salt-Glass Watch",
+  "description": "A small fantasy frontier RPG. A village well has turned bitter, a courier is missing, and a sealed watchtower stands beyond the marsh. The player may negotiate, investigate, fight, retreat, or abandon the quest. Consequences and geography matter.",
+  "intro": "At dusk, the village bell rings twice. The well water tastes of salt, and a courier carrying the tower key has not returned. Mara at the inn offers twenty silver for proof of what happened; Captain Iven wants the courier found alive.",
+  "dmPrompt": "Run a grounded, consequential fantasy RPG. Present sensory scenes and NPC decisions, then yield agency. Do not decide the player's actions or grant success without a check when the action is uncertain. Track injuries, equipment, geography, time, inventory, relationships, and the missing courier. No teleporting or knowledge without evidence. The tower's truth: an alchemist named Sel sealed the spring after discovering a parasitic salt-glass growth; the missing courier is alive in the tower cellar. Sel can be bargained with or fought. The player can fail, retreat, or solve this without combat. Keep the prose clear, specific, and under four short paragraphs per turn.",
+  "startLocationId": "inn",
+  "locations": [
+    {
+      "id": "inn", "name": "The Reed Inn", "mapType": "building", "region": "Lowmere",
+      "description": "A warm, crowded inn. Mara runs the counter. A notice offers twenty silver for proof of the missing courier. The village well is outside.",
+      "exits": [{ "text": "to Village Square", "targetLocationId": "square", "travelTime": 3 }],
+      "danger": 2
+    },
+    {
+      "id": "square", "name": "Village Square", "mapType": "area", "region": "Lowmere",
+      "description": "A dry stone well, Captain Iven's watch post, the inn door, and the east road to the marsh. The well tastes unnaturally salty.",
+      "exits": [
+        { "text": "to The Reed Inn", "targetLocationId": "inn", "travelTime": 3 },
+        { "text": "to Marsh Causeway", "targetLocationId": "causeway", "travelTime": 12 }
+      ], "danger": 5
+    },
+    {
+      "id": "causeway", "name": "Marsh Causeway", "mapType": "area", "region": "Lowmere Marsh",
+      "description": "A narrow raised path through reeds and dark water. Broken courier satchel straps and fresh boot prints lead toward the watchtower. A desperate marsh thief sometimes blocks the path.",
+      "exits": [
+        { "text": "to Village Square", "targetLocationId": "square", "travelTime": 12 },
+        { "text": "to Watchtower Gate", "targetLocationId": "gate", "travelTime": 8 }
+      ], "danger": 35
+    },
+    {
+      "id": "gate", "name": "Watchtower Gate", "mapType": "area", "region": "Lowmere Marsh",
+      "description": "The tower's iron gate is locked. Its old mechanism can be picked, forced, or opened with the courier's brass key. Salt-glass filaments shine between the stones. The cellar lies inside, not directly accessible from the marsh.",
+      "exits": [
+        { "text": "to Marsh Causeway", "targetLocationId": "causeway", "travelTime": 8 },
+        { "text": "through locked gate to Tower Cellar", "targetLocationId": "cellar", "travelTime": 4,
+          "requiredItem": "brass tower key", "allowCheckUnlock": true }
+      ], "danger": 45
+    },
+    {
+      "id": "cellar", "name": "Tower Cellar", "mapType": "building", "region": "Lowmere Marsh",
+      "description": "A laboratory below the tower. The living courier is tied near a sealed spring. Sel the alchemist controls the pressure valve; breaking the wrong pipe will contaminate the village well further.",
+      "exits": [{ "text": "to Watchtower Gate", "targetLocationId": "gate", "travelTime": 4,
+        "requiredItem": "brass tower key", "allowCheckUnlock": true }],
+      "danger": 55
+    }
+  ],
+  "entities": [
+    {
+      "id": "mara", "name": "Mara Venn", "type": "npc", "isMajor": true,
+      "startLocation": "inn", "homeLocation": "inn",
+      "description": "Innkeeper with a scarred hand and a ledger of village debts.",
+      "persona": "Practical and protective of Lowmere. Wants evidence before paying; never promises more than the posted twenty silver. Knows the courier was last seen heading east with a brass key, but knows nothing of Sel's discovery.",
+      "goal": "Restore the well and keep villagers safe.",
+      "schedule": [{ "time": "08:00", "locationId": "inn", "activity": "Runs the inn" }]
+    },
+    {
+      "id": "iven", "name": "Captain Iven", "type": "npc", "isMajor": true,
+      "startLocation": "square", "homeLocation": "square",
+      "description": "Tired village watch captain with a dented breastplate.",
+      "persona": "Cautious and proud. Wants the courier alive more than he wants the tower cleared. Will lend a lantern if asked, not send untrained villagers into the marsh.",
+      "goal": "Find the courier without needless deaths.",
+      "schedule": [{ "time": "08:00", "locationId": "square", "activity": "Patrols the well and east road" }]
+    },
+    {
+      "id": "sel", "name": "Sel Ardent", "type": "npc", "isMajor": true,
+      "startLocation": "cellar", "homeLocation": "cellar",
+      "description": "Exhausted alchemist wearing salt-stained gloves.",
+      "persona": "Not evil, but frightened and stubborn. Sealed the spring to contain a parasitic growth. The courier is restrained, alive, and angry. Sel will negotiate if the player offers a credible containment plan.",
+      "goal": "Contain the salt-glass growth without admitting the damage already done.",
+      "schedule": [{ "time": "08:00", "locationId": "cellar", "activity": "Tends the seal and captive courier" }]
+    },
+    {
+      "id": "tomas", "name": "Tomas Reed", "type": "npc", "isMajor": true,
+      "startLocation": "cellar", "homeLocation": "square",
+      "description": "Missing courier with a bruised shoulder and brass tower key.",
+      "persona": "Scared but observant. Knows Sel trapped him after he threatened to open the spring valve. Wants to go home.",
+      "goal": "Escape the cellar alive.",
+      "schedule": [{ "time": "08:00", "locationId": "cellar", "activity": "Tries to escape his restraints" }]
+    }
+  ],
+  "startingLives": [
+    {
+      "id": "ranger", "icon": "🏹", "name": "The Ranger", "role": "marsh ranger", "socialRank": "outsider",
+      "description": "An itinerant ranger hired to find the courier and investigate the bitter well.",
+      "startLocationId": "inn", "inventory": ["short sword", "rope", "healing draught", "six silver coins"],
+      "obligations": ["Find the missing courier if possible", "Report what poisoned the well"],
+      "privileges": ["May travel the public road and question villagers"],
+      "statOverrides": { "hp": 12, "might": 3, "wits": 4, "silver": 6 },
+      "intro": "Mara shows you the notice and points toward the marsh road. The bell rings twice outside."
+    }
+  ],
+  "startingQuests": [
+    {
+      "id": "find_missing_courier", "title": "Find the missing courier",
+      "description": "Captain Iven wants Tomas Reed found alive; a location alone is not proof of his fate.",
+      "giver": "Captain Iven",
+      "objectives": [
+        { "id": "confirm_tomas", "text": "Find Tomas Reed and confirm his fate", "type": "manual", "required": 1 }
+      ],
+      "rewards": { "items": [], "stats": {}, "factionReputation": [] }
+    }
+  ],
+  "hudConfig": {
+    "showClock": true, "showDays": true, "showQuests": true, "showInventory": true,
+    "showLedger": true, "startTimeHours": 17, "startTimeMinutes": 45, "timeStep": 5,
+    "stats": [
+      { "id": "hp", "name": "Health", "value": 12, "min": 0, "max": 12, "roll": { "enabled": false } },
+      { "id": "might", "name": "Might", "value": 3, "min": 0, "max": 10, "roll": { "enabled": true, "mode": "direct" } },
+      { "id": "wits", "name": "Wits", "value": 4, "min": 0, "max": 10, "roll": { "enabled": true, "mode": "direct" } },
+      { "id": "silver", "name": "Silver", "value": 6, "min": 0, "max": 0, "roll": { "enabled": false } }
+    ]
+  },
+  "gameRules": {
+    "profileId": "adventure", "vitalStatId": "hp", "currencyStatId": "silver", "currencyName": "silver",
+    "zeroHpMode": "fail_forward",
+    "modules": {
+      "stats": true, "health": true, "conditions": true, "checks": true,
+      "inventory": true, "equipment": true, "commerce": true, "quests": true,
+      "relationships": true, "schedules": false, "livingWorld": true
+    },
+    "dice": { "resolution": "automatic", "sides": 20, "defaultDifficulty": 11, "criticals": true }
+  },
+  "kernel": { "enabled": true, "memoryMode": "ledger", "repairMode": "adaptive", "compactTools": true },
+  "worldAgent": { "enabled": true, "intervalTurns": 8, "model": "" },
+  "sandboxConfig": { "enabled": true, "conflict": true, "law": true, "scale": "local" },
+  "lorebook": [], "groups": [], "factions": [], "relationships": [], "mediaAssets": []
+}

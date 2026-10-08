@@ -132,6 +132,8 @@ STATIC_FILES = {
     "/index.html": ("index.html", "text/html"),
     "/style.css": ("style.css", "text/css"),
     "/app.js": ("app.js", "text/javascript"),
+    "/worlds/model-client.js": ("worlds/model-client.js", "text/javascript"),
+    "/large-archive.js": ("large-archive.js", "text/javascript"),
     "/bundled-humans.js": ("bundled-humans.js", "text/javascript"),
     "/human-package.js": ("human-package.js", "text/javascript"),
     "/vh-life-schema.js": ("virtual_humans/engine/vh-life-schema.js", "text/javascript"),

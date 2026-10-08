@@ -202,6 +202,12 @@ test('the repair runs on load, import, save, export and delete', () => {
         'deleting a place bypasses the canonical-link cleanup transaction');
 });
 
+test('World Studio preserves an intentional zero temperature', () => {
+    const save = functionSource('saveWorld');
+    assert.match(save, /w\.temp = Number\.isFinite\(requestedTemperature\) \? requestedTemperature : 0\.9/);
+    assert.doesNotMatch(save, /w\.temp = parseFloat\([^\n]+\) \|\| 0\.9/);
+});
+
 // --- what the audit now tells the author -------------------------------------
 
 test('a faction with nobody and nothing is reported', () => {

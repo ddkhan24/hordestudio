@@ -35,7 +35,7 @@ function test(name, fn) {
     console.log(`✓ ${name}`);
 }
 
-test('snapshots contain only timeline-owned dynamic characters', () => {
+test('snapshots contain only timeline-owned dynamic characters and locations', () => {
     const start = app.indexOf('function captureWorldTurnState');
     const end = app.indexOf('function addWorldMessage', start);
     const context = {
@@ -46,18 +46,22 @@ test('snapshots contain only timeline-owned dynamic characters', () => {
     };
     vm.runInNewContext(`${app.slice(start, end)}\nthis.captureWorldTurnState = captureWorldTurnState; this.restoreWorldTurnState = restoreWorldTurnState;`, context);
     const world = {
-        locations: [{ id: 'authored' }],
+        locations: [{ id: 'authored' }, { id: 'mine-place', sessionOrigin: 's1' }, { id: 'their-place', sessionOrigin: 's2' }],
         entities: [{ id: 'template' }, { id: 'mine', sessionOrigin: 's1' }, { id: 'theirs', sessionOrigin: 's2' }]
     };
     const session = { id: 's1', name: 'One', history: [], inventory: [] };
     const snapshot = context.captureWorldTurnState(world, session);
-    assert.equal(snapshot.schema, 2);
+    assert.equal(snapshot.schema, 5);
     assert.deepEqual(JSON.parse(JSON.stringify(snapshot.world.dynamicEntities)).map(item => item.id), ['mine']);
-    assert.equal('locations' in snapshot.world, false);
+    assert.deepEqual(JSON.parse(JSON.stringify(snapshot.world.dynamicLocations)).map(item => item.id), ['mine-place']);
+    assert.equal('locations' in snapshot.world, false, 'shared geography must not be snapshotted wholesale');
     world.locations.push({ id: 'later-authored' });
+    world.locations.push({ id: 'later-other-place', sessionOrigin: 's2' });
     world.entities.push({ id: 'later-other', sessionOrigin: 's2' });
     context.restoreWorldTurnState(world, session, snapshot);
     assert(world.locations.some(location => location.id === 'later-authored'));
+    assert(world.locations.some(location => location.id === 'later-other-place'));
+    assert(world.locations.some(location => location.id === 'mine-place'));
     assert(world.entities.some(entity => entity.id === 'later-other'));
 });
 

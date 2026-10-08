@@ -21,6 +21,9 @@ jobs:
       - name: Build portable application
         run: ./scripts/build-portable.sh "${GITHUB_REF_NAME#v}"
 
+      - name: Verify packaged application and HTTP routes
+        run: python3 scripts/verify-portable-package.py "dist/Horde-Studio-${GITHUB_REF_NAME}-portable.zip"
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

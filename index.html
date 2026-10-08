@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link id="horde-fonts" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="preload" as="style">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=20260925-v182">
+    <link rel="stylesheet" href="style.css?v=20261008-worlds-release">
     <link rel="stylesheet" href="virtual_humans/frontend/vh-workspace.css?v=20260925-v182">
 </head>
 <body>
@@ -534,22 +534,24 @@
                             <div class="world-toolbar-row world-toolbar-primary">
                                 <div class="session-selector-wrap">
                                     <select id="world-session-select" class="tool-select"></select>
-                                    <button class="tool-btn" id="world-new-session-btn" title="New World Session">➕ New</button>
-                                    <button class="tool-btn" id="world-rename-session-btn" title="Rename Current Session">✏️ Rename</button>
-                                    <button class="tool-btn tool-btn-danger" id="world-del-session-btn" type="button" title="Delete Current Session" aria-label="Delete current session">🗑️</button>
+                                    <div class="world-timeline-menu">
+                                        <button class="tool-btn world-timeline-btn" id="world-timeline-btn" type="button" aria-expanded="false" aria-controls="world-timeline-actions">Timeline ▾</button>
+                                        <div class="world-timeline-actions" id="world-timeline-actions">
+                                            <button class="tool-btn" id="world-new-session-btn" type="button" title="New World Session">＋ New timeline</button>
+                                            <button class="tool-btn" id="world-rename-session-btn" type="button" title="Rename Current Session">Rename timeline</button>
+                                            <button class="tool-btn tool-btn-danger" id="world-del-session-btn" type="button" title="Delete Current Session" aria-label="Delete current timeline">Delete timeline</button>
+                                        </div>
+                                    </div>
                                 </div>
                                 <div class="toolbar-divider"></div>
                                 
-                                <div id="world-context-meter-wrap" style="display:flex; align-items:center; gap:8px; background:var(--surface2); padding:4px 10px; border-radius:10px; border:1px solid var(--border);">
-                                    <span style="font-size:0.6rem; color:var(--text-3); font-weight:800;">CTX</span>
-                                    <div style="width:50px; height:4px; background:var(--bg); border-radius:2px; overflow:hidden;">
-                                        <div id="world-context-fill" style="width:0%; height:100%; background:var(--success); transition:all 0.3s;"></div>
-                                    </div>
-                                    <span id="world-context-label" style="font-size:0.65rem; color:var(--text-2); font-family:monospace; min-width:55px; text-align:right;">0/8k</span>
+                                <div id="world-context-meter-wrap" class="world-story-size" title="Approximate total saved story and world text. The next model request uses a selected context window; this is not its token bill or usage.">
+                                    <span>STORY</span>
+                                    <span id="world-context-label">~0 tokens</span>
                                 </div>
                                 
                                 <button class="tool-btn" id="world-studio-btn" title="Open World in Studio">⚙️ Studio</button>
-                                <button class="tool-btn world-hud-toggle" id="world-hud-toggle" title="Show or hide world status">◫ HUD</button>
+                                <button class="tool-btn world-hud-toggle" id="world-hud-toggle" type="button" aria-controls="world-status-panel" aria-expanded="true" title="Show or hide world information">◫ Hide world info</button>
                                 <button class="tool-btn tool-btn-danger" id="world-exit-btn" title="Exit World">✕ Exit</button>
                             </div>
 
@@ -560,7 +562,7 @@
                                 <button class="tool-btn" id="world-session-zero-btn" title="Open session identity and story preferences">🎬 Session Setup</button>
                                 <button class="tool-btn" id="world-map-btn" title="Toggle Map View">🗺️ Map</button>
                                 <button class="tool-btn" id="world-reroll-btn" title="Reroll last DM response">🔄 Reroll</button>
-                                <button class="tool-btn world-more-btn" id="world-more-btn" type="button" aria-expanded="false">••• More</button>
+                                <button class="tool-btn world-more-btn" id="world-more-btn" type="button" aria-expanded="false" aria-controls="world-more-actions">••• More</button>
                                 <div class="world-more-actions" id="world-more-actions">
                                     <button class="tool-btn" id="world-toggle-headers-btn" title="Toggle Message Metadata">👁️ Metadata</button>
                                     <button class="tool-btn" id="world-presentation-btn" title="Switch between Classic and Cinematic presentation">🎨 View</button>
@@ -568,12 +570,20 @@
                                     <button class="tool-btn" id="world-mechanics-toggle-btn" title="Pause or restore optional RPG mechanics without deleting character data">⚙ Mechanics</button>
                                     <button class="tool-btn" id="world-summarize-btn" title="Summarize World History">✨ Summarize</button>
                                     <button class="tool-btn" id="world-open-vector-memory-btn" title="Inspect World Vector Memories">🧠 Memory</button>
-                                    <button class="tool-btn" id="world-download-btn" title="Download Transcript">💾 Save</button>
+                                    <button class="tool-btn" id="world-download-btn" title="Download a readable text transcript; this is not a playable backup">↓ Transcript</button>
                                     <button class="tool-btn tool-btn-danger" id="world-clear-btn" title="Clear World History">🗑️ Clear</button>
                                 </div>
                             </div>
                         </div>
                     </header>
+                    <section class="world-mobile-context" aria-label="Current place and exits">
+                        <div class="world-mobile-context-heading">
+                            <div><span>Current place</span><strong id="world-mobile-loc-name">Unknown Realm</strong></div>
+                            <span id="world-mobile-exit-count">Exits</span>
+                        </div>
+                        <div id="world-mobile-exits-list" class="world-mobile-exits" aria-label="Travel routes"></div>
+                    </section>
+                    <div id="world-urgent-stakes" class="world-urgent-stakes hidden" role="status" aria-live="polite"></div>
                     <div id="world-vector-fallback-banner" class="fallback-banner hidden">
                         <span class="banner-icon">⚠️</span>
                         <span class="banner-text">OpenRouter Embeddings API failed (or credit exhausted). Using primitive keyword-matching fallback for world narrative memory.</span>
@@ -602,10 +612,17 @@
                 </div>
 
                 <!-- Status & Info Column -->
-                <aside class="world-status-col">
+                <aside class="world-status-col" id="world-status-panel" data-tab="now" aria-label="World information">
+                    <nav class="world-status-tabs" aria-label="Explore this world">
+                        <button type="button" data-world-status-tab="now" aria-pressed="true">Now</button>
+                        <button type="button" data-world-status-tab="people" aria-pressed="false">People</button>
+                        <button type="button" data-world-status-tab="threads" aria-pressed="false">Threads</button>
+                        <button type="button" data-world-status-tab="history" aria-pressed="false">History</button>
+                        <button type="button" data-world-status-tab="director" aria-pressed="false">Director</button>
+                    </nav>
                     <!-- Player HUD (Phase 2 RPG Mechanics) -->
                     <!-- World Time & Atmosphere -->
-                    <section class="world-status-section" id="hud-section-clock" style="margin-top:0;">
+                    <section class="world-status-section" id="hud-section-clock" data-world-panel="now" style="margin-top:0;">
                         <div class="world-card" style="text-align:center; padding:15px; background: linear-gradient(135deg, var(--surface2), var(--bg));">
                             <div id="world-clock-display" style="font-size:1.6rem; font-family:'Outfit',sans-serif; font-weight:700; color:var(--accent);">8:00 AM</div>
                             <div id="world-time-period" style="font-size:0.7rem; color:var(--text-3); text-transform:uppercase; letter-spacing:1px; margin-top:4px; margin-bottom:8px;">Daylight</div>
@@ -614,7 +631,7 @@
                         </div>
                     </section>
 
-                    <section class="world-status-section">
+                    <section class="world-status-section" data-world-panel="now">
                         <h3>Current Location</h3>
                         <div id="world-loc-card" class="world-card">
                             <h4 id="world-loc-name" style="margin-bottom:8px; font-family:'Outfit',sans-serif;">Unknown</h4>
@@ -622,7 +639,7 @@
                         </div>
                     </section>
 
-                    <section class="world-status-section">
+                    <section class="world-status-section" data-world-panel="now">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                             <h3 style="margin:0;">Character</h3>
                             <div style="display:flex; gap:5px;">
@@ -639,7 +656,7 @@
                         </div>
                     </section>
 
-                    <section class="world-status-section" id="hud-section-ledger">
+                    <section class="world-status-section" id="hud-section-ledger" data-world-panel="threads">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                             <h3 style="margin:0;">World Ledger</h3>
                             <button id="edit-ledger-btn" class="tool-btn" style="font-size:0.7rem; padding:2px 6px;">Edit</button>
@@ -650,14 +667,14 @@
                         <div id="world-ledger-status" style="margin-top:5px; font-size:0.62rem; color:var(--text-3);"></div>
                     </section>
 
-                    <section class="world-status-section">
+                    <section class="world-status-section" data-world-panel="now">
                         <h3>Exits & Surroundings</h3>
                         <div id="world-exits-list" style="display:flex; flex-direction:column; gap:6px; margin-bottom:12px;"></div>
                         <div id="world-inventory-list" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px;"></div>
                         <div id="world-present-list" style="display:flex; flex-direction:column; gap:6px;"></div>
                     </section>
 
-                    <section class="world-status-section" id="hud-section-quests">
+                    <section class="world-status-section" id="hud-section-quests" data-world-panel="threads">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                             <h3 style="margin:0;">Active Quests</h3>
                             <div style="display:flex; align-items:center; gap:6px;">
@@ -670,7 +687,7 @@
                         </div>
                     </section>
 
-                    <section class="world-status-section" id="hud-section-secrets" style="display:none;">
+                    <section class="world-status-section" id="hud-section-secrets" data-world-panel="threads" style="display:none;">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                             <h3 style="margin:0;">Secrets Uncovered</h3>
                             <span id="secret-count" class="mini-tag">0</span>
@@ -678,7 +695,7 @@
                         <div id="world-secrets-list" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
                     </section>
 
-                    <section class="world-status-section" id="hud-section-threads">
+                    <section class="world-status-section" id="hud-section-threads" data-world-panel="threads">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                             <h3 style="margin:0;">Story Threads</h3>
                             <span id="thread-count" class="mini-tag">0</span>
@@ -688,7 +705,7 @@
                         </div>
                     </section>
 
-                    <section class="world-status-section" id="hud-section-living-world">
+                    <section class="world-status-section" id="hud-section-living-world" data-world-panel="now">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
                             <h3 style="margin:0;">Living World</h3>
                             <span id="living-world-count" class="mini-tag">0</span>
@@ -696,6 +713,39 @@
                         <div id="world-living-world-list" style="display:flex; flex-direction:column; gap:8px;">
                             <!-- Simulation state appears here -->
                         </div>
+                    </section>
+                    <section class="world-status-section world-insight-section" data-world-panel="people" aria-label="People encountered">
+                        <div class="world-insight-heading"><h3>People you’ve met</h3><span id="world-people-count" class="mini-tag">0</span></div>
+                        <p class="world-insight-hint">Only people encountered in this timeline appear here. Someone’s current whereabouts may be unknown.</p>
+                        <label class="world-insight-search-label" for="world-people-search">Find a person</label>
+                        <input id="world-people-search" class="form-input" type="search" placeholder="Search names" autocomplete="off">
+                        <div id="world-people-list" class="world-insight-list"></div>
+                    </section>
+                    <section class="world-status-section world-insight-section" data-world-panel="history" aria-label="Story history">
+                        <div class="world-insight-heading"><h3>Story history</h3><span id="world-history-count" class="mini-tag">0</span></div>
+                        <p class="world-insight-hint">Revisit visible scenes and lasting changes. History does not reveal hidden world state or rewind your timeline.</p>
+                        <div id="world-history-health" class="world-history-health" role="status"></div>
+                        <div id="world-history-list" class="world-insight-list"></div>
+                        <div class="world-history-pagination">
+                            <button id="world-history-newer" type="button" class="tool-btn">← Newer</button>
+                            <span id="world-history-page">Page 1</span>
+                            <button id="world-history-older" type="button" class="tool-btn">Older →</button>
+                        </div>
+                    </section>
+                    <section class="world-status-section world-insight-section" data-world-panel="director" aria-label="World director">
+                        <div class="world-insight-heading"><h3>Director</h3><span id="world-director-version" class="mini-tag">v0</span></div>
+                        <p class="world-insight-hint">Private author view. See which world changes actually committed, what was rejected, and which people are pursuing goals. This does not change the story.</p>
+                        <div id="world-director-health" class="world-history-health" role="status"></div>
+                        <h3 class="world-director-subheading">Recent turn receipts</h3>
+                        <div id="world-director-receipts" class="world-insight-list"></div>
+                        <h3 class="world-director-subheading">Active minds</h3>
+                        <div id="world-director-minds" class="world-insight-list"></div>
+                        <details class="world-director-details">
+                            <summary>Storage maintenance <span>Reclaim redundant old scene snapshots</span></summary>
+                            <p class="world-director-fact">Keeps every scene, pre-turn rewind checkpoint, and alternate reroll take. Only older single-take post-turn copies are removed.</p>
+                            <button id="world-optimize-snapshots" class="tool-btn" type="button">Optimize older scenes</button>
+                            <p id="world-optimize-snapshots-status" class="world-director-fact" role="status"></p>
+                        </details>
                     </section>
                 </aside>
             </div>
@@ -753,7 +803,7 @@
                         <button class="world-studio-tab" data-tab="w-lore">Global Lore</button>
                         <button class="world-studio-tab" data-tab="w-note">Author's Note</button>
                         <button class="world-studio-tab" data-tab="w-ai">AI Config</button>
-                        <button class="world-studio-tab" data-tab="w-hud">HUD & Stats</button>
+                        <button class="world-studio-tab" data-tab="w-hud">HUD, Stats &amp; Quests</button>
                         <button class="world-studio-tab" data-tab="w-visual-map">World Architect</button>
                         <button class="world-studio-tab" data-tab="w-architect-agent" style="color:var(--accent); font-weight:700;">✦ Architect Agent</button>
                         <button class="world-studio-tab" data-tab="w-builder" style="color:var(--accent); font-weight:700;">✨ AI Builder</button>
@@ -763,7 +813,8 @@
                         <button id="save-play-world-btn" class="btn btn-primary btn-full">Save &amp; Enter World</button>
                         <button id="open-scheduler-btn" class="btn btn-ghost btn-full" style="color:var(--accent);">🕒 NPC Schedules</button>
                         <button id="run-world-audit-btn" class="btn btn-ghost btn-full" style="color:var(--red);">🔍 World Audit</button>
-                        <button id="export-world-btn" class="btn btn-ghost btn-full">Export .horde_world</button>
+                        <button id="export-world-btn" class="btn btn-ghost btn-full" title="Exports the world template and media, not played timelines">Export world template</button>
+                        <button id="export-world-campaign-btn" class="btn btn-ghost btn-full" title="Download a verified portable ZIP with this world, every played timeline, and its media">Export playable campaign</button>
                         <button id="close-world-studio-btn" class="btn btn-ghost btn-full">Exit Studio</button>
                         <button id="delete-world-btn" class="btn btn-danger btn-full">Delete World</button>
                     </div>
@@ -1234,10 +1285,10 @@
                             <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px;">
                                  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
                                      <label class="form-label" style="margin:0; text-transform:uppercase; letter-spacing:0.05em; font-size:0.75rem; color:var(--text-muted, #8E8E93);">Context Size</label>
-                                     <span id="w-studio-context-size-val" style="font-family:monospace; font-size:0.85rem; font-weight:700; color:var(--red);">8,192</span>
+                                     <span id="w-studio-context-size-val" style="font-family:monospace; font-size:0.85rem; font-weight:700; color:var(--red);">32,768</span>
                                  </div>
                                  <div style="display:flex; align-items:center; gap:12px; margin-top:2px;">
-                                     <input type="range" id="w-studio-context-size" min="2048" max="102400" step="1024" value="8192" class="form-range" style="flex:1; accent-color:var(--red); cursor:pointer;">
+                                     <input type="range" id="w-studio-context-size" min="2048" max="102400" step="1024" value="32768" class="form-range" style="flex:1; accent-color:var(--red); cursor:pointer;">
                                  </div>
                                  <span id="w-studio-context-size-badge" class="form-hint" style="color: var(--success); font-weight:600; font-size:0.75rem; display:block; margin-top:6px;">⚖️ Balanced (Recommended)</span>
                             </div>
@@ -1273,7 +1324,7 @@
                                 </div>
                                 <div>
                                     <label class="form-label">Max Tokens</label>
-                                    <input type="number" id="w-studio-max-tokens" class="form-input" value="2048">
+                                    <input type="number" id="w-studio-max-tokens" class="form-input" value="4096">
                                 </div>
                             </div>
                         </div>
@@ -1345,6 +1396,19 @@
                                     <!-- Stats rendered here -->
                                 </div>
                                 <div class="form-hint" style="margin-top:10px;">Stats defined here appear in the HUD and are enforced by the rules engine. A maximum of 0 means uncapped.</div>
+                            </div>
+
+                            <div class="form-section world-starting-quests-section">
+                                <div class="world-starting-quests-heading">
+                                    <div>
+                                        <label class="form-label">Starting Quests</label>
+                                        <p class="form-hint">Tracked objectives given to each new timeline when the player begins. Existing timelines are never changed. Rewards are granted when the objectives are completed, not at setup.</p>
+                                    </div>
+                                    <button id="add-world-starting-quest-btn" type="button" class="tool-btn">+ Add starting quest</button>
+                                </div>
+                                <div id="w-starting-quests-warning" class="form-hint hidden" role="status"></div>
+                                <div id="w-starting-quests-list" class="world-starting-quests-list"></div>
+                                <div class="form-hint">A Starting Life’s obligations are story context. Add them here if they should have progress and rewards in the Quest Tracker.</div>
                             </div>
 
                             <div class="form-section">
@@ -5234,7 +5298,7 @@
 <script src="labs-core.js?v=20260822-v161"></script>
 <script src="labs-tasks.js?v=20260822-v161"></script>
 <script src="labs-guide.js?v=20260822-v161"></script>
-    <script src="help-system.js?v=20260925-v182"></script>
+    <script src="help-system.js?v=20261008-worlds-release"></script>
 <script src="labs-ui.js?v=20260822-v161"></script>
 <script src="rpg-mechanics.js?v=20260823-v166-rpg-release"></script>
 <script src="multiplayer-engine.js?v=20260902-v171"></script>
@@ -5257,6 +5321,8 @@
     <script src="virtual_humans/frontend/vh-page-builder.js?v=20260925-v182"></script>
     <script src="bundled-humans.js?v=20260913-v18-storage"></script>
     <script src="human-package.js?v=20260913-v18-storage"></script>
-    <script src="app.js?v=20260925-v182"></script>
+    <script src="large-archive.js?v=20261008-worlds-release"></script>
+    <script src="worlds/model-client.js?v=20261008-worlds-release"></script>
+    <script src="app.js?v=20261008-worlds-release"></script>
 </body>
 </html>

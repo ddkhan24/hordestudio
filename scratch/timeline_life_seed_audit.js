@@ -27,6 +27,59 @@ assert(plan.people.filter(person => /parent/.test(person.relationship_to_player)
 assert(plan.people.filter(person => /parent/.test(person.relationship_to_player)).every(person => person.day_location_id === 'hospital'), 'doctor parents were not assigned a workplace');
 assert(plan.people.some(person => /classmate|friend|rival/.test(person.relationship_to_player)), 'student received no persistent peers');
 
+const adultWorld = { id: 'office', name: '2005 Office Hours', description: 'A workplace.', locations: [
+    { id: 'reception', name: 'Reception Lobby', description: '', mapType: 'room' },
+    { id: 'bullpen', name: 'Main Bullpen', description: '', mapType: 'room' }
+], entities: [] };
+const adultPlan = context.fallbackTimelineLifePlan(adultWorld,
+    { id: 'adult_timeline', playerLocation: 'reception' }, null,
+    { name: 'The New Hire', role: 'employee', description: '' });
+assert.equal(new Set(adultPlan.people.map(person => person.name.toLowerCase())).size, adultPlan.people.length,
+    'fallback created two people with the same name');
+assert.equal(adultPlan.people.find(person => person.role === 'coworker')?.day_location_id, 'bullpen',
+    'fallback coworker did not receive the authored workplace');
+assert(!adultPlan.people.some(person => person.day_location_id === 'reception'),
+    'fallback populated the player opening room with unrelated acquaintances');
+
+const fantasyWorld = {
+    id: 'fantasy_watch', name: 'The Salt-Glass Watch',
+    description: 'A small fantasy frontier RPG with a missing courier.',
+    locations: [{ id: 'inn', name: 'The Reed Inn', description: 'Temporary lodging for travellers.' }],
+    entities: []
+};
+const rangerOrigin = {
+    id: 'ranger', name: 'The Ranger', role: 'marsh ranger', socialRank: 'outsider',
+    description: 'An itinerant ranger hired to find a courier.', startLocationId: 'inn'
+};
+const rangerSession = { id: 'ranger_timeline', playerLocation: 'inn' };
+const rangerPlan = context.fallbackTimelineLifePlan(fantasyWorld, rangerSession, null, rangerOrigin);
+assert.equal(rangerPlan.people.length, 0, 'model failure invented prior contacts for an outsider');
+assert.equal(rangerPlan.unfixed_home, true, 'model failure assigned an unverified home to an itinerant player');
+assert.equal(rangerPlan.home.name, undefined, 'model failure created a fictional family house for an itinerant player');
+
+const applyFallback = vm.runInNewContext(`${functionSource('applyTimelineLifePlan')}\napplyTimelineLifePlan`, {
+    isPlainObject: value => !!value && typeof value === 'object' && !Array.isArray(value),
+    getLocationRef: (world, ref) => world.locations.find(location => location.id === ref || location.name === ref) || null,
+    chooseTimelineHome: () => { throw new Error('unfixed fallback must not infer a home'); },
+    authoredStartingRelationshipSeeds: () => [],
+    safeJsonClone: value => JSON.parse(JSON.stringify(value)),
+    appendWorldLedgerEntry() {}, normalizeAuthoredWorld() {}, normalizeLivingWorldState() {}
+});
+const appliedRangerSession = {
+    ...rangerSession, entityStates: {}, npcRelationships: {}, npcScheduleOverrides: {}, originRelationshipNpcIds: []
+};
+applyFallback(fantasyWorld, appliedRangerSession, null, rangerOrigin, rangerPlan, 'deterministic_fallback');
+assert.equal(appliedRangerSession.playerIdentity.homeLocationId, '', 'starting inn was silently promoted to a fixed home');
+assert.equal(appliedRangerSession.lifeSeed.homeLocationId, '', 'unverified home leaked into life seed');
+assert.equal(appliedRangerSession.lifeSeed.people.length, 0, 'unverified people leaked into life seed');
+assert.equal(fantasyWorld.locations.length, 1, 'fallback created an unverified home location');
+
+const settledFantasyPlan = context.fallbackTimelineLifePlan(fantasyWorld,
+    { id: 'settled_timeline', playerLocation: 'inn' }, null,
+    { name: 'The Innkeeper', role: 'innkeeper', description: 'Keeps the local inn.' });
+assert(settledFantasyPlan.people.every(person => !/\b(?:Jamie|Morales|Chen|Sullivan)\b/.test(person.name)),
+    'the word “small” caused fantasy names to be misclassified as modern');
+
 const createSession = functionSource('createNewWorldSession');
 assert(/personaId:\s*state\.activePersonaId/.test(createSession), 'new timelines do not capture the active Persona');
 assert(/lifeSeed:\s*null/.test(createSession), 'new timelines lack explicit life initialization state');
@@ -39,6 +92,8 @@ assert(/relationshipToPlayer/.test(functionSource('applyTimelineLifePlan')), 'se
 assert(/homeLocationId/.test(functionSource('applyTimelineLifePlan')), 'seeded home is not committed to player identity');
 assert(/const authoredHome = getLocationRef\(world, origin\?\.homeLocationId\)/.test(functionSource('applyTimelineLifePlan')), 'the model can still override an authored player home');
 assert(/authoredStartingRelationshipSeeds\(world, origin\)\.forEach/.test(functionSource('applyTimelineLifePlan')), 'authored relationships are not merged back over model output');
+assert(/location: location\?\.id \|\| ''/.test(functionSource('applyTimelineLifePlan')),
+    'unspecified contacts still crowd the player opening room');
 
 world.groups = [{ id: 'family_mercer', name: 'Mercer Family', type: 'household' }];
 world.entities = [
@@ -61,4 +116,7 @@ console.log('✓ timeline-scoped Persona selection');
 console.log('✓ structured home and relationship commit');
 console.log('✓ reversible New Session Setup dismissal');
 console.log('✓ author-owned home, family, groups and relationships');
-console.log('\n7 timeline life-seed audits passed.');
+console.log('✓ unique fallback contacts remain offstage or at their workplace');
+console.log('✓ itinerant fallback avoids invented home and social graph');
+console.log('✓ fantasy setting does not trigger modern names from “small”');
+console.log('\n10 timeline life-seed audits passed.');

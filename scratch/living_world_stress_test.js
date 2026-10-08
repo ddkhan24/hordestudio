@@ -18,6 +18,7 @@ const context = {
     Math,
     Date,
     Map,
+    WeakMap,
     Set,
     Object,
     Array,
@@ -27,6 +28,7 @@ const context = {
     JSON,
     parseInt,
     structuredClone,
+    WORLD_ENGINE_DEADLINE_META: new WeakMap(),
     isPlainObject(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     },
