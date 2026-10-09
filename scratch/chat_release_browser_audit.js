@@ -21,6 +21,16 @@ const root = path.resolve(__dirname, '..');
         const pageErrors = []; page.on('pageerror', error => pageErrors.push(error.message));
         await page.goto('https://chat-release.test/');
         await page.waitForFunction(() => typeof companionAgencyTimer !== 'undefined' && !!companionAgencyTimer);
+        // Do not let legitimate post-paint bundle/agency saves consume a
+        // transaction-specific storage fault or overwrite fixture state.
+        await page.evaluate(() => {
+            clearInterval(companionAgencyTimer); clearInterval(companionAlwaysOnTimer);
+        });
+        await page.waitForFunction(() =>
+            ['bundledHumans', 'vectorMemory', 'companionAgency', 'alwaysOn']
+                .every(name => typeof window.__hordeStartup?.background?.[name] === 'number')
+            && !saveStateInFlight && !worldSaveInFlight && !virtualHumanSaveInFlight,
+            null, { timeout: 30000 });
         const result = await page.evaluate(async () => {
             clearInterval(companionAgencyTimer); clearInterval(companionAlwaysOnTimer);
             labsProposal = async () => null;
@@ -130,10 +140,16 @@ const root = path.resolve(__dirname, '..');
             const prompt = JSON.stringify(requests[0].messages);
             ok(prompt.includes('A_SECRET') && prompt.includes('PERSONA_A') && prompt.includes('Persona A') && !prompt.includes('B_SECRET') && !prompt.includes('PERSONA_B'), 'memory lookup and macro expansion retain the original session and persona after navigation');
 
-            fixture(); let writes = 0; transport(() => json('Complete despite quota')); input.value = 'Save safely';
-            persistStateSnapshot = async (...args) => { if (++writes === 2) throw new DOMException('Fixture disk full', 'QuotaExceededError'); return realPersist(...args); };
+            fixture(); let failedFinalSave = false; transport(() => json('Complete despite quota')); input.value = 'Save safely';
+            persistStateSnapshot = async (...args) => {
+                if (!failedFinalSave && a.messages.some(message => message.role === 'assistant' && message.content === 'Complete despite quota')) {
+                    failedFinalSave = true;
+                    throw new DOMException('Fixture disk full', 'QuotaExceededError');
+                }
+                return realPersist(...args);
+            };
             await handleChat(); persistStateSnapshot = realPersist; await realSave();
-            ok(a.messages.length === 2 && a.messages.at(-1).content === 'Complete despite quota' && (await HordeDB.get('chats')).a[0].messages.length === 2, 'storage failure preserves the complete reply for retry without duplicating or restoring another take');
+            ok(failedFinalSave && a.messages.length === 2 && a.messages.at(-1).content === 'Complete despite quota' && (await HordeDB.get('chats')).a[0].messages.length === 2, 'storage failure preserves the complete reply for retry without duplicating or restoring another take');
 
             fixture(); transport(() => new Promise(() => {})); const nativeTimeout = window.setTimeout;
             window.setTimeout = (fn, ms, ...args) => nativeTimeout(fn, ms === 120000 ? 20 : ms, ...args);
