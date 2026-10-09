@@ -12,7 +12,7 @@ assert(sources.every(Boolean), 'World model diagnostic helpers must remain extra
 
 let saves = 0;
 const context = vm.createContext({
-    Date, Math, Number, String, Array, performance,
+    Date, Math, Number, String, Array, performance, AbortController, setTimeout, clearTimeout,
     state: { globalSettings: { apiProvider: 'openrouter' } },
     window: { HordeLabs: { currentConfig: () => ({ runtime: 'needle', model: '' }) } },
     saveWorldsState: async () => { saves++; },
@@ -36,7 +36,9 @@ const context = vm.createContext({
     Response
 });
 context.HordeWorldModelClient = {
-    json: options => modelClient.json({ ...options, fetcher: context.fetch })
+    json: options => modelClient.json({ ...options, fetcher: context.fetch }),
+    stream: options => modelClient.stream({ ...options, fetcher: context.fetch }),
+    readText: modelClient.readText
 };
 vm.runInContext(`const WORLD_MODEL_ATTEMPT_LIMIT = 120;\n${sources.join('\n')}`, context);
 
