@@ -9,10 +9,15 @@ const { chromium, launchOptions } = require('./browser_runtime').browserRuntime(
 
 async function main() {
     const args = process.argv.slice(2);
-    if (!args[0] || args.length > 3 || (args.length > 1 && args[1] !== '--output'))
-        throw Error('Usage: node scratch/portable_browser_release_audit.js ARCHIVE [--output REPORT.json]');
+    const usage = 'Usage: node scratch/portable_browser_release_audit.js ARCHIVE [--output REPORT.json] [--expect-version VERSION]';
+    if (!args[0] || (args.length - 1) % 2) throw Error(usage);
+    const options = new Map();
+    for (let index = 1; index < args.length; index += 2) {
+        if (!['--output', '--expect-version'].includes(args[index]) || !args[index + 1] || options.has(args[index])) throw Error(usage);
+        options.set(args[index], args[index + 1]);
+    }
     const archive = path.resolve(args[0]);
-    const output = args[2] && path.resolve(args[2]);
+    const output = options.get('--output') && path.resolve(options.get('--output'));
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'horde portable browser '));
     const server = spawn(process.env.PYTHON || 'python3', [path.join(__dirname, 'portable_browser_server.py'), archive, temporary],
         { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -60,6 +65,8 @@ async function main() {
         const boot = await page.goto(base + '/index.html', { waitUntil: 'load' });
         assert.equal(boot.status(), 200);
         await page.waitForFunction(() => typeof companionAgencyTimer !== 'undefined' && !!companionAgencyTimer, null, { timeout: 45000 });
+        const appVersion = await page.evaluate(() => HORDE_STUDIO_VERSION);
+        if (options.has('--expect-version')) assert.equal(appVersion, options.get('--expect-version'), 'Packaged app reports the wrong release version.');
         const installed = await page.evaluate(async humans => {
             clearInterval(companionAgencyTimer);
             clearInterval(companionAlwaysOnTimer);
@@ -116,7 +123,7 @@ async function main() {
         assert.deepEqual(pageErrors, [], 'Packaged page raised JavaScript errors.');
         assert.deepEqual(cspViolations, [], 'Packaged app violated its CSP.');
         assert.deepEqual(failedLocalResponses, [], 'Packaged local resources/API requests failed.');
-        const report = { archive, archiveSha256: fixture.archiveSha256, nodeVersion: fixture.nodeVersion,
+        const report = { archive, appVersion, archiveSha256: fixture.archiveSha256, nodeVersion: fixture.nodeVersion,
             nativeNode: fixture.nativeNode, kernelVersion: fixture.kernelVersion,
             installed, navigation, ranges, isolation, deniedExternal: [...new Set(deniedExternal)],
             pageErrors, cspViolations, failedLocalResponses };

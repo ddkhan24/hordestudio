@@ -10,8 +10,8 @@ const WORLD_SHARD_FORMAT = 'gzip-json-v1';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
-const HORDE_STUDIO_VERSION = '18.3.0';
-const HORDE_STUDIO_RELEASED_AT = '2026-09-30T19:26:55Z';
+const HORDE_STUDIO_VERSION = '18.3.5';
+const HORDE_STUDIO_RELEASED_AT = '2026-10-09T18:47:15Z';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
 let worldMediaDirty = false;
