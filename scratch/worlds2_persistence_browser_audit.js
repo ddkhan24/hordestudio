@@ -24,6 +24,18 @@ const root = path.resolve(__dirname, '..');
         page.on('pageerror', error => errors.push(error.message));
         await page.goto('https://worlds2-persistence.test/');
         await page.waitForFunction(() => typeof companionAgencyTimer !== 'undefined' && !!companionAgencyTimer, { timeout: 30000 });
+        // Startup installs bundled humans and wakes independent background
+        // tasks after first paint. Finish those legitimate saves before tracing
+        // only the scoped World transactions below; elapsed time is no barrier.
+        await page.evaluate(() => {
+            clearInterval(companionAgencyTimer);
+            clearInterval(companionAlwaysOnTimer);
+        });
+        await page.waitForFunction(() =>
+            ['bundledHumans', 'vectorMemory', 'companionAgency', 'alwaysOn']
+                .every(name => typeof window.__hordeStartup?.background?.[name] === 'number')
+            && !saveStateInFlight && !worldSaveInFlight && !virtualHumanSaveInFlight,
+            null, { timeout: 30000 });
         const initial = await page.evaluate(async () => {
             clearInterval(companionAgencyTimer);
             clearInterval(companionAlwaysOnTimer);
@@ -57,6 +69,7 @@ const root = path.resolve(__dirname, '..');
                 keys.includes('worldInstance:worlds2_scoped_fixture')
                 && !keys.includes('worldInstance:worlds2_inactive_fixture')
                 && !keys.includes('worldInstances'));
+            const activeWorldWriteKeys = scopedWrites.map(keys => [...keys]);
             scopedWrites.length = 0;
             await saveState();
             const ordinarySaveAvoidsTimelineClones = scopedWrites.length > 0 && scopedWrites.every(keys =>
@@ -119,7 +132,7 @@ const root = path.resolve(__dirname, '..');
                 request.onsuccess = () => resolve(request.result);
                 request.onerror = () => reject(request.error);
             });
-            return { untouched, migrated, activeOnly, ordinarySaveAvoidsTimelineClones,
+            return { untouched, migrated, activeOnly, activeWorldWriteKeys, ordinarySaveAvoidsTimelineClones,
                 explicitFullFlushIncludesBoth, inactiveBackgroundSaveIsTargeted, mediaExcludedBeforeClone,
                 receiptsRestoreWithoutCopyingHistory,
                 compressedShard: rawShard?.$hordeWorldShard === 'gzip-json-v1'
@@ -129,7 +142,7 @@ const root = path.resolve(__dirname, '..');
         });
         assert.equal(initial.untouched, true);
         assert.equal(initial.migrated, true);
-        assert.equal(initial.activeOnly, true);
+        assert.equal(initial.activeOnly, true, JSON.stringify(initial.activeWorldWriteKeys));
         assert.equal(initial.ordinarySaveAvoidsTimelineClones, true);
         assert.equal(initial.explicitFullFlushIncludesBoth, true);
         assert.equal(initial.inactiveBackgroundSaveIsTargeted, true);
