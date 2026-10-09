@@ -4,6 +4,7 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const suites = [
+    'worlds_release_edge_browser_audit',
     'world_scene_draft_browser_audit',
     'world_hosted_replay_audit',
     'world_check_outcome_contract_browser_audit',

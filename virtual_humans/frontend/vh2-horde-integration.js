@@ -45,6 +45,15 @@ function vh2RefreshControlsAfterHostChange(companion){
 const VH2_PROFILE_TRANSFER_FIELDS=Object.freeze(['age','allowPhotos','allowVideoClips','allowVoiceNotes','initiativeMode','knownBeforeDays','libidoBaseline','libidoEnabled','desirePattern','sexualInitiative','intimacyBoundaries','alcoholPattern','mindProfile','embodimentProfile','cognitionProfile','lifeWeatherEnabled','location','locationLabel','locationLatitude','locationLongitude','locationMode','occupation','pronouns','sexualConfidence','sexualRiskAppetite','sleepArchetype','socialAccessRules','socialAdultLevel','socialAudience','socialContentTypes','socialCurrency','socialFeedEnabled','socialFeedImages','socialMonetization','socialPhotoRatio','socialPlatform','socialPlayerRole','socialPostFrequency','socialPostingRules','socialSubscriptionPrice','socialThirstTrapLevel','socialWritingStyle','timezone','timezoneOffsetMinutes','videoAudio','videoDuration','videoModel','videoProvider','videoReferencePolicy','videoResolution','videoStyleRules','connectionType','connectionRole','relationshipContext','priorContact','socialWorld','privateLife','routine','playerKnowledge','initialMotive','connectionAuthenticity','startingScenario','openingMode','openingMessage']);
 function vh2ConversationQuery(timeline){const id=timeline?.vh2?.conversationPersonaId||timeline?.vh2?.canonicalPersonaId;return id?'&personaId='+encodeURIComponent(id):'';}
 const vh2ConversationOpenLocks=new Set();
+function vh2CopyLifeOwnership(life,chat){
+ // Persona inboxes share one physical life and its current host. In particular,
+ // a cloud conversation must never fall through to the local recovery copy.
+ for(const key of ['hostId','handoffId','localMirrorRevision','localMirrorSavedAt','localMirrorError','localMirrorAttemptedAt']){
+  if(Object.prototype.hasOwnProperty.call(life.vh2,key))chat.vh2[key]=life.vh2[key];
+  else delete chat.vh2[key];
+ }
+ chat.vh2.assetUrls={};
+}
 async function vh2OpenPersonaConversation(companion,personaId){
  const persona=state.personas.find(p=>p.id===personaId);if(!persona)throw Error('Choose a saved persona.');
  if(vh2ConversationOpenLocks.has(companion.id))throw Error('A conversation is already opening.');
@@ -60,8 +69,9 @@ async function vh2OpenPersonaConversation(companion,personaId){
   if(chat?.vh2.conversationDeleted){chat.vh2.conversationDeleted=false;chat.name=persona.name||'Conversation';chat.messages=[];}
   if(!chat){
    chat=normalizeCompanionTimeline({id:'vh_chat_'+crypto.randomUUID(),name:persona.name||'Conversation',personaId,personaPinned:true,messages:[],runtime:captureCompanionRuntime(companion),vh2:{worldId:life.vh2.worldId,conversationPersonaId:id,outbox:[],error:'',running:life.vh2.running}},companion);
-   store.sessions.push(chat);await saveVirtualHumansState();
+   store.sessions.push(chat);
   }
+  vh2CopyLifeOwnership(life,chat);await saveVirtualHumansState();
   await vh2Poll(companion,chat,{force:true,throwOnError:true});
   store.sessions=store.sessions.filter(t=>t===chat||!t.vh2?.conversationDeleted);activateCompanionTimeline(companion.id,chat.id);await saveVirtualHumansState();renderCompanionThread();return chat;
  }finally{vh2ConversationOpenLocks.delete(companion.id);}
@@ -104,27 +114,13 @@ function vh2ConversationActionDialog(companion,action){
 function vh2Linked(companion){return companion&&getActiveCompanionTimeline(companion.id)?.vh2;}
 function vh2TextOnly(companion){if(!vh2Linked(companion))return false;showToast('This action is not connected to VH2 yet. Photos and simulated posts are available in the VH2 controls; calls are not available in VH2 yet.','info');return true;}
 function vh2TextBudgetSummary(provider){
- if(!provider||provider.stale)return 'Text request usage unavailable. Reconnect to review the saved limits.';
- const d=provider.budgets?.dialogue,b=provider.budgets?.background;
- if(!d)return 'Text request budgets need an updated local service.';
- if(d.legacy)return `Legacy shared text cap: ${d.used} / ${d.limit} today for this character, across chat, social posts and adviser reviews. Resets at midnight UTC. Review or remove this saved cap.`;
- return `Chat & calls: ${d.used}${d.limit===null?' today · local daily cap off':` / ${d.limit} today`}. Background posts & adviser: ${b.used} / ${b.limit} today. Per character, across its lives. Resets at midnight UTC.`;
-}
-function vh2RenderTextBudgetNotice(companion){
- const composer=document.querySelector('#companion-chat-view .companion-composer')||document.querySelector('.companion-composer');if(!composer)return;
- let notice=document.getElementById('vh-text-budget-notice');const timeline=getActiveCompanionTimeline(companion.id);
- if(!timeline?.vh2){notice?.remove();return;}
- if(!notice){notice=document.createElement('details');notice.id='vh-text-budget-notice';notice.className='form-hint';const summary=document.createElement('summary');summary.dataset.usageHeading='';const text=document.createElement('p');text.dataset.budgetSummary='';const button=document.createElement('button');button.type='button';button.className='btn btn-ghost';button.textContent='Text request budgets';const details=document.createElement('button');details.type='button';details.className='btn btn-ghost';details.dataset.replyDetails='';details.textContent='Reply details';notice.append(summary,text,button,details);composer.before(notice);}
- const provider=timeline.vh2.textProvider,budget=provider?.budgets?.dialogue;
- const blocked=budget&&Number.isFinite(budget.limit)&&budget.used>=budget.limit;
- const needsAttention=!provider||provider.stale||!budget||budget.legacy||blocked;
- notice.querySelector('[data-usage-heading]').textContent=blocked?'Chat request allowance reached — review limits':budget?.legacy?'Review saved chat allowance':needsAttention?'Chat usage unavailable — connection details':'Usage & reply details';
- // Reveal a newly actionable condition, but preserve the user's disclosure choice during polling.
- const attentionKey=needsAttention?(blocked?'blocked':budget?.legacy?'legacy':'unavailable'):'';
- if(attentionKey&&notice.dataset.attention!==attentionKey)notice.open=true;
- notice.dataset.attention=attentionKey;
- notice.querySelector('[data-budget-summary]').textContent=vh2TextBudgetSummary(provider);
- notice.querySelector('button').onclick=()=>vh2OpenTextBudgets(companion,timeline);notice.querySelector('[data-reply-details]').onclick=()=>vh2OpenReplyDetails(companion,timeline);
+ if(!provider||provider.stale)return 'Text request usage unavailable. Refresh the connection to check this life.';
+ if(provider.configured===false)return 'No text provider is configured for this character. Connect a model before requesting replies.';
+ if(provider.textLimitsEnforced!==false)return 'This life is connected to an older VH2 service that may still enforce saved text-request limits. Update the local life service to remove them.';
+ const usage=provider.usage||{};
+ const dialogue=Number(usage.dialogue??provider.budgets?.dialogue?.used??0);
+ const background=Number(usage.background??provider.budgets?.background?.used??0);
+ return `Requests recorded today: chat & calls ${dialogue}; background posts & adviser ${background}. Horde Studio has no daily text-request limit. Your model provider may still charge or apply its own limits. Automatic background posts and adviser reviews can incur charges while enabled. Counts reset at midnight UTC.`;
 }
 async function vh2OpenReplyDetails(companion,timeline=getActiveCompanionTimeline(companion.id)){
  if(!timeline?.vh2)return;
@@ -139,25 +135,6 @@ async function vh2OpenReplyDetails(companion,timeline=getActiveCompanionTimeline
  }catch(error){if(d.open)status.textContent=error.message;}
  f.onsubmit=e=>e.preventDefault();
 }
-async function vh2OpenTextBudgets(companion,timeline=getActiveCompanionTimeline(companion.id)){
- const d=vhProductDialog('Text request budgets','Applies only to this character, across its lives. Chat replies and calls use dialogue requests; social captions and daily life reviews use background requests. Images and videos have separate controls.');
- const f=d.querySelector('form'),status=d.querySelector(':scope > [role=status]');status.textContent='Loading current usage…';
- try{const saved=await vh2Request(timeline,'/vh2/dialogue-provider?scope='+encodeURIComponent('horde:'+companion.id));if(!d.open)return;
-  if(!saved.configured)throw Error('Configure this character’s text provider first.');
-  const budget=saved.budgets?.dialogue;if(!budget)throw Error('Restart the updated local service to use separate text budgets.');
-  const limits=saved.budgetPolicy||{dialogueDailyLimit:saved.dailyLimit,backgroundDailyLimit:saved.dailyLimit};
-  f.innerHTML='<p data-usage></p><label class="vh-choice-row"><input type="checkbox" name="capped">Limit chat and call requests per day</label><label>Chat & call allowance<input name="dialogue" type="number" min="0" max="1000" required></label><label>Background social & adviser allowance<input name="background" type="number" min="0" max="1000" required></label><p>Zero blocks that category. Turning off the chat cap permits provider-billed conversation requests without a local daily ceiling. Feature switches still control whether background posts and reviews run. Saving does not retry failed requests.</p><button type="submit">Save text budgets</button>';
-  f.querySelector('[data-usage]').textContent=vh2TextBudgetSummary(saved);f.elements.capped.checked=limits.dialogueDailyLimit!==null;f.elements.dialogue.value=limits.dialogueDailyLimit??100;f.elements.background.value=limits.backgroundDailyLimit;
-  const toggle=()=>{f.elements.dialogue.disabled=!f.elements.capped.checked;};f.elements.capped.onchange=toggle;toggle();
-  status.textContent=budget.legacy?'The old shared cap is still enforced. Save to explicitly replace it with the separate limits shown above.':'Usage counts reserved submissions, including failed or uncertain provider outcomes. Limits reset at midnight UTC.';
-  f.onsubmit=async event=>{event.preventDefault();const button=f.querySelector('[type=submit]');button.disabled=true;
-   try{if(getCompanion(companion.id)!==companion||getActiveCompanionTimeline(companion.id)!==timeline)throw Error('The character or selected life changed. Reopen its budgets.');
-    await vh2SyncProvider(companion,{timeline,budgetPolicy:{version:1,dialogueDailyLimit:f.elements.capped.checked?Number(f.elements.dialogue.value):null,backgroundDailyLimit:Number(f.elements.background.value)}});
-    const confirmed=await vh2Request(timeline,'/vh2/dialogue-provider?scope='+encodeURIComponent('horde:'+companion.id));if(timeline?.vh2)timeline.vh2.textProvider=confirmed;f.querySelector('[data-usage]').textContent=vh2TextBudgetSummary(confirmed);status.textContent='Text budgets saved. No provider request was submitted or retried.';vh2RenderTextBudgetNotice(companion);
-   }catch(error){status.textContent=error.message;}finally{button.disabled=false;}
-  };
- }catch(error){if(d.open)status.textContent=error.message;}
-}
 async function vh2SyncProvider(companion,options={}){
     const timeline=options.timeline||getActiveCompanionTimeline(companion.id);
     const provider=companionTextProviderId(companion);
@@ -169,13 +146,10 @@ async function vh2SyncProvider(companion,options={}){
     const headers=providerAuthHeaders(provider),key=(headers.Authorization||'').replace(/^Bearer\s+/i,'');
     const config={scope:'horde:'+companion.id,baseUrl:providerApiBase(provider),model:companion.model||state.globalSettings.defaultModel,
         apiKey:key,clearKey:true,enabled:providerHasCredentials(provider),maxTokens:Math.min(4096,companionProviderOutputBudget(companion)),
-        preserveDailyLimit:true,temperature:Math.max(0,Math.min(2,Number(companion.temperature??.8))),dailyLimit:6,
-        defaultBudgetPolicy:{version:1,dialogueDailyLimit:null,backgroundDailyLimit:state.globalSettings.companionAlwaysOnEnabled&&companion.alwaysOnEnabled?(state.globalSettings.companionAlwaysOnDailyLimit||6):6},
-        ...(options.budgetPolicy?{budgetPolicy:options.budgetPolicy}:{}),
-        ...(options.updateDailyLimit&&state.globalSettings.companionAlwaysOnEnabled&&companion.alwaysOnEnabled?{updateBackgroundDailyLimit:state.globalSettings.companionAlwaysOnDailyLimit||6}:{})};
+        temperature:Math.max(0,Math.min(2,Number(companion.temperature??.8)))};
     const signature=JSON.stringify(config);
     const signatureKey=companion.id+'|'+(timeline?.vh2?.hostId||'local');
-    if(options.budgetPolicy||vh2ProviderSignatures.get(signatureKey)!==signature){
+    if(vh2ProviderSignatures.get(signatureKey)!==signature){
         await vh2Request(timeline,'/vh2/dialogue-provider',{method:'POST',body:config});
         vh2ProviderSignatures.set(signatureKey,signature);
     }
@@ -193,7 +167,8 @@ async function vh2EnqueueOwned(timeline,type,extra={}){
     const key=crypto.randomUUID();
     if(typeof vhTrackUiCommand==='function')vhTrackUiCommand(key);
     const conversationPersonaId=timeline.vh2.conversationPersonaId||timeline.vh2.canonicalPersonaId;
-    timeline.vh2.outbox.push({schemaVersion:1,key,type,...(conversationPersonaId?{conversationPersonaId}:{}),...extra});
+    timeline.vh2.outbox.push({schemaVersion:1,key,type,...(conversationPersonaId?{conversationPersonaId}:{}),...extra,
+        ...(type==='receive_message'?{conversationGeneration:timeline.vh2.conversationGeneration||0}:{})});
     if(type==='receive_message'){
         timeline.messages.push(normalizeCompanionMessage({id:'vh2-pending:'+key,role:'user',type:'text',text:extra.text,timestamp:Date.now(),deliveryState:'sent',awaitingReply:true}));
         // Paint the local receipt before IndexedDB clones a large life and
@@ -203,7 +178,17 @@ async function vh2EnqueueOwned(timeline,type,extra={}){
     try{await saveVirtualHumansState();}catch(error){
         // A command whose durable enqueue failed must not be sent by a later poll.
         timeline.vh2.outbox=timeline.vh2.outbox.filter(command=>command.key!==key);
-        if(type==='receive_message')timeline.messages=timeline.messages.filter(message=>message.id!=='vh2-pending:'+key);
+        if(type==='receive_message'){
+            // Keep the user's text in memory for emergency export, but never
+            // present it as delivered or submit an undurable command.
+            const pending=timeline.messages.find(message=>message.id==='vh2-pending:'+key);
+            if(pending){
+                pending.deliveryState='failed';pending.deliveredAt=0;pending.awaitingReply=false;
+                if(extra.messageType==='photo'&&typeof extra.attachment==='string')pending.photo=extra.attachment;
+                if(extra.messageType==='voice'&&typeof extra.attachment==='string')pending.audio=extra.attachment;
+            }
+            if(getActiveCompanionTimeline()===timeline&&state.view==='companionChat')renderCompanionThread();
+        }
         throw error;
     }
     return key;
@@ -400,7 +385,8 @@ async function vh2PollOwned(companion,timeline,options={}){
         const textProvider=light?link.textProvider:vh2ProviderRead(optional[3],link.textProvider);
         const rawServiceStatus=!light&&optional[4].status==='fulfilled'?optional[4].value:null;
         const serviceStatus=rawServiceStatus?{dialogueError:rawServiceStatus.dialogueError||'',lastError:rawServiceStatus.lastError||'',worldError:(rawServiceStatus.worlds||[]).find(world=>world.worldId===link.worldId)?.error||''}:(link.serviceStatus||{});
-        if(!light)link.optionalProviderErrors=optional.map((result,index)=>result.status==='rejected'?{capability:['Background jobs','Background images','Flights','Text request budgets','Local reply worker'][index],message:String(result.reason?.message||'Unavailable')}:null).filter(Boolean);
+        if(Number.isFinite(rawServiceStatus?.serverNow)){link.serverNow=rawServiceStatus.serverNow;link.serverNowSyncedAt=Date.now();}
+        if(!light)link.optionalProviderErrors=optional.map((result,index)=>result.status==='rejected'?{capability:['Background jobs','Background images','Flights','Text usage','Local reply worker'][index],message:String(result.reason?.message||'Unavailable')}:null).filter(Boolean);
         const workerSignature=JSON.stringify([workerStatus,imageProvider,flightProvider,textProvider,serviceStatus]);
         link.lastSyncedAt=Date.now();if(!light)link.lastFullSyncedAt=link.lastSyncedAt;link.imageStudioFingerprint??=vh2ImageStudioFingerprint(companion);
         const s=projection.state,c=s.truth.companion;link.runtimeReboot=s.runtimeReboot||null;link.currentAge=companionCurrentAge(c);link.calendarAges=c.vh2Calendar?.ages||{};
@@ -466,7 +452,9 @@ async function vh2CreateTimeline(companion){
     await vh2ImportStarterProfile(companion);
 }
 function vh2RenderControls(companion){
-    vh2RenderTextBudgetNotice(companion);
+    // Diagnostics belong in Life status, not between the transcript and composer.
+    // Clean up a panel left by an earlier in-page render as well.
+    document.getElementById('vh-text-budget-notice')?.remove();
     if(typeof vhRenderSystemStatus==='function')vhRenderSystemStatus(companion);
     // These controls live exclusively inside Live Human. Building the entire
     // workspace during every chat render made long conversations and ordinary
@@ -477,15 +465,22 @@ function vh2RenderControls(companion){
     const forceHostRefresh=host.dataset.forceHostRefresh==='true';delete host.dataset.forceHostRefresh;
     if(!forceHostRefresh&&host.dataset.controlTimeline===timeline?.id&&host.contains?.(document.activeElement)&&document.activeElement?.matches?.('input, textarea, select'))return;
     const controlSignature=JSON.stringify([timeline?.id||'',link?.revision??'',link?.running??'',link?.autoReplies??'',link?.error||'',link?.dialogueError||'',link?.requiresMigration||false,link?.workerSignature||'',link?.replyJob?.id||'',link?.replyJob?.status||'',link?.replyJob?.reason||'',link?.transcriptBefore??'',link?.hostId||'',link?.localMirrorRevision||0,link?.localMirrorSavedAt||0,link?.localMirrorError||'',vh2PhotoLocks.has(timeline?.id)]);
-    if(!forceHostRefresh&&host.dataset.controlSignature===controlSignature&&host.children.length)return;
+    if(!forceHostRefresh&&host.dataset.controlSignature===controlSignature&&host.children.length){
+        // The expensive control tree can stay cached, but the Life Overview
+        // clock must still move as wall time and the service projection change.
+        if(typeof vhWorkspaceSection!=='undefined'&&vhWorkspaceSection==='overview'
+            &&typeof vhOverviewClockSignature==='function'&&typeof vhArrangeWorkspace==='function'
+            &&host.dataset.overviewClockSignature!==vhOverviewClockSignature(timeline))vhArrangeWorkspace(companion,timeline);
+        return;
+    }
     const expanded=host.dataset.controlTimeline===timeline?.id?new Set([...host.querySelectorAll('details[open]')].map(d=>d.querySelector(':scope > summary')?.textContent)):new Set();
     if(typeof vhRememberPanels==='function')vhRememberPanels(host);
     host.dataset.controlTimeline=timeline?.id||'';
     for(const id of ['companion-fork-timeline-btn','cc-real-time-life','cc-reply-delays','cc-allow-no-reply','cc-silence-consequences','cc-reply-bursts']){const control=document.getElementById(id);if(control)control.disabled=!!link;}
     if(link){const reroll=document.getElementById('companion-reroll-btn');if(reroll)reroll.disabled=true;}
     const replySummary=link&&(link.error||link.dialogueError||link.replyJob?.reason||(link.replyJob?`Reply: ${link.replyJob.status}`:link.autoReplies===false?'Automatic replies are off. Messages remain saved after attention becomes available.':'Replies follow attention.'));
-    host.innerHTML=link?`<strong>VH2 timeline · ${link.running?'Life running':'Life paused'}</strong><p class="form-hint">${escapeHTML(replySummary)}</p><button type="button" class="tool-btn" data-vh2-pause>${link.running?'Pause life':'Resume life'}</button><button type="button" class="tool-btn" data-vh2-refresh>Refresh / retry connection</button>${link.replyJob?.status==='unknown'?'<button type="button" class="tool-btn" data-vh2-ack>Acknowledge uncertain submission (no retry)</button>':''}${['failed','abandoned','superseded'].includes(link.replyJob?.status)?'<button type="button" class="tool-btn" data-vh2-retry>Retry reply using configured model</button>':''}<p class="form-hint">Profile snapshot. Text, photo gallery, simulated posts and shared plans use this timeline. Calls share the life transcript and attention. Timeline rewinds are not supported here yet. Your profile is configurable per chat. Gifts use the service-owned controls below. Previous data is retained for export and migration. Uses the character model. Review Text request budgets in chat for this character’s usage and limits.</p>`:
-        '<button type="button" class="tool-btn" data-vh2-create>Start VH2 text timeline (experimental)</button><p class="form-hint">Creates a fresh life from this profile; preserves this timeline. Automatic replies use your selected model and provider credits while the local service runs. New lives have separate dialogue and background budgets. Review Text request budgets in chat.</p>';
+    host.innerHTML=link?`<strong>VH2 timeline · ${link.running?'Life running':'Life paused'}</strong><p class="form-hint">${escapeHTML(replySummary)}</p><button type="button" class="tool-btn" data-vh2-pause>${link.running?'Pause life':'Resume life'}</button><button type="button" class="tool-btn" data-vh2-refresh>Refresh / retry connection</button>${link.replyJob?.status==='unknown'?'<button type="button" class="tool-btn" data-vh2-ack>Acknowledge uncertain submission (no retry)</button>':''}${['failed','abandoned','superseded'].includes(link.replyJob?.status)?'<button type="button" class="tool-btn" data-vh2-retry>Retry reply using configured model</button>':''}<p class="form-hint">Profile snapshot. Text, photo gallery, simulated posts and shared plans use this timeline. Calls share the life transcript and attention. Timeline rewinds are not supported here yet. Your profile is configurable per chat. Gifts use the service-owned controls below. Previous data is retained for export and migration. Uses the character model. Review text usage in chat; provider charges and rate limits still apply.</p>`:
+        '<button type="button" class="tool-btn" data-vh2-create>Start VH2 text timeline (experimental)</button><p class="form-hint">Creates a fresh life from this profile; preserves this timeline. Automatic replies use your selected model and provider credits while the local service runs. Horde Studio does not impose a daily text-request limit; provider charges and rate limits still apply.</p>';
     vh2RenderBackupControls(host,companion,timeline);
     if(link){vh2ExtendedTravelControls(host,companion,timeline);vh2ReferenceStudyControls(host,companion,timeline);}
     if(link){
@@ -866,7 +861,7 @@ function vh2RenderSocial(companion,content,button,author=false){
     }
     const draftHost=document.createElement('details');draftHost.className='vh-feed-drafts';draftHost.innerHTML='<summary>Posting activity</summary>';if((link.socialPosts||[]).some(p=>p.status==='draft'))content.append(draftHost);
     for(const draft of (link.socialPosts||[]).filter(p=>p.status==='draft')){
-        const status=document.createElement('p');status.className='form-hint';status.setAttribute('role','status');status.textContent=draft.generationError||draft.imageError||(draft.imagePending?'Photo selected for this post. Waiting for its image before publishing.':draft.captionReady?'Caption ready; waiting for an available moment to publish.':'Social draft awaiting the configured text model and request budget.');draftHost.append(status);
+        const status=document.createElement('p');status.className='form-hint';status.setAttribute('role','status');status.textContent=draft.generationError||draft.imageError||(draft.imagePending?'Photo selected for this post. Waiting for its image before publishing.':draft.captionReady?'Caption ready; waiting for an available moment to publish.':'Social draft awaiting the configured text model.');draftHost.append(status);
         if(draft.imagePending){const progress=document.createElement('button');progress.type='button';progress.className='tool-btn';progress.textContent='View post image';progress.onclick=()=>vh2OpenImageActivity(companion,timeline);draftHost.append(progress);}
         if(draft.generationError){const retry=document.createElement('button');retry.type='button';retry.className='tool-btn';retry.textContent='Regenerate post';retry.title='New generation attempt using your provider credits';retry.onclick=async()=>{retry.disabled=true;retry.textContent='Queuing regeneration…';try{await vhUiCommand(timeline,'regenerate_social_draft',{postId:draft.id});renderCompanionSocialPanel(companion);}catch(error){retry.disabled=false;retry.textContent='Regenerate post';showToast(error.message,'error');}};draftHost.append(retry);const dismiss=document.createElement('button');dismiss.type='button';dismiss.className='tool-btn';dismiss.textContent='Dismiss draft without retrying generation';dismiss.onclick=async()=>{dismiss.disabled=true;try{await vhUiCommand(timeline,'dismiss_social_draft',{postId:draft.id});renderCompanionSocialPanel(companion);}catch(error){showToast(error.message,'error');}finally{dismiss.disabled=false;}};draftHost.append(dismiss);}
     }

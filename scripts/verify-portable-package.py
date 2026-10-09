@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import stat
 import sys
 import tempfile
 import zipfile
@@ -19,9 +20,18 @@ def main():
     scripts = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix='horde portable smoke ') as folder:
         with zipfile.ZipFile(args.archive) as archive:
+            assert archive.testzip() is None, 'Portable ZIP is damaged'
+            names = [entry.filename for entry in archive.infolist()]
+            assert len(names) == len(set(names)), 'Portable ZIP contains duplicate paths'
             for entry in archive.infolist():
                 path = Path(folder) / entry.filename
                 assert path.resolve().is_relative_to(Path(folder).resolve()), entry.filename
+                assert stat.S_IFMT(entry.external_attr >> 16) != stat.S_IFLNK, entry.filename
+                assert not any(part in {'.env', '.git', '.venv', '__pycache__', '.DS_Store', '.wrangler',
+                    'node_modules', 'mcp-auth.json', 'always-on-queue.json', 'storage-state.json', 'cookies.json'}
+                    or part.startswith('.env.') and part != '.env.example'
+                    or part.endswith(('.pyc', '.pyo', '.sqlite', '.sqlite-wal', '.sqlite-shm', '.db', '.log'))
+                    for part in Path(entry.filename).parts), entry.filename
             archive.extractall(folder)
             for entry in archive.infolist():
                 mode = entry.external_attr >> 16
@@ -43,9 +53,9 @@ def main():
                     assert target.is_file(), (str(html.relative_to(app)), reference)
         for checker in ('verify-portable-vh2.py', 'verify-portable-humans.py'):
             command = [sys.executable, str(scripts / checker), str(app)]
-            if args.node and checker == 'verify-portable-vh2.py':
-                command.extend(['--node', str(args.node.resolve())])
             subprocess.run(command, check=True, timeout=90)
+            if args.node and checker == 'verify-portable-vh2.py':
+                subprocess.run(command + ['--node', str(args.node.resolve())], check=True, timeout=90)
         # Check both root and app-local virtual environments and both POSIX
         # launchers from a directory with spaces, without opening a browser.
         if os.name != 'nt':
@@ -72,6 +82,7 @@ isolated = pathlib.Path(sys.argv[1])
 pathlib.Path.home = classmethod(lambda cls: isolated)
 os.environ['XDG_CONFIG_HOME'] = str(isolated)
 os.environ['APPDATA'] = str(isolated)
+os.environ['HORDE_CONFIG_DIR'] = str(isolated)
 import horde_mcp_bridge as bridge
 server = bridge.ThreadingHTTPServer(('127.0.0.1', 0), bridge.BridgeHandler)
 thread = threading.Thread(target=server.serve_forever, daemon=True)

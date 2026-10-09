@@ -79,10 +79,10 @@ function updateCommunicationControls(){
     const ready=inbox?.messages.some(m=>m.awaitingReply&&m.attention?.stage==='ready');
     $('send-message').disabled=disabled;
     const active=['queued','leased','submitted','unknown'].includes(inbox?.replyJob?.status);
-    $('generate-model').disabled=disabled||!ready||active||!providerState?.enabled||providerState.usedToday>=providerState.dailyLimit;
+    $('generate-model').disabled=disabled||!ready||active||!providerState?.enabled;
     $('dismiss-unknown').classList.toggle('hidden',inbox?.replyJob?.status!=='unknown');
     $('dismiss-unknown').disabled=disabled;
-    text('model-health',inbox?.replyJob?.status==='unknown'?'The provider may have billed this request. Acknowledge to clear the blocked job; this does not retry it.':providerState?.enabled?`${providerState.model} · ${providerState.usedToday}/${providerState.dailyLimit} requests today`:'Model generation is disabled. Configure it below to enable explicit requests.');
+    text('model-health',inbox?.replyJob?.status==='unknown'?'The provider may have billed this request. Acknowledge to clear the blocked job; this does not retry it.':providerState?.enabled?`${providerState.model} · ${providerState.usedToday} requests recorded today · provider charges and rate limits still apply`:'Model generation is disabled. Configure it below to enable explicit requests.');
     $('queue-dialogue').disabled=disabled||!ready||['queued','leased','submitted','unknown'].includes(inbox?.replyJob?.status);
     $('stage-reply').disabled=disabled||projection?.state.running||!ready;
     $('deliver-reply').disabled=disabled||projection?.state.running||!ready||inbox?.draft?.contextRevision!==projection?.revision;
@@ -91,15 +91,15 @@ async function refreshProvider(){
     providerState=await api('/vh2/dialogue-provider');
     if(providerVersion!==providerState.version){
         if(providerState.configured){
-            for(const [id,key] of [['base','baseUrl'],['model','model'],['tokens','maxTokens'],['limit','dailyLimit'],['temperature','temperature']])$('provider-'+id).value=providerState[key];
+            for(const [id,key] of [['base','baseUrl'],['model','model'],['tokens','maxTokens'],['temperature','temperature']])$('provider-'+id).value=providerState[key];
             $('provider-enabled').checked=providerState.enabled;
         }
         providerVersion=providerState.version;
     }
-    text('provider-status',providerState.configured?`${providerState.enabled?'Enabled':'Disabled'} · ${providerState.hasKey?'Key saved':'No key saved'} · ${providerState.usedToday}/${providerState.dailyLimit} requests today`:'No dialogue provider configured.');
+    text('provider-status',providerState.configured?`${providerState.enabled?'Enabled':'Disabled'} · ${providerState.hasKey?'Key saved':'No key saved'} · ${providerState.usedToday} requests recorded today · no Horde text-request cap`:'No dialogue provider configured.');
 }
 $('provider-form').onsubmit=e=>{e.preventDefault();perform(async()=>{
-    await api('/vh2/dialogue-provider',{baseUrl:$('provider-base').value,model:$('provider-model').value,apiKey:$('provider-key').value,clearKey:$('provider-clear').checked,enabled:$('provider-enabled').checked,maxTokens:Number($('provider-tokens').value),dailyLimit:Number($('provider-limit').value),temperature:Number($('provider-temperature').value)});
+    await api('/vh2/dialogue-provider',{baseUrl:$('provider-base').value,model:$('provider-model').value,apiKey:$('provider-key').value,clearKey:$('provider-clear').checked,enabled:$('provider-enabled').checked,maxTokens:Number($('provider-tokens').value),temperature:Number($('provider-temperature').value)});
     $('provider-key').value='';$('provider-clear').checked=false;await refresh();
 });};
 $('generate-model').onclick=()=>perform(()=>command('queue_dialogue',{adapter:'chat_completions'}));

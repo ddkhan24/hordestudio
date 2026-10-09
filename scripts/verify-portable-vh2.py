@@ -2,11 +2,39 @@
 """Check shipped VH2 dependencies and optionally boot an isolated timeline."""
 import argparse
 import ast
+import os
+import platform
 import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+RUNTIME_TARGETS = (
+    ('darwin-arm64', 'node'), ('darwin-x86_64', 'node'),
+    ('linux-x86_64', 'node'), ('linux-aarch64', 'node'),
+    ('windows-amd64', 'node.exe'), ('windows-arm64', 'node.exe'),
+)
+
+def verify_bundled_node(app):
+    runtime = app / 'runtime'
+    version = runtime / 'node-version.txt'
+    license_file = runtime / 'LICENSE'
+    missing = [str(path.relative_to(app)) for path in (version, license_file)
+               if not path.is_file()]
+    for directory, filename in RUNTIME_TARGETS:
+        path = runtime / directory / filename
+        if not path.is_file() or path.stat().st_size == 0:
+            missing.append(str(path.relative_to(app)))
+    if missing:
+        raise ValueError('Portable VH2 Node runtime missing: ' + ', '.join(missing))
+    if version.read_text(encoding='utf-8').strip() != 'v24.21.0':
+        raise ValueError('Portable VH2 Node runtime version is not the validated v24.21.0.')
+    native = runtime / f'{platform.system().lower()}-{platform.machine().lower()}' / (
+        'node.exe' if os.name == 'nt' else 'node')
+    if not native.is_file() or (os.name != 'nt' and not os.access(native, os.X_OK)):
+        raise ValueError('Portable VH2 Node runtime is not executable for this computer: ' + str(native))
+    return native
 
 def verify(app):
     required = {app / name for name in (
@@ -52,7 +80,9 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('app',type=Path);parser.add_argument('--node',type=Path)
     args=parser.parse_args();app=args.app.resolve();verify(app)
-    if args.node:
+    bundled = verify_bundled_node(app) if (app / 'runtime').exists() or not args.node else None
+    node = args.node or bundled
+    if node:
         with tempfile.TemporaryDirectory(prefix='vh2-portable-smoke-') as temporary:
             code="""
 import sys
@@ -67,6 +97,6 @@ try:
  print('Packaged timeline boot, advance and replay passed.')
 finally:s.close()
 """
-            subprocess.run([sys.executable,'-c',code,str(args.node.resolve()),temporary],cwd=app,check=True,timeout=60)
+            subprocess.run([sys.executable,'-c',code,str(node.resolve()),temporary],cwd=app,check=True,timeout=60)
 
 if __name__=='__main__':main()

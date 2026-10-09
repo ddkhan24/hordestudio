@@ -6,6 +6,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { buildContext, functionSource: sharedFunctionSource } = require('./app_source.js');
 
 const root = path.resolve(__dirname, '..');
 const app = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
@@ -57,10 +58,7 @@ function matchSpan(startIndex, openChar, closeChar, label, searchFrom = startInd
 }
 
 function functionSource(name) {
-    const start = app.indexOf(`function ${name}(`);
-    assert(start >= 0, `Missing function: ${name}`);
-    const params = matchSpan(start, '(', ')', `params of ${name}`);
-    return matchSpan(start, '{', '}', `function ${name}`, start + params.length);
+    return sharedFunctionSource(name);
 }
 
 const tests = [];
@@ -129,10 +127,7 @@ test('CSS-facing values reject declaration injection', () => {
 });
 
 test('nested import schemas reject malformed records', () => {
-    const context = {};
-    const start = app.indexOf('function isPlainObject');
-    const end = app.indexOf('function validateBackupData', start);
-    vm.runInNewContext(`${app.slice(start, end)}\nthis.validateCharacterData = validateCharacterData; this.validateRoomData = validateRoomData; this.validateWorldData = validateWorldData;`, context);
+    const context = buildContext(vm, ['validateCharacterData', 'validateRoomData', 'validateWorldData']);
     assert.throws(() => context.validateCharacterData({ name: 'Bad', tags: [{}] }));
     assert.throws(() => context.validateRoomData({ name: 'Bad', characterIds: ['../../escape'] }));
     assert.throws(() => context.validateWorldData({ name: 'Bad', locations: [{ name: 'Here', exits: [null] }] }));
@@ -159,7 +154,8 @@ test('movement uses one authoritative routed graph across typed, clicked, and to
     assert(app.includes('function movePlayerAlongWorldPath'));
     assert(movementSource.includes('movePlayerAlongWorldPath'));
     assert(renderSource.includes('resolveWorldExitTarget'));
-    assert(renderSource.includes('movePlayerAlongWorldPath'));
+    assert(renderSource.includes('travelThroughWorldExit'));
+    assert(functionSource('travelThroughWorldExit').includes('movePlayerAlongWorldPath'));
     assert(actionSource.includes('movePlayerAlongWorldPath'));
     assert(executeSource.includes('movementPreserved'));
     assert(executeSource.includes('Movement completed to'));
@@ -176,7 +172,7 @@ test('world ledger has deterministic fallbacks and snapshot-safe manual saves', 
     assert(actionSource.includes('buildStructuredLedgerFallback'));
     assert(app.includes('Chronicle recovered locally'));
     assert(html.includes('id="world-ledger-status"'));
-    assert(app.includes('await saveState();\n            renderWorldPlayState();'));
+    assert(/await saveWorldsState\(\);\s+renderWorldPlayState\(\);/.test(app));
     assert(functionSource('stripChatLedgerEntry').includes('worldLedgerEntryKey'));
 });
 
@@ -245,15 +241,11 @@ test('world clock cannot produce negative days or hours', () => {
 });
 
 test('turn snapshots restore timeline state without replacing shared authored geography', () => {
-    const context = {};
-    vm.runInNewContext([
-        functionSource('isPlainObject'),
-        functionSource('safeJsonClone'),
-        functionSource('captureWorldTurnState'),
-        functionSource('restoreWorldTurnState'),
-        'function bumpMemoryEpoch() {}',
-        'this.capture = captureWorldTurnState; this.restore = restoreWorldTurnState;'
-    ].join('\n'), context);
+    const context = buildContext(vm, ['captureWorldTurnState', 'restoreWorldTurnState'], {
+        state: { worldInstances: {} }, bumpMemoryEpoch() {}
+    });
+    context.capture = context.captureWorldTurnState;
+    context.restore = context.restoreWorldTurnState;
     const world = { locations: [{ id: 'a', name: 'A' }], entities: [{ id: 'n', name: 'N' }, { id: 'owned', name: 'Owned', sessionOrigin: 's' }] };
     const session = {
         id: 's',
@@ -313,7 +305,8 @@ test('quest engine is authoritative across prompts, tools, fallbacks, resets, an
     assert(executeSource.includes('const questPrompt = getQuestPrompt(world, sess)'));
     assert(executeSource.includes('${questPrompt}${npcContext}'));
     assert(executeSource.includes('evaluateQuestProgress(world, sess)'));
-    assert(executeSource.includes('tool_choice: "auto"'));
+    assert(/tool_choice:\s*receiptFirstToolCall/.test(executeSource));
+    assert(executeSource.includes("name: 'commit_world_turn' } } : 'auto'"));
     assert(executeSource.includes('name: "commit_world_turn"'));
     assert(executeSource.includes('objectives: {'));
     assert(executeSource.includes('faction_reputation: {'));
@@ -385,8 +378,15 @@ test('API keys are not exported and device persistence remains opt-in', () => {
     const exportStart = app.indexOf('function exportFullBackup');
     const exportEnd = app.indexOf('function importFullBackup', exportStart);
     assert(!/apiKey\s*:\s*state\.apiKey/.test(app.slice(exportStart, exportEnd)));
-    assert(/globalSettings:\s*redactGlobalSettingsCredentials\(state\.globalSettings\)/.test(app.slice(exportStart, exportEnd)),
-        'nested local and Labs credentials can leak through globalSettings');
+    assert(functionSource('exportFullBackup').includes('...inMemoryBackupPayload()'));
+    const context = buildContext(vm, ['redactGlobalSettingsCredentials']);
+    const settings = { localApiKey: 'LOCAL', embeddingApiKey: 'EMBED', localTtsApiKey: 'TTS',
+        localImageApiKey: 'IMAGE', labs: { apiKey: 'LABS', model: 'local-model' },
+        vh2SelfHosts: { private: { accessToken: 'PRIVATE', url: 'https://private.invalid' } } };
+    const exported = context.redactGlobalSettingsCredentials(settings);
+    assert(!JSON.stringify(exported).match(/LOCAL|EMBED|TTS|IMAGE|LABS|PRIVATE/));
+    assert.equal(exported.labs.model, 'local-model');
+    assert.equal(settings.localApiKey, 'LOCAL', 'redaction must not remove credentials from the running app');
     const saveStart = app.indexOf('async function persistStateSnapshot');
     const saveEnd = app.indexOf('// Global Error Handler', saveStart);
     assert(/apiKey:\s*state\.globalSettings\.rememberApiKey\s*\?[\s\S]*:\s*''/.test(app.slice(saveStart, saveEnd)));
@@ -398,7 +398,7 @@ test('responsive and accessibility safeguards exist', () => {
     assert(app.includes("overlay.setAttribute('aria-modal', 'true')"));
     assert(app.includes("if (event.key === 'Escape')"));
     assert(css.includes('.world-narrative-col {\n    flex: 1;\n    min-width: 0;'));
-    assert(css.includes('flex: 0 0 320px'));
+    assert(/\.world-status-col\s*\{[^}]*min-width:\s*0;[^}]*box-sizing:\s*border-box;/.test(css));
     assert(css.includes('#world-play-view .chat-toolbar'));
 });
 
@@ -416,12 +416,12 @@ test('New Session Setup has explicit commit and reversible dismissal paths', () 
 });
 
 test('world API errors do not consume the same response body twice', () => {
-    const start = app.indexOf("let response = await fetch(apiBase() + '/chat/completions'");
-    const end = app.indexOf("if (!response.body)", start);
-    const source = app.slice(start, end);
-    assert(source.includes('let errBody = await response.text()'));
-    assert(source.includes('if (!response.ok) errBody = await response.text()'));
-    assert(!source.includes('const finalErr = await response.text()'));
+    const turn = functionSource('executeWorldTurn');
+    const start = turn.indexOf("let activeStream = await fetchWorldTurnStream");
+    const source = turn.slice(start, turn.indexOf('if (!response.body)', start));
+    assert.match(source, /let errBody = await HordeWorldModelClient\.readText\(response, controller\.signal\)/);
+    assert.match(source, /response = activeStream\.response;\s+if \(!response\.ok\)\s*\{\s*errBody = await HordeWorldModelClient\.readText/);
+    assert.doesNotMatch(source, /const finalErr = await/);
 });
 
 let failures = 0;

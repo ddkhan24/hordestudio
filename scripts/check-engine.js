@@ -6,6 +6,9 @@ for (const file of ['worlds/scene-draft.js','worlds/turn-context.js']) {
     if (spawnSync(process.execPath,['--check',file],{cwd:root,stdio:'inherit'}).status !== 0) process.exit(1);
 }
 const suites = [
+    'embedding_release_audit', 'engine_audit', 'chat_image_delivery_audit', 'chat_image_transaction_release_audit', 'chat_memory_audit', 'chat_capabilities_audit',
+    'multiplayer_engine_audit', 'multiplayer_release_transaction_regression', 'multiplayer_model_deadline_regression',
+    'video_worlds_audit', 'video_worlds_release_job_regression', 'vh_release_ownership_audit',
     'world_scene_draft_audit',
     'world_turn_context_audit',
     'browser_runtime_audit', 'freaky_preset_integration_audit',

@@ -976,10 +976,11 @@ test('Virtual Human archive filenames are portable and use the dedicated extensi
 });
 
 test('full backups include Virtual Humans and their timeline stores', () => {
-    const source = functionSource('exportFullBackup');
-    assert(source.includes('companions: state.companions'));
-    assert(source.includes('companionTimelines: portableCompanionTimelineState(state.companionTimelines)'));
-    assert(source.includes('companionThreads: state.companionThreads'));
+    const payload = functionSource('inMemoryBackupPayload');
+    assert(payload.includes('companions: state.companions'));
+    assert(payload.includes('companionTimelines: portableCompanionTimelineState(state.companionTimelines)'));
+    assert(payload.includes('companionThreads: state.companionThreads'));
+    assert(functionSource('exportFullBackup').includes('...inMemoryBackupPayload()'));
 });
 
 test('legacy photo data migrates into a display profile without losing its generation reference', () => {

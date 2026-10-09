@@ -7,7 +7,7 @@ HORDE STUDIO — START HERE
    Linux: run ./start-horde-studio.sh in a terminal
 3. Keep the terminal open while using Horde Studio in your browser.
 
-Python 3 (or uv) is required. Virtual Humans also require Node.js 18+.
+Python 3 (or uv) is required. This package includes Node.js for Virtual Humans on macOS, Windows and glibc Linux. Alpine/musl Linux needs its own Node.js 18+ installation.
 The launcher opens the browser automatically.
 
 The app folder contains the supporting code, media, and documentation.

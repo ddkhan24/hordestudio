@@ -48,10 +48,12 @@
     let setupComplete = false;
     let generationToken = 0;
     let videoGenerationController = null;
+    let videoGenerationSession = null;
     let generationClock = null;
     let generationStartedAt = 0;
     let generationPhase = '';
     const resumedVideoJobs = new Set();
+    const inflightVideoSessions = new Set();
 
     const byId = id => document.getElementById(id);
     const html = value => String(value ?? '').replace(/[&<>'"]/g, character => ({
@@ -195,6 +197,9 @@
     }
 
     function ensureState() {
+        // A library visit must not replace a session object while an async paid
+        // render is still writing to it. Normalize again once its work settles.
+        if (inflightVideoSessions.size) return;
         state.videoWorlds = Array.isArray(state.videoWorlds) ? state.videoWorlds.map(normalizeWorld) : [];
         state.videoWorldSessions = state.videoWorldSessions && typeof state.videoWorldSessions === 'object'
             && !Array.isArray(state.videoWorldSessions) ? state.videoWorldSessions : {};
@@ -1084,11 +1089,12 @@
 
     function cancelGeneration() {
         if (!videoGenerationController) return;
-        const session = activeSession(activeWorld(), false);
+        const session = videoGenerationSession || activeSession(activeWorld(), false);
         const jobId = session?.pendingVideoJob?.jobId;
         generationToken++;
         videoGenerationController.abort();
         videoGenerationController = null;
+        videoGenerationSession = null;
         if (jobId) {
             const provider = session?.pendingVideoJob?.provider === 'hotapi' ? 'hotapi' : 'fal';
             session.pendingVideoJob = null;
@@ -1150,28 +1156,55 @@
                 const error = new Error(job.error || `Video job ${job.status}.`);
                 error.code = job.errorCode || '';
                 error.fields = Array.isArray(job.errorFields) ? job.errorFields : [];
+                error.videoJobTerminal = true;
                 throw error;
             }
             const attempt = job.currentModel ? ` ${VIDEO_RENDERER_LABELS[job.currentModel] || SPICY_RENDERER_LABELS[job.currentModel] || job.currentModel}` : '';
             const providerLabel = provider === 'hotapi' ? 'HotAPI' : 'Fal';
             setGenerationDetail(job.status === 'queued' ? `${providerLabel} accepted the shot. Waiting for a renderer…` : `${attempt.trim() || providerLabel} is filming the scripted scene…`);
             await new Promise((resolve, reject) => {
-                const timer = setTimeout(resolve, 1200);
-                signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('Generation cancelled.', 'AbortError')); }, { once: true });
+                const finish = (done, value) => {
+                    clearTimeout(timer);
+                    signal?.removeEventListener('abort', onAbort);
+                    done(value);
+                };
+                const onAbort = () => finish(reject, new DOMException('Generation cancelled.', 'AbortError'));
+                const timer = setTimeout(() => finish(resolve), 1200);
+                signal?.addEventListener('abort', onAbort, { once: true });
+                if (signal?.aborted) onAbort();
             });
         }
-        throw new Error(`Video generation exceeded ${provider === 'hotapi' ? 'sixteen' : 'six'} minutes. The job remains recoverable after reloading.`);
+        const error = new Error(`Video generation exceeded ${provider === 'hotapi' ? 'sixteen' : 'six'} minutes. The job remains recoverable after reloading.`);
+        error.code = 'VIDEO_JOB_PENDING';
+        throw error;
     }
 
     async function requestVideoRender(session, pending, body, signal, provider = 'fal') {
+        let submittedJobId = '';
         try {
             const submitted = await mcpBridgeRequest(`/${provider}/video/jobs`, {
                 method: 'POST', timeoutMs: 15000, signal, body
             });
-            session.pendingVideoJob = { ...pending, provider, jobId: submitted.jobId, createdAt: Date.now() };
+            if (!submitted?.jobId) throw new Error('The video bridge did not return a recoverable job ID. Check the bridge before retrying.');
+            submittedJobId = submitted.jobId;
+            session.pendingVideoJob = { ...pending, provider, jobId: submittedJobId, createdAt: Date.now() };
             await saveState();
             return await waitForVideoJob(submitted.jobId, signal, provider);
         } catch (error) {
+            if (submittedJobId) {
+                if (error.videoJobTerminal) {
+                    if (session.pendingVideoJob?.jobId === submittedJobId) {
+                        session.pendingVideoJob = null;
+                        await saveState();
+                    }
+                } else {
+                    // Losing status polling is not evidence that the provider
+                    // failed. Retain the acknowledged job and never pay a
+                    // fallback provider to duplicate a still-running render.
+                    if (error.name !== 'AbortError') error.code = 'VIDEO_JOB_PENDING';
+                    throw error;
+                }
+            }
             if (provider === 'hotapi') {
                 if (/Unknown MCP provider|Unknown bridge endpoint|request failed \(404\)/i.test(error.message || '')) {
                     throw new Error('HotAPI support needs the current local bridge. Restart Horde Studio once, then retry.');
@@ -1205,6 +1238,7 @@
             return await requestVideoRender(session, pending, renderBody, signal, 'fal');
         } catch (error) {
             if (signal?.aborted || error?.name === 'AbortError') throw error;
+            if (error?.code === 'VIDEO_JOB_PENDING') throw error;
             if (world.contentRoute !== 'standard_then_spicy') throw error;
             session.pendingVideoJob = null;
             await saveState();
@@ -1230,10 +1264,15 @@
     }
 
     async function finishVideoJob(world, session, pending, result) {
-        if (!result?.mediaId || session.shots.some(shot => shot.mediaId === result.mediaId)) {
+        const existing = session.shots.find(shot => shot.mediaId === result?.mediaId);
+        if (!result?.mediaId || existing) {
+            if (existing && pending.prepared && pending.storyNodeId) {
+                const node = blockNode(session, pending.storyNodeId);
+                if (node) { node.shotId = existing.id; node.renderError = ''; }
+            }
             session.pendingVideoJob = null;
             await saveState();
-            return null;
+            return existing || null;
         }
         const plan = pending.plan || normalizeBeatPlan({ sceneSummary: pending.action, videoPrompt: pending.prompt });
         const shot = normalizeShot({
@@ -1253,10 +1292,18 @@
             inferenceSeconds: result.inferenceSeconds, createdAt: Date.now()
         });
         session.shots.push(shot);
+        if (pending.prepared && pending.storyNodeId && session.storyBlock) {
+            const node = blockNode(session, pending.storyNodeId);
+            if (node) { node.shotId = shot.id; node.renderError = ''; }
+        }
         session.pendingVideoJob = null;
         if (!pending.prepared) session.transitionFrame = pending.transitionFrame || '';
         session.spent = session.shots.reduce((sum, item) => sum + item.cost, 0) + (session.referenceSpend || 0);
         session.updatedAt = Date.now();
+        // Save the playable media/node binding before the slower frame capture.
+        // An unrelated autosave or reload in this interval must not leave a paid
+        // prepared shot orphaned and submit the same scene a second time.
+        await saveState();
         setGenerationDetail('Shot saved. Capturing its final continuity frame…');
         let capturedFrame = '';
         try {
@@ -1288,29 +1335,38 @@
 
     async function resumeVideoJob(world, session) {
         const pending = session?.pendingVideoJob;
-        if (!pending?.jobId || resumedVideoJobs.has(pending.jobId)) return;
+        if (!pending?.jobId || inflightVideoSessions.size || resumedVideoJobs.has(pending.jobId)) return;
         resumedVideoJobs.add(pending.jobId);
+        inflightVideoSessions.add(session);
+        const token = ++generationToken;
         const controller = new AbortController();
         videoGenerationController = controller;
+        videoGenerationSession = session;
         let recoveredNode = null;
         setGenerating(true, 'Recovering the selected video scene…');
         try {
             const result = await waitForVideoJob(pending.jobId, controller.signal, pending.provider === 'hotapi' ? 'hotapi' : 'fal');
+            if (token !== generationToken) return;
             const shot = await finishVideoJob(world, session, pending, result);
+            if (token !== generationToken) return;
             recoveredNode = shot && pending.storyNodeId ? blockNode(session, pending.storyNodeId) : null;
             if (shot && recoveredNode) await activateStoryNode(session, recoveredNode, shot);
             renderPlay();
             if (shot) showToast(`Recovered shot ${shot.index}.`, 'success');
         } catch (error) {
             if (error.name !== 'AbortError') {
-                session.pendingVideoJob = null;
+                if (error.videoJobTerminal) session.pendingVideoJob = null;
                 await saveState();
                 showToast(error.message || 'Could not recover the video job.', 'error');
             }
         } finally {
             resumedVideoJobs.delete(pending.jobId);
-            if (videoGenerationController === controller) videoGenerationController = null;
-            setGenerating(false);
+            inflightVideoSessions.delete(session);
+            if (videoGenerationController === controller) {
+                videoGenerationController = null;
+                videoGenerationSession = null;
+            }
+            if (token === generationToken) setGenerating(false);
         }
     }
 
@@ -1498,6 +1554,8 @@
         const world = activeWorld();
         const session = activeSession(world, false);
         if (!world || !session) return;
+        if (inflightVideoSessions.size) return;
+        if (session.pendingVideoJob?.jobId) return resumeVideoJob(world, session);
         const needsFal = world.contentRoute !== 'spicy_first';
         const needsHotApi = world.contentRoute !== 'standard';
         if ((needsFal && !state.falApiKey) || (needsHotApi && !state.hotapiApiKey)) {
@@ -1517,6 +1575,8 @@
         videoGenerationController?.abort();
         const controller = new AbortController();
         videoGenerationController = controller;
+        videoGenerationSession = session;
+        inflightVideoSessions.add(session);
         const deadline = setTimeout(() => controller.abort(), 30 * 60 * 1000);
         setGenerating(true, resume ? 'Resuming the opening video…' : 'The Director is cheaply planning the complete text decision tree…');
         try {
@@ -1560,7 +1620,11 @@
             }
         } finally {
             clearTimeout(deadline);
-            if (videoGenerationController === controller) videoGenerationController = null;
+            inflightVideoSessions.delete(session);
+            if (videoGenerationController === controller) {
+                videoGenerationController = null;
+                videoGenerationSession = null;
+            }
             if (token === generationToken) { setGenerating(false); renderPlay(); }
         }
     }
@@ -1572,6 +1636,8 @@
         const choice = current?.choices?.find(item => item.targetId === targetId);
         const target = blockNode(session, targetId);
         if (!world || !session || !choice || !target) return showToast('That planned branch is unavailable.', 'error');
+        if (inflightVideoSessions.size) return;
+        if (session.pendingVideoJob?.jobId) return resumeVideoJob(world, session);
         const maximum = shotCost(world);
         if (!blockNodeShot(session, target) && session.spent + maximum > world.sessionBudget + 0.000001) {
             return showToast(`This chosen scene can cost up to ${money(maximum)}, exceeding the remaining timeline budget.`, 'error');
@@ -1580,6 +1646,8 @@
         videoGenerationController?.abort();
         const controller = new AbortController();
         videoGenerationController = controller;
+        videoGenerationSession = session;
+        inflightVideoSessions.add(session);
         const deadline = setTimeout(() => controller.abort(), 30 * 60 * 1000);
         setGenerating(true, `Choice locked: ${choice.label}. Filming only this branch…`);
         try {
@@ -1598,7 +1666,11 @@
             }
         } finally {
             clearTimeout(deadline);
-            if (videoGenerationController === controller) videoGenerationController = null;
+            inflightVideoSessions.delete(session);
+            if (videoGenerationController === controller) {
+                videoGenerationController = null;
+                videoGenerationSession = null;
+            }
             if (token === generationToken) { setGenerating(false); renderPlay(); }
         }
     }
@@ -1731,6 +1803,7 @@
     window.HordeVideoWorlds = {
         setup,
         onView,
+        hasPendingWork() { return inflightVideoSessions.size > 0; },
         normalizeWorld,
         normalizeSession,
         normalizeStoryBlock,

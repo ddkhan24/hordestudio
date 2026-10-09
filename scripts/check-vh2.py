@@ -26,6 +26,9 @@ def main():
     args.output.mkdir(parents=True,exist_ok=True)
     try:node=node_executable(ROOT)
     except RuntimeError as error:parser.error(str(error))
+    # The offline suites spawn new processes; pass through the same runtime
+    # selected from this checkout's .env rather than relying on their PATH.
+    os.environ['HORDE_NODE_EXECUTABLE'] = node
     commands=[('runtime_discovery',[sys.executable,'scratch/test_runtime_audit.py']),('engine',[node,'scripts/check-engine.js'])]
     commands.append(('multiweek',[node,'scratch/vh2_multiweek_acceptance.js',str(args.output/'multiweek-results.json')]))
     commands.append(('network_multiweek',[node,'scratch/vh2_network_multiweek_audit.js',str(args.output/'network-multiweek-results.json')]))
@@ -41,10 +44,15 @@ def main():
     commands.append(('coordinate_edit',[sys.executable,'scratch/vh2_coordinate_edit_audit.py']))
     commands.append(('authored_context',[sys.executable,'scratch/vh2_authored_context_audit.py']))
     commands.append(('dialogue_context',[sys.executable,'scratch/vh2_dialogue_context_audit.py']))
+    commands.append(('dialogue_worker_diagnostic',[sys.executable,'scratch/vh2_dialogue_worker_diagnostic_audit.py']))
     commands.append(('authored_profile_contract',[node,'scratch/vh_authored_profile_contract_audit.js']))
-    for suite in ('personal_calendar','life_adviser','story_service','complete_builder','compatibility','social_awareness','social_worker','weather','calls','starter_social','foundation','migration','horde_integration','dialogue','conversation_quality','texting','provider','communication','memory','media','transcript','outing_service','social','presence_service','plans_service','agency_service','library','backup','npc_service','population_service','people_service','relationship_lifecycle','gifts','travel_service','ecosystem','workers','lifestyle','extended_travel','reference_studies','calendar','player','history','delivery_gaps','realtime','live_data','expression_matrix','flights','feed_discovery','open_airports','flow_overhaul'):
+    for suite in ('personal_calendar','life_adviser','story_service','complete_builder','compatibility','social_awareness','social_worker','weather','calls','starter_social','foundation','migration','horde_integration','dialogue','conversation_quality','texting','provider','communication','memory','media','transcript','outing_service','social','presence_service','plans_service','agency_service','library','backup','npc_service','population_service','people_service','relationship_lifecycle','gifts','travel_service','ecosystem','workers','lifestyle','extended_travel','reference_studies','calendar','player','history','delivery_gaps','realtime','live_clock','live_data','expression_matrix','flights','feed_discovery','open_airports','flow_overhaul'):
         commands.append((suite,[sys.executable,'scratch/vh2_'+suite+'_audit.py']))
+    for suite in ('vh_release_durability_audit', 'vh_release_generation_audit', 'bridge_release_audit', 'multiplayer_runtime_audit', 'multiplayer_integrated_ui_audit', 'mcp_bridge_audit', 'bridge_tls_audit', 'test_stage_node_runtimes', 'portable_release_audit'):
+        commands.append((suite, [sys.executable, 'scratch/' + suite + '.py']))
+    commands.append(('relay_runtime', [node, 'scratch/relay_runtime_audit.js']))
     if args.browser:
+        commands.append(('vh_release_remote_persona_browser', [node, 'scratch/vh_release_remote_persona_browser_audit.js']))
         commands.append(('human_package_browser',[node,'scratch/human_package_browser_audit.js']))
         commands.append(('social_profile_browser',[node,'scratch/vh_social_profile_browser_audit.js']))
         commands.append(('conversations_export_browser',[node,'scratch/vh_conversations_export_browser_audit.js']))

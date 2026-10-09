@@ -533,11 +533,6 @@ class DialogueQueue:
             if not current or not json.loads(current['config'])['enabled']:
                 self.transition(db,job,'failed','Provider disabled before submission.');return None
             config,secret=s.dialogue_provider.resolve(db,job['snapshot']['provider']['version'])
-            # Both the frozen request and current settings must permit this
-            # submission. Configuration changes never relax an already queued job.
-            error=s.dialogue_provider.budget_error(db,config,'dialogue') or s.dialogue_provider.budget_error(db,json.loads(current['config']),'dialogue')
-            if error:
-                self.transition(db,job,'failed',error);return None
             db.execute('INSERT INTO dialogue_usage VALUES (?,?)',(job['id'],s.clock()))
             db.execute("UPDATE dialogue_jobs SET status='submitted',lease_until=? WHERE id=?",(s.clock()+LEASE_MS,job['id']))
             revision,state=s.read(db,job['world_id']);state=vh2_conversations.job_view(state,job);after=json.loads(encode(state))

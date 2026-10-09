@@ -383,6 +383,10 @@ class WorldService:
         self._thread = None
         self._dialogue_thread = None
         self.dialogue_error = ''
+        # Keep diagnostics deliberately separate from exception text: provider
+        # transports and local configuration can contain credentials.
+        self.dialogue_diagnostic = {'state':'healthy','consecutiveFailures':0,
+                                    'lastFailure':None,'lastRecoveredAt':None}
         self.dialogue = DialogueQueue(self, Conflict)
         self.dialogue_provider = ProviderStore(self)
         self.last_error = ''
@@ -450,6 +454,7 @@ class WorldService:
             db.executescript(vh2_media.SCHEMA)
             db.executescript(DIALOGUE_SCHEMA)
             db.executescript(PROVIDER_SCHEMA)
+            self.dialogue_provider.retire_saved_caps(db)
             db.executescript(vh2_transcript.SCHEMA)
             db.executescript(vh2_memory.SCHEMA)
             db.executescript(vh2_library.SCHEMA)
@@ -506,7 +511,7 @@ class WorldService:
 
     def kernel(self, payload):
         if not self.node:
-            raise ValueError('Node.js is required for the VH2 simulation.')
+            raise ValueError('VH2 cannot run because the local service cannot find Node.js 18 or newer. Install Node.js or set HORDE_NODE_EXECUTABLE in this app’s .env file, then restart Horde Studio. No life change was committed.')
         if self.kernel_fingerprint()!=self.source_fingerprint:
             raise Conflict('Engine files changed; restart the local service before upgrading this test world.')
         proc = subprocess.run([self.node, str(self.app_dir/'virtual_humans/engine/vh2-kernel-worker.js')],
@@ -930,6 +935,11 @@ class WorldService:
     def communication_command(self,db,world_id,revision,state,body):
         kind=body['type']
         if 'communication' not in state:raise Conflict('Upgrade this test world to enable communication.')
+        if kind=='receive_message' and 'conversationGeneration' in body:
+            generation=body['conversationGeneration']
+            if type(generation) is not int or generation<0:raise ValueError('conversationGeneration must be a nonnegative integer.')
+            if generation!=state['communication'].get('generation',0):
+                raise Conflict('This chat was cleared, reset or reopened after this message was queued. The older message was not delivered.')
         # Never backdate incoming messages into a world still catching up after downtime.
         now=state['simAt']
         if kind!='receive_message' and state['running']:
@@ -1465,8 +1475,49 @@ class WorldService:
                                'running':state['running'],'mergedInto':state.get('mergedInto'),'simAt':state['simAt'],
                                'error':next((r[0] for r in db.execute('SELECT error FROM jobs WHERE world_id=?',(row['id'],))), '')})
         return {'experimental':True,'schemaVersion':SCHEMA_VERSION,'kernelVersion':self.kernel_version,
+                'serverNow':self.clock(),
                 'quantumMs':QUANTUM,'lastError':self.last_error,'dialogueError':self.dialogue_error,'worlds':worlds,
+                'dialogueDiagnostic':dict(self.dialogue_diagnostic),
                 'maintenance':dict(self.maintenance_health)}
+
+    def poll_dialogue_once(self):
+        """Run one reply pass and expose only safe, actionable failure metadata.
+
+        A failed pass must not requeue or resubmit an uncertain provider job.
+        DialogueQueue continues to own those transitions and durable receipts.
+        """
+        stage='list_lives';world_id=None
+        try:
+            with self.connect() as db:
+                ids=[r[0] for r in db.execute("SELECT id FROM worlds WHERE json_extract(state,'$.running')=1 AND json_extract(state,'$.integration.autoReplies')=1 LIMIT 32")]
+            for world_id in ids:
+                stage='prepare_reply'
+                with self.connect() as db:
+                    db.execute('BEGIN IMMEDIATE');revision,state=self.read(db,world_id)
+                    self.dialogue.maybe_queue(db,world_id,revision,state)
+            stage='run_reply_job';world_id=None
+            self.dialogue.run_once()
+        except Exception as error:
+            if isinstance(error,Conflict) and self._storage_optimizing:
+                category='storage_maintenance'
+                self.dialogue_error='Reply worker is waiting for life storage maintenance; it will retry automatically.'
+            elif isinstance(error,(sqlite3.Error,OSError)):
+                category='storage'
+                self.dialogue_error='Reply worker cannot access local life storage. It will retry; check message status before resending.'
+            else:
+                category='local_worker'
+                self.dialogue_error='Reply worker hit a local error. It will retry; check message status before resending.'
+            previous=self.dialogue_diagnostic
+            self.dialogue_diagnostic={'state':'recovering','consecutiveFailures':previous['consecutiveFailures']+1,
+                'lastFailure':{'category':category,'stage':stage,'at':self.clock(),'worldId':world_id},
+                'lastRecoveredAt':previous['lastRecoveredAt']}
+            return False
+        previous=self.dialogue_diagnostic
+        if previous['state']=='recovering':
+            self.dialogue_diagnostic={'state':'healthy','consecutiveFailures':0,
+                'lastFailure':previous['lastFailure'],'lastRecoveredAt':self.clock()}
+        self.dialogue_error=''
+        return True
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -1482,17 +1533,7 @@ class WorldService:
         self._thread.start()
         def expression_loop():
             while not self._stop.wait(1):
-                try:
-                    with self.connect() as db:
-                        ids=[r[0] for r in db.execute("SELECT id FROM worlds WHERE json_extract(state,'$.running')=1 AND json_extract(state,'$.integration.autoReplies')=1 LIMIT 32")]
-                    for world_id in ids:
-                        with self.connect() as db:
-                            db.execute('BEGIN IMMEDIATE');revision,state=self.read(db,world_id)
-                            self.dialogue.maybe_queue(db,world_id,revision,state)
-                    self.dialogue.run_once()
-                    self.dialogue_error=''
-                except Exception:
-                    self.dialogue_error='Dialogue worker unavailable; queued work remains saved.'
+                self.poll_dialogue_once()
         self._dialogue_thread=threading.Thread(target=expression_loop,name='horde-vh2-dialogue',daemon=True)
         self._dialogue_thread.start()
 

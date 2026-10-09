@@ -119,6 +119,20 @@ const VH_PANEL_GROUPS={
  'Relationship pace':'inspector','Conversation emotions':'inspector','Experience and memory':'inspector','Text check-ins':'inspector'
 };
 let vhWorkspaceSection='overview';
+const vhCatchUpInFlight=new Map();
+function vhLifeClockNow(link){
+ return Number.isFinite(link?.serverNow)&&Number.isFinite(link?.serverNowSyncedAt)
+  ?link.serverNow+Math.max(0,Date.now()-link.serverNowSyncedAt):Date.now();
+}
+function vhLifeClockDistance(milliseconds){
+ const minutes=Math.max(1,Math.ceil(Math.abs(milliseconds)/60000));
+ const days=Math.floor(minutes/1440),hours=Math.floor(minutes%1440/60),remainder=minutes%60;
+ return [[days,'day'],[hours,'hour'],[remainder,'minute']].filter(([count])=>count).map(([count,unit])=>count+' '+unit+(count===1?'':'s')).join(' ');
+}
+function vhOverviewClockSignature(timeline){
+ const link=timeline?.vh2;
+ return JSON.stringify([timeline?.id||'',link?.simAt??null,Math.floor(vhLifeClockNow(link)/60000),link?.running??null,link?.clockError||'',link?.serviceStatus?.worldError||'']);
+}
 function vhOpenWorkspace(section='overview',id=state.activeCompanionId){
  const companion=getCompanion(id)||state.companions[0];if(!companion){showToast('Create or select a human first.','info');switchView('companions');return;}
  state.activeCompanionId=companion.id;const live=!!getActiveCompanionTimeline(companion.id)?.vh2;vhWorkspaceSection=live&&VH_WORKSPACE_SECTIONS[section]?section:'overview';
@@ -134,7 +148,11 @@ function vhWorkspaceSelect(section){
     // Section changes only filter the already-built workspace. Rebuilding all
     // life controls here made every sidebar click increasingly expensive.
     const controls=document.getElementById('vh2-chat-controls');
-    if(controls?.children.length)vhFilterWorkspace();else vhRenderWorkspace();
+    if(controls?.children.length){
+     const companion=getCompanion(state.activeCompanionId),timeline=companion&&getActiveCompanionTimeline(companion.id);
+     if(section==='overview'&&companion&&controls.dataset.overviewClockSignature!==vhOverviewClockSignature(timeline))vhArrangeWorkspace(companion,timeline);
+     else vhFilterWorkspace();
+    }else vhRenderWorkspace();
     if (main) main.scrollTop=0;
     if (title) title.focus({preventScroll:true});
 }
@@ -176,9 +194,35 @@ function vhArrangeWorkspace(companion,timeline){
  if(sectionTitle) sectionTitle.textContent=name;
  if(sectionDescription) sectionDescription.textContent=description;
  const overview=document.getElementById('vh-workspace-overview');const link=timeline?.vh2;
- overview.innerHTML=`<div class="vh-overview-grid"><article><span>Active life</span><strong>${escapeHTML(timeline?.name||'Original timeline')}</strong><p>${link?(link.running?(Date.now()-(link.simAt||Date.now())>300000?'Catching up automatically in the background · '+Math.ceil((Date.now()-link.simAt)/60000)+' minutes remaining.':'Running in the background. Missed time catches up automatically.'):'Paused. Resume life to catch up automatically.'):'Original life engine. Your conversation is preserved.'}</p></article><article><span>Connection</span><strong>${link?.error?'Needs attention':link?(link.lastSyncedAt?'Last sync '+new Date(link.lastSyncedAt).toLocaleTimeString():'Connection not yet verified'):'Browser-owned life'}</strong><p>${escapeHTML(link?.error||'Open Connections to review effective providers and limits.')}</p></article><article><span>Your profile</span><strong>${escapeHTML(link?.playerProfile?.name||state.personas.find(p=>p.id===timeline?.personaId)?.name||'Not selected')}</strong><p>Choose the profile shared in this chat from its profile control.</p></article></div>`;
+ host.dataset.overviewClockSignature=vhOverviewClockSignature(timeline);
+ const lagMs=Number.isFinite(link?.simAt)?vhLifeClockNow(link)-link.simAt:null;
+ const clockDescription=!link?'Original life engine. Your conversation is preserved.':lagMs===null?'Life clock has not synced yet.':lagMs>300000?`Life clock is ${vhLifeClockDistance(lagMs)} behind real time. Live feeds are waiting.`:lagMs< -300000?`Life clock is ${vhLifeClockDistance(lagMs)} ahead of real time. Live feeds must wait.`:link.running?'Running within five minutes of real time.':'Life is paused; its history is saved.';
+ overview.innerHTML=`<div class="vh-overview-grid"><article><span>Active life</span><strong>${escapeHTML(timeline?.name||'Original timeline')}</strong><p>${escapeHTML(clockDescription)}</p></article><article><span>Connection</span><strong>${link?.error?'Needs attention':link?(link.lastSyncedAt?'Last sync '+new Date(link.lastSyncedAt).toLocaleTimeString():'Connection not yet verified'):'Browser-owned life'}</strong><p>${escapeHTML(link?.error||'Open Connections to review effective providers and limits.')}</p></article><article><span>Your profile</span><strong>${escapeHTML(link?.playerProfile?.name||state.personas.find(p=>p.id===timeline?.personaId)?.name||'Not selected')}</strong><p>Choose the profile shared in this chat from its profile control.</p></article></div>`;
  if(!link)overview.replaceChildren();
  else overview.innerHTML+='<div class="vh-overview-actions"><button type="button" data-open-section="life">Explore this life</button><button type="button" data-open-section="recovery">Always-on private server</button><button type="button" data-open-section="references">Reference Library</button><button type="button" data-open-section="connections">Providers, feeds &amp; events</button><button type="button" data-maps-direct>Maps &amp; places</button><button type="button" data-ticketmaster-direct>Ticketmaster events</button><button type="button" data-reboot-life>Reboot life</button></div>';
+ if(link&&lagMs>300000){
+  const panel=document.createElement('section');panel.className='vh-clock-catchup';
+  panel.innerHTML='<div><strong></strong><p>Catch-up resumes this life and replays missed time in saved batches. A backlog of several days can take many minutes. History is kept; live events remain paused until the clock is within five minutes of real time. Enabled automatic model services may use their configured credits.</p><p role="status" aria-live="polite"></p></div><div class="vh-clock-actions"><button type="button" data-catch-up-life>Catch up to current time</button><button type="button" data-refresh-clock>Refresh progress</button></div>';
+  panel.querySelector('strong').textContent=`Life is ${vhLifeClockDistance(lagMs)} behind real time`;
+  const button=panel.querySelector('[data-catch-up-life]'),status=panel.querySelector('[role=status]');
+  const workerError=link.clockError||link.serviceStatus?.worldError;
+  if(workerError)status.textContent='Life service needs attention: '+workerError+' Open Life status for recovery details.';
+  if(vhCatchUpInFlight.has(companion.id+'|'+timeline.id)){button.disabled=true;status.textContent='Catch-up request in progress…';}
+  button.onclick=()=>vhCatchUpLife(companion,{button,status});
+  const refresh=panel.querySelector('[data-refresh-clock]');refresh.onclick=()=>vhRefreshLifeClock(companion,{button:refresh,status});
+  overview.insertBefore(panel,overview.querySelector('.vh-overview-actions'));
+ }else if(link&&lagMs< -300000){
+  const panel=document.createElement('section');panel.className='vh-clock-catchup vh-clock-ahead';
+  panel.innerHTML='<strong></strong><p>Live events resume when real time reaches this life. Catch-up cannot rewind recorded history.</p>';
+  panel.querySelector('strong').textContent=`Life is ${vhLifeClockDistance(lagMs)} ahead of real time`;
+  overview.insertBefore(panel,overview.querySelector('.vh-overview-actions'));
+ }else if(link&&lagMs===null){
+  const panel=document.createElement('section');panel.className='vh-clock-catchup vh-clock-unknown';
+  panel.innerHTML='<div><strong>Life clock not checked</strong><p>Check the service clock before using live events. This does not change the life or use model credits.</p><p role="status" aria-live="polite"></p></div><div class="vh-clock-actions"><button type="button" data-refresh-clock>Check life clock</button></div>';
+  const button=panel.querySelector('[data-refresh-clock]'),status=panel.querySelector('[role=status]');
+  button.onclick=()=>vhRefreshLifeClock(companion,{button,status});
+  overview.insertBefore(panel,overview.querySelector('.vh-overview-actions'));
+ }
  overview.querySelector('[data-maps-direct]')?.addEventListener('click',()=>vhMapsSetup());
  overview.querySelector('[data-ticketmaster-direct]')?.addEventListener('click',()=>vhTicketmasterSetup(companion,(link.signals?.sources||[]).find(s=>s.kind==='ticketmaster')||null));
  overview.querySelector('[data-reboot-life]')?.addEventListener('click',()=>vhRebootLife(companion));
@@ -208,11 +252,11 @@ function vhRenderSystemStatus(companion){
  let status='Conversation ready';
  if(link){
   if(link.error)status='Connection needs attention: '+link.error;
-  else if(link.dialogueError&&pending.length)status='Reply service needs attention: '+link.dialogueError;
   else if(link.requiresMigration)status='Life update needed before continuing';
-  else if(link.outbox?.length)status=`Sending ${link.outbox.length===1?'your change':link.outbox.length+' changes'} — waiting for confirmation`;
   else if(job?.status==='unknown')status='Reply outcome unknown — review before retrying';
   else if(['failed','abandoned','superseded'].includes(job?.status))status='Reply did not finish'+(job.reason?': '+job.reason:'');
+  else if(link.dialogueError&&pending.length)status='Reply service needs attention: '+link.dialogueError;
+  else if(link.outbox?.length)status=`Sending ${link.outbox.length===1?'your change':link.outbox.length+' changes'} — waiting for confirmation`;
   else if(link.running===false)status=pending.length?'Message saved · life is paused, so replies are waiting':'Life is paused';
   else if(['submitted','leased','queued'].includes(job?.status))status='Preparing a reply…';
   else if(pending.length&&link.autoReplies===false)status=attention?.stage==='ready'?'Reply ready · automatic replies are off':'Message saved · automatic replies are off';
@@ -226,15 +270,25 @@ function vhRenderSystemStatus(companion){
  if(link){const statusButton=document.createElement('button');statusButton.type='button';statusButton.textContent='Life status';statusButton.onclick=()=>vhOpenLifeStatus(companion);nav.append(statusButton);}
  if(link?.running!==false&&link?.autoReplies===false&&pending.length){const enable=document.createElement('button');enable.type='button';enable.textContent='Enable replies · may use credits';enable.title='A ready message may use the selected text model and provider credits';enable.onclick=async()=>{enable.disabled=true;enable.textContent='Enabling…';try{await vhSetAutomaticReplies(companion,timeline,true);showToast('Automatic replies enabled. The saved message will continue without being resent.','success');}catch(error){showToast(error.message,'error');}finally{vhRenderSystemStatus(companion);}};nav.append(enable);}
  if(link?.outbox?.length){const retry=document.createElement('button');retry.type='button';retry.textContent='Retry sync';retry.title='Retry saved actions without creating duplicates';retry.onclick=async()=>{retry.disabled=true;retry.textContent='Syncing…';try{await vh2Poll(companion,timeline,{force:true,throwOnError:true});if(link.outbox?.length)showToast('Actions are still awaiting server confirmation.','info');}catch(error){showToast(error.message,'error');}finally{vhRenderSystemStatus(companion);}};nav.append(retry);}
- // Routine destinations live in the person toolbar; recovery remains visible here.
- if(link?.error||link?.dialogueError&&pending.length||['failed','unknown','abandoned','superseded'].includes(link?.replyJob?.status)){const b=document.createElement('button');b.type='button';b.textContent='Resolve issue';b.onclick=()=>vhOpenWorkspace(link?.replyJob||link?.dialogueError?'recovery':'connections',companion.id);nav.append(b);}
+ // Give each visible error a useful next step. Inspection never submits a new
+ // provider request: only the explicit retry control can do that.
+ if(link?.error||link?.dialogueError&&pending.length||['failed','unknown','abandoned','superseded'].includes(link?.replyJob?.status)){
+  const b=document.createElement('button');b.type='button';
+  if(link.error){b.textContent='Check connection';b.onclick=()=>vhOpenWorkspace('connections',companion.id);}
+  else if(job?.status==='unknown'){b.textContent='Inspect attempt';b.onclick=()=>vh2OpenReplyDetails(companion,timeline);}
+  else if(['failed','abandoned','superseded'].includes(job?.status)){b.textContent='Review failed reply';b.onclick=()=>vhOpenWorkspace('recovery',companion.id);}
+  else {b.textContent='Check reply worker';b.onclick=()=>vhOpenLifeStatus(companion);}
+  nav.append(b);
+ }
  for(const id of ['companion-call-btn','companion-reroll-btn','companion-fork-timeline-btn']){const button=document.getElementById(id);if(button&&link){if(!button.dataset.vhUnsupported){button.dataset.vhPriorTitle=button.title;button.dataset.vhPriorDisabled=String(button.disabled);}button.dataset.vhUnsupported='true';button.disabled=true;button.title='Not supported in VH2 yet.';}else if(button?.dataset.vhUnsupported){button.disabled=button.dataset.vhPriorDisabled==='true';button.title=button.dataset.vhPriorTitle||'';delete button.dataset.vhUnsupported;}}
 }
 function vhLifeReadiness(link={}){
  const entries=[],add=(id,state,message,destination,action)=>entries.push({id,state,message,destination,action});
  if(link.requiresMigration)add('migration','action','This life needs an engine update.','recovery','Open recovery');
  if(link.error)add('connection','action',String(link.error),'connections','Open connections');
- if(link.dialogueError)add('reply-worker','action',String(link.dialogueError),'recovery','Open recovery');
+ if(link.dialogueError)add('reply-worker','action',String(link.dialogueError),'reply-details','Check reply attempts');
+ if(['failed','abandoned','superseded'].includes(link.replyJob?.status))add('reply-failed','action','A reply attempt did not deliver. Review its reason before choosing a new model request, which may use credits.','recovery','Review retry');
+ if(link.replyJob?.status==='unknown')add('reply-uncertain','action','The provider may have processed this reply. Do not retry it until you check the transcript and provider activity.','reply-details','Inspect attempt');
  if(link.running===false)add('paused','info','Life is paused. Its saved settings and history are retained.','overview','Open life');
  if(link.autoReplies===false)add('replies-off','action','Automatic chat replies are off. Ready messages remain saved until you enable them.','connections','Open conversation settings');
  if(link.agencyPaused)add('agency-paused','info','Automatic activity is paused globally.','settings','Open life settings');
@@ -279,16 +333,69 @@ async function vhSetAutomaticReplies(companion,timeline,enabled){
 function vhOpenLifeStatus(companion){
  const timeline=getActiveCompanionTimeline(companion.id);if(!timeline?.vh2)return;
  const d=vhProductDialog('Life status','Current activity, saved preferences and issues that need your attention.');d.id='vh-life-status-dialog';const form=d.querySelector('form'),status=d.querySelector('[role=status]');form.onsubmit=event=>event.preventDefault();
- let maintenance=null,maintenanceError='',maintenanceWorldError='',maintenanceDialogueError='';
- const open=entry=>{d.close();if(entry.destination==='images')return vh2OpenImageSettings(companion,timeline);if(entry.destination==='image-activity')return vh2OpenImageActivity(companion,timeline);if(entry.destination==='settings')return vhOpenLifeActivity(companion);vhOpenWorkspace(entry.destination||'overview',companion.id);};
+ let maintenance=null,maintenanceError='',maintenanceWorldError='',maintenanceDialogueError='',maintenanceServiceError='',maintenanceDialogueDiagnostic=null;
+ const open=entry=>{d.close();if(entry.destination==='images')return vh2OpenImageSettings(companion,timeline);if(entry.destination==='image-activity')return vh2OpenImageActivity(companion,timeline);if(entry.destination==='reply-details')return vh2OpenReplyDetails(companion,timeline);if(entry.destination==='settings')return vhOpenLifeActivity(companion);vhOpenWorkspace(entry.destination||'overview',companion.id);};
  const render=()=>{form.replaceChildren();const entries=vhLifeReadiness(timeline.vh2),actions=entries.filter(entry=>entry.state==='action');status.textContent=actions.length?`${actions.length} item${actions.length===1?' needs':'s need'} attention.`:'No action needed in the last synced state.';for(const [state,label] of [['action','Needs attention'],['waiting','In progress or waiting'],['info','Saved preferences']]){
   const items=entries.filter(entry=>entry.state===state);if(!items.length)continue;const section=document.createElement('section');section.dataset.readinessState=state;const heading=document.createElement('h3');heading.textContent=label;section.append(heading);for(const entry of items){const row=document.createElement('article');row.className='vh-job-card';const copy=document.createElement('p');copy.textContent=entry.message;const button=document.createElement('button');button.type='button';button.textContent=entry.action;button.onclick=()=>open(entry);row.append(copy,button);section.append(row);}form.append(section);
  }};
- const renderRecovery=()=>{form.querySelector('[data-maintenance]')?.remove();const section=document.createElement('section');section.dataset.maintenance='';const title=document.createElement('h3');title.textContent='Automatic recovery';section.append(title);const records=Object.entries(maintenance||{}).filter(([,r])=>r.state==='recovering');const info=document.createElement('p');info.className='form-hint';info.textContent=maintenanceError||(maintenanceDialogueError?'The reply worker is recovering. The saved message remains in this life. '+maintenanceDialogueError:'')||(maintenanceWorldError?'A life step is waiting for recovery. The service will retry from its saved state; history is preserved. '+maintenanceWorldError:'')||(!maintenance?'Checking background services…':records.length?'A background service is recovering. Life continues independently.':'Background services are healthy. Clock and wakeup recovery run automatically.');section.append(info);for(const [name,r] of records){const p=document.createElement('p');p.textContent=({clock:'Life clock',scheduler:'Life wakeups',media:'Images and routes',feeds:'World feeds',weather:'Weather',social:'Social expression'}[name]||name)+': '+r.error+' · Next check in '+Math.max(0,Math.ceil((r.nextAttemptAt-Date.now())/1000))+'s.';section.append(p);}form.prepend(section);};
- const refreshRecovery=async()=>{try{const result=await vh2Request(timeline,'/vh2/status');maintenance=result.maintenance||{};maintenanceWorldError=(result.worlds||[]).find(w=>w.worldId===timeline.vh2.worldId)?.error||'';maintenanceDialogueError=result.dialogueError||result.lastError||'';maintenanceError='';}catch(error){maintenanceError='Background service status is unavailable. '+error.message;}if(d.open)renderRecovery();};
+ const renderRecovery=()=>{
+  form.querySelector('[data-maintenance]')?.remove();
+  const section=document.createElement('section');section.dataset.maintenance='';
+  const title=document.createElement('h3');title.textContent='Automatic recovery';section.append(title);
+  const records=Object.entries(maintenance||{}).filter(([,record])=>record.state==='recovering');
+  const info=document.createElement('p');info.className='form-hint';
+  const diagnostic=maintenanceDialogueDiagnostic;
+  const stages={list_lives:'finding active lives',prepare_reply:'preparing a reply',run_reply_job:'processing a queued reply'};
+  const categories={storage_maintenance:'planned storage maintenance',storage:'local life-storage access',local_worker:'a local worker error'};
+  const failure=diagnostic?.lastFailure;
+  const scope=failure?.worldId&&failure.worldId!==timeline.vh2.worldId?' This happened while processing another life.':'';
+  if(maintenanceError)info.textContent=maintenanceError;
+  else if(diagnostic?.state==='recovering'&&failure){
+   info.textContent=`The reply worker is retrying after ${categories[failure.category]||'a local error'} while ${stages[failure.stage]||'working'}.${scope} This status does not prove a model call failed or that a reply was lost; check the chat or Reply details before resending.`;
+  }else if(maintenanceDialogueError){
+   info.textContent='The local reply worker reported a problem and is retrying. Its older status does not identify the cause. Check the chat or Reply details before resending.';
+  }else if(maintenanceWorldError){
+   info.textContent='A life step is waiting for recovery. '+maintenanceWorldError;
+  }else if(maintenanceServiceError){
+   info.textContent='The life simulation worker reported a separate issue. It is not the reply worker; refresh status to see whether it clears.';
+  }else if(!maintenance)info.textContent='Checking background services…';
+  else if(records.length)info.textContent='A background service is recovering. Check the details below.';
+  else if(diagnostic?.lastRecoveredAt&&failure)info.textContent='The reply worker recovered after a local interruption. Check the chat or Reply details if a response still seems missing.';
+  else info.textContent='Background services are healthy. Clock and wakeup recovery run automatically.';
+  section.append(info);
+  const actions=document.createElement('div');actions.className='vh-overview-actions';
+  const action=(label,callback)=>{const button=document.createElement('button');button.type='button';button.textContent=label;button.onclick=callback;actions.append(button);};
+  if(maintenanceError)action('Retry status check',()=>refreshRecovery());
+  else if(diagnostic?.state==='recovering'||maintenanceDialogueError){
+   action('Check reply attempts',()=>{d.close();vh2OpenReplyDetails(companion,timeline);});
+   action('Check worker again',()=>refreshRecovery());
+  }else if(maintenanceWorldError||maintenanceServiceError){
+   action('Review life repair',()=>{d.close();vhRebootLife(companion);});
+   action('Check again',()=>refreshRecovery());
+  }else if(records.length)action('Check again',()=>refreshRecovery());
+  if(['failed','abandoned','superseded'].includes(timeline.vh2.replyJob?.status))action('Review failed reply',()=>{d.close();vhOpenWorkspace('recovery',companion.id);});
+  if(actions.children.length)section.append(actions);
+  for(const [name,record] of records){const p=document.createElement('p');p.textContent=({clock:'Life clock',scheduler:'Life wakeups',media:'Images and routes',feeds:'World feeds',weather:'Weather',social:'Social expression'}[name]||name)+': '+record.error+' · Next check in '+Math.max(0,Math.ceil((record.nextAttemptAt-Date.now())/1000))+'s.';section.append(p);}
+  form.prepend(section);
+ };
+ const refreshRecovery=async()=>{try{const result=await vh2Request(timeline,'/vh2/status');maintenance=result.maintenance||{};maintenanceWorldError=(result.worlds||[]).find(w=>w.worldId===timeline.vh2.worldId)?.error||'';maintenanceDialogueError=result.dialogueError||'';maintenanceServiceError=result.lastError||'';maintenanceDialogueDiagnostic=result.dialogueDiagnostic||null;maintenanceError='';}catch(error){maintenanceError='Background service status is unavailable. '+error.message;}if(d.open)renderRecovery();};
  const runtime=document.createElement('section');runtime.className='vh-current-card';form.before(runtime);
  const renderRuntime=()=>{runtime.replaceChildren();const link=timeline.vh2,heading=document.createElement('h3');heading.textContent=link.running?'Life is running':'Life is paused';const activity=document.createElement('p');activity.textContent=(link.present?.activity||'No current activity recorded')+' · '+(link.present?.availability||'availability unknown');const pending=(timeline.messages||[]).filter(m=>m.role==='user'&&m.awaitingReply),reply=document.createElement('p');reply.setAttribute('role','status');const attention=pending.find(m=>m.attention?.reason)?.attention;if(link.running===false)reply.textContent='Simulation time and attention timers are paused. Resume life to let waiting messages progress.';else if(link.dialogueError&&pending.length)reply.textContent=link.dialogueError;else if(link.replyJob?.reason)reply.textContent=link.replyJob.reason;else if(link.autoReplies===false&&pending.length)reply.textContent='Automatic replies are off. The message is saved; enable replies in Connections when you want it to continue.';else if(attention?.stage==='ready')reply.textContent='Attention is available and the reply is being handed to the selected text model.';else reply.textContent=attention?.reason||(pending.length?'A message is waiting. Refresh status for the latest attention or generation state.':'No waiting message is recorded.');if(attention?.nextCheckAt>link.simAt&&link.running)reply.textContent+=' Next attention check in about '+Math.max(1,Math.ceil((attention.nextCheckAt-link.simAt)/60000))+' minute(s) of life time; this is not a promised reply time.';const toggle=document.createElement('button');toggle.type='button';toggle.textContent=link.running?'Pause life':'Resume life';toggle.onclick=async()=>{toggle.disabled=true;try{await vhUiCommand(timeline,'set_running',{running:!timeline.vh2.running});renderRuntime();render();await refreshRecovery();}catch(error){reply.textContent=error.message;toggle.disabled=false;}};const routines=document.createElement('button');routines.type='button';routines.textContent='Edit activity and availability';routines.onclick=()=>{d.close();vhOpenWorkspace('life',companion.id);};const reboot=document.createElement('button');reboot.type='button';reboot.textContent='Restart life service state…';reboot.onclick=()=>{d.close();vhRebootLife(companion);};runtime.append(heading,activity,reply,toggle,routines,reboot);};renderRuntime();
- const refresh=document.createElement('button');refresh.type='button';refresh.textContent='Refresh status';refresh.onclick=async()=>{refresh.disabled=true;status.textContent='Refreshing…';try{await vh2Poll(companion,timeline,{force:true,throwOnError:true});if(d.open){render();renderRuntime();await refreshRecovery();}}catch(error){status.textContent='Could not refresh: '+error.message;}finally{refresh.disabled=false;}};d.querySelector('header').after(refresh);render();renderRecovery();void refreshRecovery();
+ const usagePanel=document.createElement('details');usagePanel.className='vh-current-card';usagePanel.dataset.textUsage='';
+ const usageHeading=document.createElement('summary');usageHeading.textContent='Text usage & reply attempts';
+ const usageDescription=document.createElement('p');usageDescription.setAttribute('role','status');
+ const usageActions=document.createElement('div');usageActions.className='vh-overview-actions';
+ const refreshUsage=document.createElement('button');refreshUsage.type='button';refreshUsage.textContent='Refresh usage';
+ const replyDetails=document.createElement('button');replyDetails.type='button';replyDetails.textContent='Reply details';
+ const renderUsage=()=>{usageDescription.textContent=vh2TextBudgetSummary(timeline.vh2.textProvider);};
+ refreshUsage.onclick=async()=>{refreshUsage.disabled=true;usageDescription.textContent='Checking text usage…';try{
+  const current=await vh2Request(timeline,'/vh2/dialogue-provider?scope='+encodeURIComponent('horde:'+companion.id));
+  if(getActiveCompanionTimeline(companion.id)!==timeline)return;
+  timeline.vh2.textProvider=current;renderUsage();
+ }catch(error){usageDescription.textContent='Could not check text usage: '+error.message;}finally{refreshUsage.disabled=false;}};
+ replyDetails.onclick=()=>{d.close();vh2OpenReplyDetails(companion,timeline);};
+ usageActions.append(refreshUsage,replyDetails);usagePanel.append(usageHeading,usageDescription,usageActions);runtime.after(usagePanel);renderUsage();
+ const refresh=document.createElement('button');refresh.type='button';refresh.textContent='Refresh status';refresh.onclick=async()=>{refresh.disabled=true;status.textContent='Refreshing…';try{await vh2Poll(companion,timeline,{force:true,readOnly:true,throwOnError:true});if(d.open){render();renderRuntime();renderUsage();await refreshRecovery();}}catch(error){status.textContent='Could not refresh: '+error.message;}finally{refresh.disabled=false;}};d.querySelector('header').after(refresh);render();renderRecovery();void refreshRecovery();
 }
 function vhSetupChatActions(){
  const actions=document.querySelector('.companion-chat-actions');if(!actions||document.getElementById('vh-chat-more'))return;
@@ -326,6 +433,74 @@ async function vhUiCommand(timeline,type,body){
   savedError.receipt=outcome.receipt;savedError.commandAcknowledged=true;throw savedError;
  }}
  return outcome.receipt;
+}
+async function vhReadLifeClock(companion,timeline){
+ const service=await vh2Request(timeline,'/vh2/status');
+ const current=(service.worlds||[]).find(world=>world.worldId===timeline.vh2.worldId);
+ if(!current||!Number.isFinite(current.simAt))throw Error('The current life clock could not be verified. Refresh Life status and try again.');
+ if(getActiveCompanionTimeline(companion.id)!==timeline)throw Error('The selected life changed. Reopen its Overview before catching up.');
+ const now=Number.isFinite(service.serverNow)?service.serverNow:Date.now();
+ timeline.vh2.simAt=current.simAt;
+ timeline.vh2.running=current.running;
+ timeline.vh2.clockError=String(current.error||'');
+ timeline.vh2.serverNow=now;
+ timeline.vh2.serverNowSyncedAt=Date.now();
+ return now-current.simAt;
+}
+async function vhRefreshLifeClock(companion,{button=null,status=null}={}){
+ const timeline=getActiveCompanionTimeline(companion?.id);
+ if(!timeline?.vh2?.worldId)return false;
+ if(button)button.disabled=true;
+ if(status)status.textContent='Checking life clock…';
+ try{
+  const lag=await vhReadLifeClock(companion,timeline);
+  if(state.view==='vhWorkspace')vhArrangeWorkspace(companion,timeline);
+  const updated=document.querySelector('#vh-workspace-overview .vh-clock-catchup [role=status]');
+  if(updated)updated.textContent=timeline.vh2.clockError?'Life service needs attention: '+timeline.vh2.clockError+' Open Life status for recovery details.':lag>300000?`Still ${vhLifeClockDistance(lag)} behind real time. Catch-up continues while the service runs.`:'Clock status refreshed.';
+  else if(lag<=300000&&lag>= -300000)showToast('This life is within five minutes of real time.','success');
+  return true;
+ }catch(error){if(status)status.textContent=error.message;showToast('Could not refresh life clock: '+error.message,'error');return false;}
+ finally{if(button?.isConnected)button.disabled=false;}
+}
+async function vhCatchUpLife(companion,{button=null,status=null}={}){
+ const timeline=getActiveCompanionTimeline(companion?.id);
+ if(!timeline?.vh2?.worldId){showToast('Start or select a persistent life first.','error');return false;}
+ const key=companion.id+'|'+timeline.id;
+ if(vhCatchUpInFlight.has(key)){
+  if(button)button.disabled=true;
+  if(status)status.textContent='Catch-up request is already in progress…';
+  return vhCatchUpInFlight.get(key);
+ }
+ const operation=(async()=>{
+  if(button)button.disabled=true;
+  if(status)status.textContent='Checking this life’s clock…';
+  try{
+   // Ask the service before making a state-changing command. The browser's
+   // last projection can be stale, and a hosted service has its own clock.
+   const lag=await vhReadLifeClock(companion,timeline);
+   if(lag< -300000)throw Error('This life is ahead of real time. Catch-up cannot rewind its history.');
+   if(lag<=300000){if(status)status.textContent='This life is already within five minutes of real time.';if(state.view==='vhWorkspace')vhArrangeWorkspace(companion,timeline);return true;}
+   if(status)status.textContent='Saving a checkpoint and starting catch-up…';
+   await vhUiCommand(timeline,'catch_up_life',{});
+   if(status)status.textContent='Catch-up started. Missed time is replayed in batches; live events will resume when this life is within five minutes of real time.';
+   showToast('Life catch-up started. History is preserved; live events will resume when the clock is current.','success');
+   if(state.view==='vhWorkspace'){
+    vhArrangeWorkspace(companion,timeline);
+    const updated=document.querySelector('#vh-workspace-overview .vh-clock-catchup [role=status]');
+    if(updated)updated.textContent='Catch-up started. Use Refresh progress to check the remaining backlog.';
+   }
+   return true;
+  }catch(error){
+   if(status)status.textContent=error.message;
+   showToast('Could not start life catch-up: '+error.message,'error');
+   return false;
+  }finally{if(button?.isConnected)button.disabled=false;}
+ })();
+ vhCatchUpInFlight.set(key,operation);
+ try{return await operation;}finally{
+  if(vhCatchUpInFlight.get(key)===operation)vhCatchUpInFlight.delete(key);
+  const current=document.querySelector('#vh-workspace-overview [data-catch-up-life]');if(current)current.disabled=false;
+ }
 }
 async function vhOpenGiftSheet(companion){
     const timeline=getActiveCompanionTimeline(companion.id);if(!timeline?.vh2)return;
@@ -467,9 +642,11 @@ function vhWorkspaceSpecial(force=false){
  }
  if(vhWorkspaceSection==='connections')vhConnectionsHome(root,companion,timeline);
  if(vhWorkspaceSection==='inspector')root.innerHTML='<div class="vh-current-card"><span>Author-only view</span><strong>Internal state is not player knowledge</strong><p>These tools expose needs, decisions and remembered evidence for debugging. They do not imply the character shared this information.</p><button type="button" data-inspect-life>Inspect connection, emotions & history</button></div>';
-   if(vhWorkspaceSection==='recovery')root.innerHTML='<div class="vh-current-card"><span>Recovery & developer tools</span><strong>Original lives remain intact</strong><p>Backups and imported histories retain their source identity. An uncertain provider submission must be reconciled before creating another paid request.</p><a href="/virtual_humans/frontend/vh2.html" target="_blank" rel="noopener">Open developer lab</a></div>';
+   if(vhWorkspaceSection==='recovery')root.innerHTML='<div class="vh-current-card"><span>Recovery</span><strong>Check the result before retrying</strong><p>Review reply attempts and their error details first. A failed reply can be retried with the selected model using the explicit Retry reply control on this page; that may use provider credits. An unknown submission may already have been processed or billed and is never retried automatically.</p><button type="button" data-reply-details>Check reply attempts</button><button type="button" data-life-status>Check life status</button><a href="/virtual_humans/frontend/vh2.html" target="_blank" rel="noopener">Open developer lab</a></div>';
  if(vhWorkspaceSection!=='references'&&!root.querySelector('.vh-generation-actions'))vhAssistantActions(root,companion,vhWorkspaceSection);
  root.querySelector('[data-inspect-life]')?.addEventListener('click',openCompanionSimulationDetails);
+ root.querySelector('[data-reply-details]')?.addEventListener('click',()=>vh2OpenReplyDetails(companion,timeline));
+ root.querySelector('[data-life-status]')?.addEventListener('click',()=>vhOpenLifeStatus(companion));
  root.querySelectorAll('[data-manage-place]').forEach(b=>b.onclick=()=>vhOpenPlace(companion,b.dataset.managePlace));
  root.querySelectorAll('[data-place-references]').forEach(b=>b.onclick=()=>{vhReferenceOwner=b.dataset.placeReferences;vhWorkspaceSelect('references');});
  root.querySelectorAll('[data-open-panel]').forEach(b=>b.onclick=()=>vhOpenPanel(b.dataset.openPanel));
@@ -1287,7 +1464,7 @@ function vhStoryControls(host,companion,timeline){
  const link=timeline.vh2,defaults={intensity:0,social:50,novelty:50,complications:20,recoveryHours:18,adviserEnabled:false};
  const saved=()=>({...defaults,...link.executableSetup?.storyPolicy});
  const section=document.createElement('section');section.className='vh-story-settings';section.setAttribute('aria-label','Story and everyday drama');
- section.innerHTML='<div class="vh-story-heading"><div><span class="vh-eyebrow">Life rhythm</span><h3>Story & everyday drama</h3></div><output data-level></output></div><p>Add invitations, reasons to try something different and occasional small disruptions. People still choose what to do.</p><div class="vh-story-presets" role="group" aria-label="Drama presets"></div><label>Drama level<input name="intensity" type="range" min="0" max="100" step="1"></label><p data-description></p><details><summary>Shape the mix</summary><div class="vh-story-mix"></div><label>Breathing room between added opportunities (hours)<input name="recoveryHours" type="number" min="6" max="72" step="1"></label><p>Weights change the mix of added opportunities. Zero excludes that type. Existing friendships, obligations and ordinary life keep their own rhythm.</p></details><div class="vh-story-adviser"><label class="vh-choice-row"><input name="adviserEnabled" type="checkbox">Daily life adviser</label><p>Once a day, review lived experience and suggest a gentle direction. Uses this character’s text model and its existing allowance. No image or video calls.</p><p data-adviser-status aria-live="polite"></p><details><summary>Latest direction</summary><p data-adviser-direction></p></details></div><div class="vh-story-save"><button type="button" data-save>Save story settings</button><span role="status" aria-live="polite"></span></div><p data-runtime></p>';
+ section.innerHTML='<div class="vh-story-heading"><div><span class="vh-eyebrow">Life rhythm</span><h3>Story & everyday drama</h3></div><output data-level></output></div><p>Add invitations, reasons to try something different and occasional small disruptions. People still choose what to do.</p><div class="vh-story-presets" role="group" aria-label="Drama presets"></div><label>Drama level<input name="intensity" type="range" min="0" max="100" step="1"></label><p data-description></p><details><summary>Shape the mix</summary><div class="vh-story-mix"></div><label>Breathing room between added opportunities (hours)<input name="recoveryHours" type="number" min="6" max="72" step="1"></label><p>Weights change the mix of added opportunities. Zero excludes that type. Existing friendships, obligations and ordinary life keep their own rhythm.</p></details><div class="vh-story-adviser"><label class="vh-choice-row"><input name="adviserEnabled" type="checkbox">Daily life adviser</label><p>Once a day, review lived experience and suggest a gentle direction. Uses this character’s text model and may incur provider charges. No image or video calls.</p><p data-adviser-status aria-live="polite"></p><details><summary>Latest direction</summary><p data-adviser-direction></p></details></div><div class="vh-story-save"><button type="button" data-save>Save story settings</button><span role="status" aria-live="polite"></span></div><p data-runtime></p>';
  const intensity=section.querySelector('[name=intensity]'),status=section.querySelector('[role=status]'),button=section.querySelector('[data-save]');
  const presets=[[0,'Unassisted'],[15,'Quiet'],[40,'Everyday'],[70,'Lively'],[100,'Dramatic']];
  for(const [value,label] of presets){const b=document.createElement('button');b.type='button';b.textContent=label;b.dataset.value=value;b.onclick=()=>{intensity.value=value;update();};section.querySelector('.vh-story-presets').append(b);}

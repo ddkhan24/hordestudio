@@ -10,8 +10,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link id="horde-fonts" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="preload" as="style">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=20261009-worlds-check-contract">
-    <link rel="stylesheet" href="virtual_humans/frontend/vh-workspace.css?v=20260925-v182">
+    <link rel="stylesheet" href="style.css?v=20261009-release-critical">
+    <link rel="stylesheet" href="virtual_humans/frontend/vh-workspace.css?v=20261009-chat-diagnostics">
 </head>
 <body>
 <div id="app">
@@ -2312,7 +2312,6 @@
                         <button class="companion-studio-tab" data-tab="cs-voice">Photos &amp; Voice</button>
                     </div>
                     <div class="studio-nav-actions">
-                        <button type="button" class="btn btn-ghost" onclick="vhOpenWorkspace('overview', state.editingCompanionId)">Life workspace</button>
                         <button id="save-companion-btn" class="btn btn-success btn-full">Save human</button>
                         <button id="open-companion-chat-btn" class="btn btn-ghost btn-full" style="color:var(--accent);">💬 Open Chat</button>
                         <button id="export-companion-btn" class="btn btn-ghost btn-full" title="Export a clean template or the complete portable human">Export Human</button>
@@ -4235,6 +4234,7 @@
                     <input type="file" id="restore-all-input" accept=".json,.hordebackup" style="display:none;">
                 </div>
                 <p class="form-hint">Includes played Worlds, local media and restorable VH2 life checkpoints. Limit: under 4 GB for the ZIP and up to 2 GB per life. Restore into a clean local service; existing lives are never overwritten. If an interrupted restore saved the service lives but not browser data, retry the exact same backup while those lives are unchanged.</p>
+                <details class="settings-storage-emergency"><summary>Storage not working?</summary><p class="form-hint">Keep this tab open. If a full backup fails, save the work still in memory. This emergency copy is incomplete: separately stored photos, videos and Virtual Human service lives may be missing.</p><button id="backup-memory-btn" type="button" class="btn btn-ghost">Export emergency memory copy</button></details>
                 <div class="settings-danger-zone"><div><strong>Hard reset</strong><span>Deletes every local character, World, conversation and setting.</span></div>
                 <button id="purge-data-btn" class="btn btn-danger btn-full">⚠️ Purge All Data (Hard Reset)</button>
                 </div></div>
@@ -5305,12 +5305,12 @@
 <script src="labs-core.js?v=20260822-v161"></script>
 <script src="labs-tasks.js?v=20260822-v161"></script>
 <script src="labs-guide.js?v=20260822-v161"></script>
-    <script src="help-system.js?v=20261009-worlds-check-contract"></script>
+    <script src="help-system.js?v=20261009-release-critical"></script>
 <script src="labs-ui.js?v=20260822-v161"></script>
 <script src="rpg-mechanics.js?v=20260823-v166-rpg-release"></script>
-<script src="multiplayer-engine.js?v=20260902-v171"></script>
-<script src="multiplayer.js?v=20260902-v171"></script>
-<script src="video-worlds.js?v=20260925-v182"></script>
+<script src="multiplayer-engine.js?v=20261009-release-critical"></script>
+<script src="multiplayer.js?v=20261009-release-critical"></script>
+<script src="video-worlds.js?v=20261009-release-critical"></script>
     <script src="virtual_humans/engine/vh-conversation-engine.js?v=20260910-vh2-history"></script>
     <script src="virtual_humans/engine/vh-activity-engine.js?v=20260912-consolidated-life"></script>
     <script src="virtual_humans/engine/vh-world-engine.js?v=20260912-wardrobe-colors"></script>
@@ -5321,17 +5321,17 @@
     <script src="virtual_humans/engine/vh-mind-library.js?v=20260920-expanded-library"></script>
     <script src="virtual_humans/engine/vh-mind-engine.js?v=20260920-expanded-library"></script>
     <script src="virtual_humans/engine/vh-life-schema.js?v=20260913-v18-storage"></script>
-    <script src="virtual_humans/frontend/vh2-horde-integration.js?v=20261004-comfy-fit"></script>
-    <script src="virtual_humans/frontend/vh-workspace.js?v=20261004-comfy-fit"></script>
+    <script src="virtual_humans/frontend/vh2-horde-integration.js?v=20261009-release-critical"></script>
+    <script src="virtual_humans/frontend/vh-workspace.js?v=20261009-chat-diagnostics"></script>
     <script src="virtual_humans/frontend/vh-assistant-ui.js?v=20260925-v182"></script>
-    <script src="virtual_humans/frontend/vh-setup-ui.js?v=20260925-v182"></script>
+    <script src="virtual_humans/frontend/vh-setup-ui.js?v=20261009-clock-recovery"></script>
     <script src="virtual_humans/frontend/vh-page-builder.js?v=20260925-v182"></script>
     <script src="bundled-humans.js?v=20260913-v18-storage"></script>
     <script src="human-package.js?v=20260913-v18-storage"></script>
     <script src="large-archive.js?v=20261008-worlds-release"></script>
-    <script src="worlds/model-client.js?v=20261009-worlds-check-contract"></script>
+    <script src="worlds/model-client.js?v=20261009-release-critical"></script>
     <script src="worlds/scene-draft.js?v=20261009-worlds-check-contract"></script>
     <script src="worlds/turn-context.js?v=20261009-worlds-check-contract"></script>
-    <script src="app.js?v=20261009-worlds-check-contract"></script>
+    <script src="app.js?v=20261009-release-critical"></script>
 </body>
 </html>

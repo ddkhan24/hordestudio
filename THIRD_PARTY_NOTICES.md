@@ -1,5 +1,12 @@
 # Third-party notices
 
+## Node.js runtime for Virtual Humans
+
+Portable Horde Studio packages include unmodified Node.js v24.21.0 executables for the supported desktop platforms. They are staged from the official Node.js release archives after SHA-256 verification. The upstream license text is included at `runtime/LICENSE` inside the portable app.
+
+- Official release: https://nodejs.org/download/release/v24.21.0/
+- Upstream license: https://github.com/nodejs/node/blob/v24.21.0/LICENSE
+
 ## Cactus Needle 2 / TinyBrain 2
 
 Horde Studio can optionally download the official Cactus Needle 2 browser runtime and model from `Cactus-Compute/needle2` after the user explicitly chooses **Download & install**. The assets are stored in that browser profile's cache and are not included in Horde Studio backups.

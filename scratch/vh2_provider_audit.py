@@ -22,12 +22,14 @@ class Provider(unittest.TestCase):
     def status(self):return self.s.dialogue.list(self.w)[0]['status']
     @staticmethod
     def response(text='Hi',reason='stop'):return {'choices':[{'finish_reason':reason,'message':{'content':text}}]}
-    def test_background_sync_preserves_saved_budget(self):
+    def test_legacy_cap_fields_are_ignored_on_save(self):
         self.s.dialogue_provider.save({**self.settings,'dailyLimit':500})
         self.s.dialogue_provider.save({**self.settings,'dailyLimit':6,'preserveDailyLimit':True})
-        self.assertEqual(self.s.dialogue_provider.status()['dailyLimit'],500)
-        self.s.dialogue_provider.save({**self.settings,'dailyLimit':200})
-        self.assertEqual(self.s.dialogue_provider.status()['dailyLimit'],200)
+        status=self.s.dialogue_provider.status()
+        self.assertNotIn('dailyLimit',status)
+        self.assertFalse(status['textLimitsEnforced'])
+        self.assertIsNone(status['budgets']['dialogue']['limit'])
+        self.assertIsNone(status['budgets']['background']['limit'])
     def test_mock_delivery_and_secret_isolation(self):
         self.queue();calls=[]
         def mock(config,key,messages):
@@ -58,15 +60,15 @@ class Provider(unittest.TestCase):
         self.s.close();self.s=self.open();self.now+=LEASE_MS+1
         self.assertIsNone(self.s.dialogue.claim());self.assertEqual('unknown',self.status())
         self.assertEqual(1,self.s.dialogue_provider.status()['usedToday'])
-    def test_daily_budget_survives_configuration_changes(self):
+    def test_saved_daily_cap_does_not_block_across_configuration_changes(self):
         self.s.dialogue_provider.save({**self.settings,'dailyLimit':1})
         self.queue();self.assertTrue(self.s.dialogue.run_once(provider_transport=lambda *args:self.response()))
         self.cmd('receive_message',text='Again')
         self.s.dialogue_provider.save({**self.settings,'dailyLimit':1,'model':'other'})
         self.queue();called=[]
-        self.assertFalse(self.s.dialogue.run_once(provider_transport=lambda *args:called.append(1)))
-        self.assertEqual([],called);self.assertEqual('failed',self.status())
-        self.assertEqual(1,self.s.dialogue_provider.status()['usedToday'])
+        self.assertTrue(self.s.dialogue.run_once(provider_transport=lambda *args:(called.append(1) or self.response())))
+        self.assertEqual([1],called);self.assertEqual('delivered',self.status())
+        self.assertEqual(2,self.s.dialogue_provider.status()['usedToday'])
     def test_disabling_stops_queued_submissions(self):
         self.queue();self.s.dialogue_provider.save({**self.settings,'enabled':False});called=[]
         self.assertFalse(self.s.dialogue.run_once(provider_transport=lambda *args:called.append(1)))

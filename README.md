@@ -8,7 +8,7 @@
 
 Character cards & group rooms · Living Worlds · Virtual Humans 2.0 · Optional RPG rules · Multiplayer · Video Adventures
 
-[**Download v18.3**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.3) · [Release notes](docs/releases/v18.3.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
+[**Download v18.3.5**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.3.5) · [Release notes](docs/releases/v18.3.5.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
 
 Horde Studio brings your characters, stories and simulations into one local application. Import a character card and start a conversation, build a world with places and consequences, host a campaign with friends, or create a virtual human whose conversations draw on an ongoing life. Connect your own local models or cloud providers; the application does not include paid inference.
 
@@ -128,12 +128,12 @@ Horde Studio is free to run and its source is available in this repository. The 
 
 ## Quick start
 
-Download the [v18.3 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.3), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
+Download the [v18.3.5 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.3.5), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
 
 ### Requirements
 
 - Python 3
-- Node.js 18 or newer for Virtual Humans 2.0 (or set `HORDE_NODE_EXECUTABLE`)
+- Node.js 18 or newer for Virtual Humans 2.0 when launching a source checkout (or set `HORDE_NODE_EXECUTABLE`). Portable packages built from this checkout include a verified Node.js runtime for macOS, Windows and glibc Linux on supported architectures; Alpine/musl Linux and older published ZIPs still need a separate Node installation.
 - A modern desktop browser
 - An AI provider or local model server for generation
 
@@ -186,7 +186,7 @@ Running the launcher again is safe. If Horde Studio already owns the port, it op
 To use a different port:
 
 ```bash
-HORDE_MCP_PORT=43128 python3 horde_mcp_bridge.py --open
+HORDE_SERVER_PORT=43128 python3 horde_mcp_bridge.py --open
 ```
 
 ---

@@ -4,7 +4,7 @@ Virtual Humans have a persistent life with shared places, needs, supporting peop
 
 ## Start
 
-Extract the entire portable application and use the launcher at the top level: `Start Horde Studio.bat` on Windows, `Start Horde Studio.command` on macOS, or `start-horde-studio.sh` on Linux. Keep the `app` folder beside the launchers; it holds the supporting files. Python 3 and Node.js 18 or newer are required; Node can also be configured with `HORDE_NODE_EXECUTABLE`. Provider keys are configured in Settings → Connections.
+Extract the entire portable application and use the launcher at the top level: `Start Horde Studio.bat` on Windows, `Start Horde Studio.command` on macOS, or `start-horde-studio.sh` on Linux. Keep the `app` folder beside the launchers; it holds the supporting files. Python 3 is required. New portable packages include the Node.js runtime for VH2 on macOS, Windows and glibc Linux; Alpine/musl Linux, a source checkout or an older package needs Node.js 18 or newer, or `HORDE_NODE_EXECUTABLE` set in the app's `.env` file. Restart the launcher after changing that setting. Provider keys are configured in Settings → Connections.
 
 Open Virtual Humans 2.0 to select Aslyn Jonas or create a person. Aslyn starts a fresh life with an empty conversation history, her authored relationships with supporting people, and a starter feed, gallery and clips. The included character contains no publisher chat sessions or personal player memories.
 
@@ -61,9 +61,9 @@ If a multi-section draft fails or is stopped, use **Review completed sections** 
 
 Chat shows the current life status and waiting reason, with Pause/Resume, an activity-editing action and access to restart. A busy commitment allows attention breaks; private time and sleep can defer conversation. In Life → Routine, a commitment's start/end describe its occupied time, while an activity's opportunity window describes when it may be chosen. Its duration is a separate value. Correct an accidentally day-long meal by editing the commitment instead of restarting the whole character.
 
-**Usage & reply details → Text request budgets** in Chat shows this character's foreground and background allowances, usage and UTC reset. New foreground connections do not inherit a cap from disabled Always On. Older shared caps are retained visibly until you explicitly choose new budgets. Zero blocks a category; turning off the foreground cap allows provider-billed chat/call requests without a local daily ceiling. Budget changes do not resubmit failed jobs automatically.
+**Life status → Text usage & reply attempts** shows this character's foreground and background request counts without occupying the conversation. Horde Studio no longer enforces daily text-request limits, including previously saved shared caps. The local life service automatically retires those saved caps when it starts. The model provider may still bill for requests and enforce its own rate limits. Automatic background posts and adviser reviews can also make billable requests while enabled; turn those features off if you do not want them to run.
 
-**Usage & reply details → Reply details** shows the attempt's model, status, failure reason, provider-reported token usage when supplied, and a bounded redacted prompt preview. A missing token report is shown as unavailable, never as zero or a fabricated estimate. Models are selected through the character's text provider; paid live responses still depend on that provider's model access, credentials and availability.
+**Life status → Text usage & reply attempts → Reply details** shows the attempt's model, status, failure reason, provider-reported token usage when supplied, and a bounded redacted prompt preview. A missing token report is shown as unavailable, never as zero or a fabricated estimate. Models are selected through the character's text provider; paid live responses still depend on that provider's model access, credentials and availability.
 
 ## Places, rooms and optional switches
 

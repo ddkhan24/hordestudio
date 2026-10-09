@@ -7715,6 +7715,7 @@ button.vh-status:hover { color: var(--text-2); border-color: var(--border2); }
 }
 .companion-msg-row.mine .companion-msg-time { justify-content: flex-end; }
 .companion-delivery.read { color: #4da3ff; }
+.companion-delivery.failed { color: #ff9e87; font-weight: 600; }
 .companion-link-card {
     display: grid; gap: 2px; width: min(330px, 58vw); margin-top: 6px; padding: 10px 11px;
     border-radius: 11px; background: rgba(0,0,0,.18); color: inherit;
@@ -9343,3 +9344,26 @@ label[data-help] > span:first-child::after,
 .world-correction-clock { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .world-state-correction .modal-ft { display: flex; justify-content: flex-end; gap: 12px; }
 .world-state-correction .correction-error { color: var(--red); }
+#storage-failure-banner {
+    position: fixed;
+    z-index: 100000;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(720px, calc(100vw - 24px));
+    padding: 16px 18px;
+    border: 1px solid #f08a65;
+    border-radius: 14px;
+    background: #241b1d;
+    color: #fff;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, .45);
+}
+
+#storage-failure-banner strong { display: block; font-size: 1.05rem; }
+#storage-failure-banner p { margin: 8px 0 12px; line-height: 1.4; }
+#storage-failure-banner small { display: block; margin-top: 10px; color: #e4c7c1; line-height: 1.4; }
+.storage-failure-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.storage-failure-actions .btn { min-height: 40px; }
+.settings-storage-emergency { margin: 14px 0 20px; padding: 12px 14px; border: 1px solid var(--border2); border-radius: 10px; }
+.settings-storage-emergency summary { cursor: pointer; font-weight: 600; }
+.settings-storage-emergency .form-hint { margin: 12px 0; }

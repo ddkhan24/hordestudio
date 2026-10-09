@@ -32,7 +32,11 @@ jobs:
       - name: Verify browser transactions and gameplay wiring
         run: |
           node scripts/check-worlds-browser.js
+          node scratch/chat_release_browser_audit.js
+          node scratch/vh_release_remote_persona_browser_audit.js
           node scratch/browser_storage_transaction_audit.js
+          node scratch/browser_storage_reopen_audit.js
+          node scratch/browser_vh2_live_clock_catchup_audit.js
           node scratch/browser_engine_smoke_audit.js
           node scratch/world_insights_browser_audit.js
           node scratch/world_mobile_play_browser_audit.js

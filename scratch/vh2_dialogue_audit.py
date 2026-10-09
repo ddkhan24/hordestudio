@@ -2,6 +2,7 @@
 from test_runtime import node_executable
 import sys, tempfile, unittest, uuid, json, threading, sqlite3
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from virtual_humans.backend.vh2_runtime import WorldService, Conflict, encode, QUANTUM
 from virtual_humans.backend.vh2_dialogue import LEASE_MS
@@ -24,6 +25,45 @@ class Dialogue(unittest.TestCase):
     def queue(self,text='Oh, nice.'):
         return self.cmd('queue_dialogue',text=text)[1]['jobId']
     def status(self):return self.s.dialogue.list(self.w)[0]['status']
+    def test_worker_failure_reports_safe_storage_diagnostic_and_recovers_queue(self):
+        job_id=self.queue('A saved reply.')
+        with patch.object(self.s.dialogue,'run_once',side_effect=sqlite3.OperationalError('secret-token-in-error')):
+            self.assertFalse(self.s.poll_dialogue_once())
+        report=self.s.status()['dialogueDiagnostic']
+        self.assertEqual(report['state'],'recovering')
+        self.assertEqual(report['consecutiveFailures'],1)
+        self.assertEqual(report['lastFailure'],{'category':'storage','stage':'run_reply_job','at':self.now,'worldId':None})
+        self.assertNotIn('secret-token-in-error',json.dumps(self.s.status()))
+        self.assertEqual(self.status(),'queued')
+        self.assertTrue(self.s.poll_dialogue_once())
+        recovered=self.s.status()['dialogueDiagnostic']
+        self.assertEqual(recovered['state'],'healthy')
+        self.assertEqual(recovered['lastFailure'],report['lastFailure'])
+        self.assertEqual(recovered['lastRecoveredAt'],self.now)
+        self.assertEqual(self.s.status()['dialogueError'],'')
+        self.assertEqual(self.status(),'delivered')
+        self.assertEqual(self.s.dialogue.list(self.w)[0]['id'],job_id)
+
+    def test_worker_storage_maintenance_diagnostic_does_not_touch_saved_message(self):
+        self.s._storage_optimizing=True
+        try:self.assertFalse(self.s.poll_dialogue_once())
+        finally:self.s._storage_optimizing=False
+        report=self.s.status()['dialogueDiagnostic']
+        self.assertEqual(report['lastFailure']['category'],'storage_maintenance')
+        self.assertEqual(report['lastFailure']['stage'],'list_lives')
+        self.assertIn('storage maintenance',self.s.status()['dialogueError'])
+        self.assertEqual(len([m for m in self.state()['communication']['messages'] if m['role']=='user']),1)
+        self.assertTrue(self.s.poll_dialogue_once())
+        self.assertEqual(self.s.status()['dialogueDiagnostic']['state'],'healthy')
+
+    def test_worker_local_fault_is_not_mislabeled_as_provider_failure(self):
+        with patch.object(self.s.dialogue,'run_once',side_effect=RuntimeError('Bearer hidden-secret')):
+            self.assertFalse(self.s.poll_dialogue_once())
+        report=self.s.status()
+        self.assertEqual(report['dialogueDiagnostic']['lastFailure']['category'],'local_worker')
+        self.assertEqual(report['dialogueDiagnostic']['lastFailure']['stage'],'run_reply_job')
+        self.assertNotIn('Bearer hidden-secret',json.dumps(report))
+        self.assertNotIn('provider',report['dialogueError'].lower())
     def test_calendar_order_and_clock_do_not_cancel_reply(self):
         import copy
         state=self.state()

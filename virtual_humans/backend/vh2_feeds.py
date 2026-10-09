@@ -4,8 +4,11 @@ import uuid,concurrent.futures,datetime,email.utils,hashlib,http.client,ipaddres
 class LiveClockError(ValueError):pass
 def require_live_clock(sim,wall):
  if abs(wall-sim)>300000:
-  direction='behind' if sim<wall else 'ahead of'
-  raise LiveClockError(f'Live events are waiting: this life is {round(abs(wall-sim)/60000)} minutes {direction} real time. Use Catch up to current time in Life Overview.' if sim<wall else 'This life is ahead of real time. Live feeds resume when real time catches up; history cannot be rewound.')
+  if sim<wall:
+   minutes=max(1,int((wall-sim+59999)//60000));days,rest=divmod(minutes,1440);hours,remaining=divmod(rest,60)
+   duration=' '.join(f'{count} {unit}{"s" if count!=1 else ""}' for count,unit in ((days,'day'),(hours,'hour'),(remaining,'minute')) if count)
+   raise LiveClockError(f'Live events are paused: this life is {duration} behind real time. Open this human’s Life Overview and choose Catch up to current time. Missed time replays in batches; events resume within five minutes of real time.')
+  raise LiveClockError('This life is ahead of real time. Live feeds resume when real time catches up; history cannot be rewound.')
 
 COMMANDS=('configure_world_feed','remove_world_feed','import_world_feed','refresh_world_feed')
 def url_parts(url):

@@ -56,17 +56,19 @@ def parse_response(data):
 
 DAY=86400000
 
-def validate_budget_policy(value):
-    if not isinstance(value,dict) or set(value)!={'version','dialogueDailyLimit','backgroundDailyLimit'} or value['version']!=1:
-        raise ValueError('Supply version 1 dialogue and background budget limits.')
-    for key in ('dialogueDailyLimit','backgroundDailyLimit'):
-        limit=value[key]
-        if key=='dialogueDailyLimit' and limit is None:continue
-        if type(limit) is not int or not 0<=limit<=1000:raise ValueError('Invalid '+key)
-    return dict(value)
-
 class ProviderStore:
     def __init__(self,service):self.service=service
+    def retire_saved_caps(self,db):
+        """Append clean current versions without rewriting frozen job bindings."""
+        seen=set()
+        for row in db.execute('SELECT * FROM dialogue_providers ORDER BY rowid DESC').fetchall():
+            config=json.loads(row['config']);scope=config.get('scope')
+            if scope in seen:continue
+            seen.add(scope)
+            clean={key:value for key,value in config.items() if key not in ('dailyLimit','budgetPolicy')}
+            if clean==config:continue
+            db.execute('INSERT INTO dialogue_providers VALUES (?,?,?,?)',
+                       (str(uuid.uuid4()),json.dumps(clean,sort_keys=True),row['api_key'],self.service.clock()))
     def current(self,db,scope=None):
         row=db.execute("SELECT * FROM dialogue_providers WHERE json_extract(config,'$.scope') IS ? ORDER BY rowid DESC LIMIT 1",(scope,)).fetchone()
         return dict(row) if row else None
@@ -98,26 +100,22 @@ class ProviderStore:
         for row in rows:counts[row['category']]=row['used']
         return {**counts,'total':sum(counts.values()),'resetsAt':day+DAY}
     def budget(self,db,config,category):
-        usage=self.usage(db,config.get('scope'));policy=config.get('budgetPolicy')
-        legacy=not policy
-        limit=config['dailyLimit'] if legacy else policy[category+'DailyLimit']
-        used=usage['total'] if legacy else usage[category]
-        return {'category':'shared' if legacy else category,'limit':limit,'used':used,
-                'exhausted':limit is not None and used>=limit,'legacy':legacy,'scope':config.get('scope'),
+        # Compatibility shape for clients that read request counts. Saved text
+        # caps (including legacy shared caps) no longer restrict submissions.
+        usage=self.usage(db,config.get('scope'))
+        return {'category':category,'limit':None,'used':usage[category],
+                'exhausted':False,'legacy':False,'scope':config.get('scope'),
                 'resetsAt':usage['resetsAt']}
-    def budget_error(self,db,config,category):
-        budget=self.budget(db,config,category)
-        if not budget['exhausted']:return ''
-        scope=config.get('scope') or 'legacy unscoped provider'
-        return ('Daily '+budget['category']+' request limit reached: '+str(budget['used'])+'/'+str(budget['limit'])+
-                ' for '+scope+'. Resets at midnight UTC. Open Text request budgets in chat to review. No submission made.')
     def status(self,scope=None):
         with self.service.connect() as db:
             row=self.current(db,scope);usage=self.usage(db,scope)
-            if not row:return {'configured':False,'enabled':False,'usedToday':usage['total'],'usage':usage}
+            if not row:return {'configured':False,'enabled':False,'usedToday':usage['total'],'usage':usage,
+                               'textLimitsEnforced':False}
             config=json.loads(row['config'])
-            return {**config,'configured':True,'version':row['id'],'hasKey':bool(row['api_key']),
+            public={key:value for key,value in config.items() if key not in ('dailyLimit','budgetPolicy')}
+            return {**public,'configured':True,'version':row['id'],'hasKey':bool(row['api_key']),
                     'usedToday':usage['total'],'usage':usage,
+                    'textLimitsEnforced':False,
                     'budgets':{category:self.budget(db,config,category) for category in ('dialogue','background')}}
     def save(self,body):
         if not isinstance(body,dict):raise ValueError('Provider settings must be an object.')
@@ -134,7 +132,7 @@ class ProviderStore:
         if not isinstance(model,str) or not 1<=len(model.strip())<=200:raise ValueError('Select a model identifier.')
         enabled=body.get('enabled',False)
         if type(enabled) is not bool:raise ValueError('enabled must be boolean.')
-        limits={'maxTokens':(1,4096),'dailyLimit':(1,1000),'temperature':(0,2)}
+        limits={'maxTokens':(1,4096),'temperature':(0,2)}
         for key,(low,high) in limits.items():
             value=body.get(key)
             if type(value) not in (int,float) or not low<=value<=high or key!='temperature' and type(value) is not int:
@@ -146,17 +144,8 @@ class ProviderStore:
             config['scope']=scope
         with self.service.connect() as db:
             db.execute('BEGIN IMMEDIATE');prior=self.current(db,scope)
-            if body.get('preserveDailyLimit') is True and prior:
-                config['dailyLimit']=json.loads(prior['config'])['dailyLimit']
-            # Normal provider synchronization never lifts an existing spending
-            # control. Explicit budget edits migrate legacy shared limits.
-            prior_config=json.loads(prior['config']) if prior else {}
-            if 'budgetPolicy' in body:config['budgetPolicy']=validate_budget_policy(body['budgetPolicy'])
-            elif prior_config.get('budgetPolicy'):config['budgetPolicy']=dict(prior_config['budgetPolicy'])
-            elif not prior and 'defaultBudgetPolicy' in body:config['budgetPolicy']=validate_budget_policy(body['defaultBudgetPolicy'])
-            if 'updateBackgroundDailyLimit' in body and config.get('budgetPolicy'):
-                policy={**config['budgetPolicy'],'backgroundDailyLimit':body['updateBackgroundDailyLimit']}
-                config['budgetPolicy']=validate_budget_policy(policy)
+            # Older clients may still send dailyLimit/budgetPolicy fields, but
+            # they are ignored. A normal save also retires saved cap metadata.
             secret=body.get('apiKey','')
             if not isinstance(secret,str) or len(secret)>4096 or any(c in secret for c in '\r\n'):raise ValueError('Invalid API key.')
             # Never carry a credential to a changed endpoint implicitly.

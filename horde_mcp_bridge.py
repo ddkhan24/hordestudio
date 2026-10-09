@@ -14,7 +14,9 @@ Environment variables (also loaded from .env if present):
 from __future__ import annotations
 
 import base64
+import copy
 import errno
+from functools import lru_cache
 import hashlib
 import ipaddress
 import json
@@ -65,6 +67,21 @@ def _load_env(path: Path) -> None:
 
 
 _load_env(ENV_FILE)
+
+
+@lru_cache(maxsize=16)
+def _supported_node(candidate: str) -> bool:
+    """Reject stale or broken Node installs without probing on every status poll."""
+    path = Path(candidate)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return False
+    try:
+        result = subprocess.run([candidate, "--version"], capture_output=True, text=True,
+                                timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    match = re.fullmatch(r"v(\d+)\.\d+\.\d+", result.stdout.strip())
+    return result.returncode == 0 and bool(match) and int(match.group(1)) >= 18
 
 # ── Network configuration ───────────────────────────────────
 LISTEN_HOST = os.environ.get("HORDE_SERVER_LISTEN_HOST", "127.0.0.1")
@@ -336,6 +353,7 @@ def store_vh2_mirror(world_id: str, data: bytes) -> dict[str, Any]:
     return {"available": True, **metadata}
 
 store_lock = threading.RLock()
+provider_token_locks = {provider_id: threading.RLock() for provider_id in PROVIDERS}
 pending_auth: dict[str, dict[str, Any]] = {}
 mcp_sessions: dict[str, dict[str, str]] = {}
 
@@ -541,10 +559,17 @@ class AlwaysOnRuntime:
 
     def _node_path(self) -> str | None:
         configured = os.environ.get("HORDE_NODE_EXECUTABLE")
-        if configured and Path(configured).is_file():
-            return configured
         bundled = APP_DIR / "runtime" / f"{platform.system().lower()}-{platform.machine().lower()}" / ("node.exe" if os.name == "nt" else "node")
-        return str(bundled) if bundled.is_file() else shutil.which("node")
+        candidates = [configured, str(bundled), shutil.which("node")]
+        if platform.system() == "Darwin":
+            # Finder-launched .command files do not always inherit Homebrew's
+            # interactive-shell PATH, even when Node is already installed.
+            candidates.extend(("/opt/homebrew/bin/node", "/usr/local/bin/node",
+                               str(Path.home() / ".volta/bin/node")))
+        for candidate in candidates:
+            if candidate and _supported_node(candidate):
+                return str(candidate)
+        return None
 
     def _simulation(self, human: dict[str, Any], now_ms: int, commit: dict | None = None) -> dict | None:
         snapshot = human.get("simulation")
@@ -1051,7 +1076,7 @@ class MultiplayerRuntime:
                 "rulesText": str(source_system.get("rulesText") or "")[:4000],
             },
         }
-        return {
+        result = {
             "experienceType": experience_type,
             "experienceName": experience_name,
             "worldName": experience_name,
@@ -1063,6 +1088,26 @@ class MultiplayerRuntime:
             "gameState": MultiplayerRuntime._clean_game_state(value.get("gameState")),
             "history": history,
         }
+        for field in ("campaignStart", "turnCheckpoint"):
+            checkpoint = value.get(field)
+            if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("gameState"), dict):
+                continue
+            # Whitelist an ordinary snapshot before recursing, so checkpoints
+            # never contain other checkpoints or arbitrary host-only metadata.
+            core = MultiplayerRuntime._clean_snapshot({key: checkpoint[key] for key in (
+                "history", "hud", "location", "turn", "gameState") if key in checkpoint})
+            cleaned = {key: core[key] for key in ("history", "turn", "gameState")}
+            cleaned.update({key: core[key] for key in ("hud", "location") if key in checkpoint})
+            if field == "turnCheckpoint":
+                cleaned["historyLength"] = max(0, min(int(checkpoint.get("historyLength") or 0), 120))
+                cleaned["roomRoundNumber"] = max(1, min(int(checkpoint.get("roomRoundNumber") or 1), 1_000_000_000))
+                rows = checkpoint.get("submissions") if isinstance(checkpoint.get("submissions"), list) else []
+                cleaned["submissions"] = [{"playerId": str(row.get("playerId") or "")[:100],
+                    "name": MultiplayerRuntime._clean_name(row.get("name"), ""), "submitted": True,
+                    "text": str(row.get("text") or "")[:2000]} for row in rows[:12]
+                    if isinstance(row, dict) and row.get("submitted") and row.get("text")]
+            result[field] = cleaned
+        return result
 
     @staticmethod
     def _clean_persona(value: Any) -> dict[str, str]:
@@ -1148,12 +1193,44 @@ class MultiplayerRuntime:
             }
             self.rooms[room_code]["snapshot"].setdefault("gameState", {}).setdefault("characters", {})[host_id] = \
                 self.rooms[room_code]["players"][host_id]["sheet"]
+            resumed_id = str(body.get("resumeCharacterId") or "")[:100]
+            if resumed_id and resumed_id != host_id:
+                self.rooms[room_code]["snapshot"] = self._remap_actor(self.rooms[room_code]["snapshot"], resumed_id, host_id)
+                self.rooms[room_code]["snapshot"]["gameState"]["characters"][host_id] = copy.deepcopy(self.rooms[room_code]["players"][host_id]["sheet"])
+            self._prune_initiative(self.rooms[room_code]["snapshot"], {host_id})
+            baseline = self.rooms[room_code]["snapshot"].get("campaignStart")
+            if baseline:
+                baseline["gameState"].setdefault("characters", {}).setdefault(host_id, copy.deepcopy(self.rooms[room_code]["players"][host_id]["sheet"]))
             lan_url = f"http://{self._lan_ip()}:{self.port}/"
             invite_url = (f"{lan_url}?multiplayer={room_code}"
                           f"#invite={urllib.parse.quote(invite_token)}")
             return {"ok": True, "roomCode": room_code, "inviteToken": invite_token,
                     "inviteUrl": invite_url, "hostPlayerId": host_id,
                     "playerToken": host_token, "serverPort": self.port}
+
+    @staticmethod
+    def _remap_actor(value: Any, previous: str, current: str) -> Any:
+        """Reconnect a saved host's stable character to its new room identity."""
+        if isinstance(value, dict):
+            return {current if key == previous else key: MultiplayerRuntime._remap_actor(item, previous, current)
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            return [MultiplayerRuntime._remap_actor(item, previous, current) for item in value]
+        return current if isinstance(value, str) and value == previous else value
+
+    @staticmethod
+    def _prune_initiative(snapshot: dict[str, Any], players: set[str]) -> None:
+        game = snapshot.get("gameState", {})
+        npcs = game.get("npcs") if isinstance(game.get("npcs"), dict) else {}
+        valid = players | set(npcs)
+        for encounter in game.get("encounters", []) if isinstance(game.get("encounters"), list) else []:
+            if not isinstance(encounter, dict) or not isinstance(encounter.get("initiative"), list):
+                continue
+            old = encounter["initiative"]
+            turn = max(0, int(encounter.get("turn") or 0))
+            actor = old[turn] if turn < len(old) else None
+            encounter["initiative"] = [actor_id for actor_id in old if actor_id in valid]
+            encounter["turn"] = encounter["initiative"].index(actor) if actor in encounter["initiative"] else min(turn, max(0, len(encounter["initiative"]) - 1))
 
     def _room(self, body: dict[str, Any]) -> dict[str, Any]:
         code = str(body.get("roomCode") or "").strip().upper()
@@ -1182,6 +1259,48 @@ class MultiplayerRuntime:
         round_state["activePlayerId"] = next_player["id"] if next_player else ""
         round_state["status"] = "collecting" if next_player else "ready"
 
+    def _publish_snapshot(self, room: dict[str, Any], value: dict[str, Any]) -> None:
+        """Keep sheets and canonical state consistent after a host publication."""
+        snapshot = self._clean_snapshot(value)
+        for field in ("campaignStart", "turnCheckpoint"):
+            if field in room["snapshot"]:
+                snapshot[field] = copy.deepcopy(room["snapshot"][field])
+            else:
+                snapshot.pop(field, None)
+        characters = snapshot.setdefault("gameState", {}).setdefault("characters", {})
+        for player_id, player in room["players"].items():
+            if player_id in characters:
+                player["sheet"] = self._clean_sheet(characters[player_id])
+            characters[player_id] = copy.deepcopy(player["sheet"])
+        self._prune_initiative(snapshot, set(room["players"]))
+        room["snapshot"] = snapshot
+
+    @staticmethod
+    def _visible_sheet(sheet: dict[str, Any], player_id: str, viewer: dict[str, Any]) -> dict[str, Any]:
+        visible = copy.deepcopy(sheet)
+        if not viewer["isHost"] and player_id != viewer["id"]:
+            visible.pop("notes", None)
+        return visible
+
+    @staticmethod
+    def _visible_game_state(game: dict[str, Any], viewer: dict[str, Any]) -> dict[str, Any]:
+        visible = copy.deepcopy(game)
+        for player_id, sheet in visible.get("characters", {}).items():
+            visible["characters"][player_id] = MultiplayerRuntime._visible_sheet(sheet, player_id, viewer)
+        if not viewer["isHost"]:
+            for field in ("journal", "clocks", "rolls"):
+                rows = visible.get(field)
+                if isinstance(rows, list):
+                    visible[field] = [row for row in rows if not isinstance(row, dict) or row.get("visibility", "public") == "public"]
+            # Transaction narration, checks and operations retain host-only
+            # details even when the resulting public state is innocuous.
+            visible["transactions"] = []
+            npcs = visible.get("npcs") if isinstance(visible.get("npcs"), dict) else {}
+            for npc in npcs.values():
+                if isinstance(npc, dict):
+                    npc.pop("notes", None)
+        return visible
+
     def join(self, body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             room = self._room(body)
@@ -1198,6 +1317,10 @@ class MultiplayerRuntime:
             }
             room.setdefault("snapshot", {}).setdefault("gameState", {}).setdefault("characters", {})[player_id] = \
                 room["players"][player_id]["sheet"]
+            baseline = room["snapshot"].get("campaignStart")
+            if baseline and room["round"]["number"] == 1 and "turnCheckpoint" not in room["snapshot"]:
+                baseline["gameState"].setdefault("characters", {})[player_id] = copy.deepcopy(room["players"][player_id]["sheet"])
+            self._advance_turn(room)
             room["updatedAt"] = now
             room["revision"] += 1
             return {"ok": True, "roomCode": room["code"], "playerId": player_id,
@@ -1225,6 +1348,11 @@ class MultiplayerRuntime:
                             "yes": sum(1 for vote in proposal["votes"].values() if vote),
                             "no": sum(1 for vote in proposal["votes"].values() if not vote),
                             "myVote": proposal["votes"].get(viewer["id"])}
+            snapshot = copy.deepcopy(room.get("snapshot") or {})
+            snapshot["gameState"] = self._visible_game_state(snapshot.get("gameState", {}), viewer)
+            for field in ("campaignStart", "turnCheckpoint"):
+                if field in snapshot:
+                    snapshot[field]["gameState"] = self._visible_game_state(snapshot[field].get("gameState", {}), viewer)
             return {"ok": True, "roomCode": room["code"],
                     "experienceType": room.get("experienceType", "world"),
                     "experienceName": room.get("experienceName", room["worldName"]),
@@ -1235,12 +1363,12 @@ class MultiplayerRuntime:
                                     if viewer["isHost"] else ["submit", "vote", "sheet", "roll"]),
                     "players": [{"id": p["id"], "name": p["name"],
                                  "persona": p.get("persona", {}), "isHost": p["isHost"],
-                                 "sheet": p.get("sheet", {}),
+                                 "sheet": self._visible_sheet(p.get("sheet", {}), p["id"], viewer),
                                  "online": self._now() - p["lastSeen"] < 45000} for p in players],
                     "round": {"number": round_state["number"], "status": round_state["status"],
                               "activePlayerId": round_state["activePlayerId"],
                               "submissions": public_submissions},
-                    "proposal": proposal, "snapshot": room.get("snapshot") or {}}
+                    "proposal": proposal, "snapshot": snapshot}
 
     def submit(self, body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
@@ -1363,14 +1491,12 @@ class MultiplayerRuntime:
             room = self._room(body); player = self._player(room, body)
             if not player["isHost"]:
                 raise PermissionError("Only the host can publish authoritative campaign state.")
+            if "expectedRevision" in body and body["expectedRevision"] != room["revision"]:
+                raise ValueError("The party changed while editing. Refresh the room before retrying.")
             snapshot = body.get("snapshot")
             if not isinstance(snapshot, dict):
                 raise ValueError("A complete campaign snapshot is required.")
-            room["snapshot"] = self._clean_snapshot(snapshot)
-            game_characters = room["snapshot"].get("gameState", {}).get("characters", {})
-            for player_id, sheet in game_characters.items():
-                if player_id in room["players"]:
-                    room["players"][player_id]["sheet"] = self._clean_sheet(sheet)
+            self._publish_snapshot(room, snapshot)
             room["updatedAt"] = self._now(); room["revision"] += 1
             return {"ok": True, "revision": room["revision"]}
 
@@ -1380,11 +1506,24 @@ class MultiplayerRuntime:
             player = self._player(room, body)
             if not player["isHost"]:
                 raise PermissionError("Only the host can commit the party turn.")
+            if ("expectedRevision" in body and body["expectedRevision"] != room["revision"]) or (
+                "expectedRoundNumber" in body and body["expectedRoundNumber"] != room["round"]["number"]
+            ):
+                raise ValueError("The party changed while this turn was resolving. Refresh the room before retrying.")
             if room["round"]["status"] != "ready":
                 raise ValueError("Every player must submit before the host can commit.")
             snapshot = body.get("snapshot")
             if isinstance(snapshot, dict):
-                room["snapshot"] = self._clean_snapshot(snapshot)
+                previous = room["snapshot"]
+                checkpoint = {"history": copy.deepcopy(previous.get("history", [])),
+                    "historyLength": len(previous.get("history", [])), "turn": previous.get("turn", 0),
+                    "gameState": copy.deepcopy(previous.get("gameState", {})),
+                    "roomRoundNumber": room["round"]["number"],
+                    "submissions": [{"playerId": player_id, "name": room["players"][player_id]["name"],
+                        "submitted": True, "text": action["text"]} for player_id, action in room["round"]["submissions"].items()]}
+                checkpoint.update({key: copy.deepcopy(previous[key]) for key in ("hud", "location") if key in previous})
+                self._publish_snapshot(room, snapshot)
+                room["snapshot"]["turnCheckpoint"] = checkpoint
             room["round"] = {"number": room["round"]["number"] + 1,
                              "status": "collecting", "submissions": {},
                              "activePlayerId": self._active_players(room)[0]["id"]}
@@ -1446,8 +1585,31 @@ class MultiplayerRuntime:
             proposal = room.get("proposal")
             if not proposal or proposal["status"] != "approved":
                 raise ValueError("The decision has not been approved.")
-            if isinstance(snapshot, dict):
-                room["snapshot"] = self._clean_snapshot(snapshot)
+            if ("expectedRevision" in body and body["expectedRevision"] != room["revision"]) or (
+                "proposalId" in body and body["proposalId"] != proposal["id"]
+            ):
+                raise ValueError("The party or vote changed. Refresh the room before applying this decision.")
+            field = "turnCheckpoint" if proposal["type"] == "reroll" else "campaignStart"
+            checkpoint = room["snapshot"].get(field)
+            if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("gameState"), dict):
+                raise ValueError("This campaign has no saved checkpoint for that decision. Start a new campaign to enable it.")
+            restored = {**room["snapshot"], **copy.deepcopy(checkpoint)}
+            for key in ("historyLength", "roomRoundNumber", "submissions"):
+                restored.pop(key, None)
+            self._publish_snapshot(room, restored)
+            room["snapshot"].pop("turnCheckpoint", None)
+            if proposal["type"] == "reroll":
+                submissions = {row["playerId"]: {"text": row["text"], "at": self._now()}
+                    for row in checkpoint.get("submissions", []) if row["playerId"] in room["players"]}
+                room["round"] = {"number": checkpoint["roomRoundNumber"], "status": "ready",
+                    "submissions": submissions, "activePlayerId": ""}
+                self._advance_turn(room)
+            else:
+                room["round"] = {"number": 1, "status": "collecting", "submissions": {},
+                    "activePlayerId": self._active_players(room)[0]["id"]}
+                for key in ("hud", "location"):
+                    if key not in checkpoint:
+                        room["snapshot"].pop(key, None)
             proposal["status"] = "applied"
             room["revision"] += 1
             return {"ok": True}
@@ -1491,13 +1653,16 @@ def provider_record(provider_id: str) -> dict[str, Any]:
 
 
 def update_provider_record(provider_id: str, patch: dict[str, Any] | None) -> None:
-    value = load_store()
-    providers = value.setdefault("providers", {})
-    if patch is None:
-        providers.pop(provider_id, None)
-    else:
-        providers[provider_id] = {**providers.get(provider_id, {}), **patch}
-    save_store(value)
+    # Protect the whole read/modify/write, including concurrent OAuth callbacks
+    # and map settings saves, rather than locking each disk operation alone.
+    with store_lock:
+        value = load_store()
+        providers = value.setdefault("providers", {})
+        if patch is None:
+            providers.pop(provider_id, None)
+        else:
+            providers[provider_id] = {**providers.get(provider_id, {}), **patch}
+        save_store(value)
 
 
 def read_limited(response: Any) -> bytes:
@@ -1787,6 +1952,11 @@ def register_client(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def begin_oauth(provider_id: str) -> str:
+    with provider_token_locks[provider_id]:
+        return _begin_oauth(provider_id)
+
+
+def _begin_oauth(provider_id: str) -> str:
     discovery = discover_oauth(provider_id)
     existing = provider_record(provider_id)
     client = existing.get("client") if isinstance(existing.get("client"), dict) else {}
@@ -1858,6 +2028,13 @@ def exchange_code(state_token: str, code: str) -> str:
 
 
 def refresh_access_token(provider_id: str) -> str:
+    # Refresh tokens may rotate after each use. Parallel image requests must
+    # share one completed refresh instead of spending the same token twice.
+    with provider_token_locks[provider_id]:
+        return _refresh_access_token(provider_id)
+
+
+def _refresh_access_token(provider_id: str) -> str:
     record = provider_record(provider_id)
     tokens = record.get("tokens") or {}
     if tokens.get("access_token") and int(tokens.get("expires_at") or 0) > time.time():
@@ -1889,7 +2066,10 @@ def refresh_access_token(provider_id: str) -> str:
     if not 200 <= status < 300 or not fresh.get("access_token"):
         raise PermissionError("Provider connection expired. Connect it again in Settings.")
     merged = {**tokens, **fresh, "expires_at": int(time.time()) + int(fresh.get("expires_in") or 3600) - 30}
-    update_provider_record(provider_id, {"tokens": merged})
+    with store_lock:
+        if provider_record(provider_id).get("tokens") != tokens:
+            raise PermissionError("Provider connection changed while refreshing. Reconnect before retrying.")
+        update_provider_record(provider_id, {"tokens": merged})
     return merged["access_token"]
 
 
@@ -3467,8 +3647,10 @@ class MultiplayerHandler(BaseHTTPRequestHandler):
 
     def read_json(self) -> dict[str, Any]:
         declared = int(self.headers.get("Content-Length", "0") or 0)
-        if declared > 2 * 1024 * 1024:
-            raise ValueError("Multiplayer request exceeds the 2 MB safety limit.")
+        if declared < 0:
+            raise ValueError("Content-Length must not be negative.")
+        if declared > 30 * 1024 * 1024:
+            raise ValueError("Multiplayer request exceeds the 30 MB safety limit.")
         raw = self.rfile.read(declared)
         value = json.loads(raw.decode()) if raw else {}
         if not isinstance(value, dict):
@@ -3570,12 +3752,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return origin.rstrip("/") in REMOTE_VH2_ALLOWED_ORIGINS
         try:
             parsed = urllib.parse.urlparse(origin)
+            if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                return False
             hostname = parsed.hostname or ""
             if hostname in {"localhost", "127.0.0.1", "::1"}:
                 return True
-            if hostname.startswith("10.") or hostname.startswith("172.16.") or hostname.startswith("192.168."):
-                return True
-            return False
+            address = ipaddress.ip_address(hostname)
+            return any(address in network for network in (
+                ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("172.16.0.0/12"),
+                ipaddress.ip_network("192.168.0.0/16")))
         except ValueError:
             return False
 
@@ -3784,6 +3969,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def read_json(self) -> dict[str, Any]:
         declared = int(self.headers.get("Content-Length", "0") or 0)
+        if declared < 0:
+            raise ValueError("Content-Length must not be negative.")
         if declared > 30 * 1024 * 1024:
             raise ValueError("Request body exceeds the 30 MB safety limit.")
         length = min(declared, 30 * 1024 * 1024)

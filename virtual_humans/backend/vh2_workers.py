@@ -1,6 +1,6 @@
 """Durable, bounded route and image jobs; no automatic paid resubmission."""
 from importlib import import_module as _vh_import_module
-import base64,concurrent.futures,hashlib,json,math,re,urllib.request,urllib.error,uuid
+import base64,concurrent.futures,hashlib,json,math,re,sqlite3,urllib.request,urllib.error,uuid
 from .vh2_provider import NoRedirect, UnknownOutcome, RejectedOutput
 SCHEMA='''CREATE TABLE IF NOT EXISTS vh2_service_providers(id TEXT PRIMARY KEY,scope TEXT NOT NULL,config TEXT NOT NULL,api_key TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS vh2_provider_jobs(id TEXT PRIMARY KEY,world_id TEXT NOT NULL REFERENCES worlds(id),kind TEXT NOT NULL,status TEXT NOT NULL,snapshot TEXT NOT NULL,result TEXT,error TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL,submitted_at INTEGER,finished_at INTEGER);
@@ -385,10 +385,10 @@ def _poll(service):
  pending=service._worker_pending
  for ident,future in list(pending.items()):
   if not future.done():continue
-  del pending[ident]
   with service.connect() as db:
    db.execute('BEGIN IMMEDIATE');job=db.execute('SELECT * FROM vh2_provider_jobs WHERE id=?',(ident,)).fetchone()
-   if not job or job['status']!='submitted':continue
+   if not job or job['status']!='submitted':
+    pending.pop(ident,None);continue
    snapshot=json.loads(job['snapshot']);revision,state=service.read(db,job['world_id'])
    try:
     result=future.result()
@@ -396,12 +396,13 @@ def _poll(service):
      vh2_media.decode_image(result)
      db.execute('INSERT OR REPLACE INTO vh2_provider_outputs VALUES (?,?)',(ident,result))
      db.execute("UPDATE vh2_provider_jobs SET status='rendered',finished_at=? WHERE id=?",(service.clock(),ident))
-     continue  # Commit the result before attempting import; restarting cannot lose it.
-    elif state['kernelVersion']==service.kernel_version:
-     before=json.loads(encode(state));state['truth']=service.kernel({'companion':state['truth']['companion'],'now':state['simAt'],'inspect':True,'routeResult':{'id':snapshot['journeyId'],'response':result}})
-     service.commit_event(db,job['world_id'],revision,before,state,'ROUTE_RESOLVED',{'journeyId':snapshot['journeyId']})
-    db.execute("UPDATE vh2_provider_jobs SET status='succeeded',finished_at=?,result=? WHERE id=?",(service.clock(),encode({'imported':True}) if job['kind']=='image' else encode(result),ident))
+    else:
+     if state['kernelVersion']==service.kernel_version:
+      before=json.loads(encode(state));state['truth']=service.kernel({'companion':state['truth']['companion'],'now':state['simAt'],'inspect':True,'routeResult':{'id':snapshot['journeyId'],'response':result}})
+      service.commit_event(db,job['world_id'],revision,before,state,'ROUTE_RESOLVED',{'journeyId':snapshot['journeyId']})
+     db.execute("UPDATE vh2_provider_jobs SET status='succeeded',finished_at=?,result=? WHERE id=?",(service.clock(),encode(result),ident))
    except Exception as error:
+    if isinstance(error,sqlite3.Error) and future.exception() is not error:raise
     status='unknown' if isinstance(error,UnknownOutcome) else 'failed'
     db.execute('UPDATE vh2_provider_jobs SET status=?,finished_at=?,error=? WHERE id=?',(status,service.clock(),str(error)[:300],ident))
     if job['kind']=='image':
@@ -410,6 +411,10 @@ def _poll(service):
       if post.get('photoId')==snapshot.get('photoId') and post.get('imagePending'):post['imageError']=str(error)[:300]
      if state!=before:service.commit_event(db,job['world_id'],revision,before,state,'SOCIAL_IMAGE_FAILED')
    prune_terminal_jobs(db,job['world_id'],service.clock())
+  # A completed provider call is still our recovery copy until SQLite commits
+  # its output/status. On transient storage faults retry saving this Future,
+  # never discard the paid result or submit another request.
+  pending.pop(ident,None)
  # Import completed outputs independently of generation and of the life being paused.
  with service.connect() as db:
   rendered=db.execute("SELECT j.id,j.world_id,j.snapshot,o.image FROM vh2_provider_jobs j JOIN vh2_provider_outputs o ON o.job_id=j.id WHERE j.status='rendered' ORDER BY j.created_at LIMIT 4").fetchall()

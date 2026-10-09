@@ -36,6 +36,16 @@
 .vh-overview-grid strong { display:block;font-size:18px; }
 .vh-overview-grid p { font-size:13px; }
 .vh-overview-actions { display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px; }
+.vh-clock-catchup { display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 20px;padding:17px 19px;border:1px solid #47688e;border-radius:12px;background:#172334; }
+.vh-clock-catchup strong { display:block;color:#e8f1ff;font-size:15px; }
+.vh-clock-catchup p { margin:6px 0 0;font-size:13px;line-height:1.5; }
+.vh-clock-catchup [role=status]:empty { display:none; }
+.vh-clock-catchup button { flex:none;min-height:40px;padding:9px 14px;border:1px solid #77adfb;border-radius:8px;background:#267ce4;color:#fff;font-weight:600;cursor:pointer; }
+.vh-clock-actions { display:flex;flex:none;flex-direction:column;gap:8px; }
+.vh-clock-actions [data-refresh-clock] { border-color:#52637a;background:#222e40;color:#dce8f7;font-weight:500; }
+.vh-clock-catchup button:disabled { opacity:.55;cursor:not-allowed; }
+.vh-clock-ahead { border-color:#6a5b49;background:#242019; }
+@media(max-width:640px){.vh-clock-catchup{align-items:stretch;flex-direction:column}.vh-clock-actions,.vh-clock-catchup button{width:100%}}
 .vh-scope-banner { margin:18px 24px 0;padding:16px 18px;background:#172130;border:1px solid #344d6c;border-radius:10px;display:flex;gap:16px;flex-wrap:wrap; }
 .vh-scope-banner>div { flex:1;min-width:220px; }
 .vh-scope-banner p { color:#c0cad8;font-size:13px;line-height:1.5;margin:5px 0; }
@@ -101,6 +111,9 @@
 @media(max-width:520px){.companion-gift-dialog{width:calc(100vw - 16px);padding:20px 16px;max-height:calc(100dvh - 20px)}.companion-gift-dialog .gift-submit{min-height:44px}.companion-gift-dialog .gift-heading h2{font-size:22px}}
 .vh-current-card { background:#152232;border:1px solid #37526e;padding:18px 20px;border-radius:12px;margin-bottom:20px; }
 .vh-current-card>span { display:block;font-size:12px;color:#acc8e8;margin-bottom:6px; }.vh-current-card>strong { display:block;font-size:20px; }.vh-current-card p { margin:8px 0; }
+#vh-life-status-dialog [data-text-usage] { max-width:none;padding:12px 16px;margin:12px 0; }
+#vh-life-status-dialog [data-text-usage] summary { cursor:pointer;font-weight:600; }
+#vh-life-status-dialog [data-text-usage] .vh-overview-actions { margin:12px 0 0; }
 .vh-entity-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-bottom:24px; }
 .vh-entity-card { padding:18px;border:1px solid #343e50;border-radius:12px;background:#171e2b;min-width:0;overflow-wrap:anywhere; }
 .vh-entity-card h3 { font-size:17px;margin:0 0 10px; }.vh-entity-card p { font-size:13px; }.vh-entity-card img.vh-garment-image{width:100%;height:170px;object-fit:contain;background:#0e131b;border-radius:8px}

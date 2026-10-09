@@ -87,8 +87,8 @@ test('Spicy mode is an explicit HotAPI route with ordered premium fallbacks', ()
     assert.match(html, /Smart spicy fallback · Fal, then HotAPI/);
     assert.match(html, /Spicy from the start · HotAPI only/);
     assert.match(html, /id="video-world-spicy-primary"/);
-    assert.match(html, /Seedance 2\.0 Fast Spicy · slower/);
-    assert.match(html, /Seedance 2\.5 Spicy · slowest\/premium/);
+    assert.match(html, /value="seedance-2\.0-fast-spicy">Seedance 2\.0 Fast Spicy<\/option>/);
+    assert.match(html, /value="seedance-2\.5-spicy">Seedance 2\.5 Spicy<\/option>/);
     assert.match(video, /standard_then_spicy/);
     assert.match(video, /requestRoutedVideoRender/);
     assert.match(video, /state\.hotapiApiKey/);

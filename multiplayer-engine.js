@@ -114,7 +114,7 @@
         if (!campaign || typeof campaign !== 'object') return campaign;
         campaign.system = pack(campaign.system?.id, campaign.system);
         campaign.snapshot ||= {};
-        campaign.gameState ||= createState(campaign.system, campaign.snapshot);
+        campaign.gameState ||= clone(campaign.snapshot.gameState) || createState(campaign.system, campaign.snapshot);
         campaign.gameState.rules = pack(campaign.system.id, campaign.gameState.rules || campaign.system);
         campaign.gameState.characters ||= {};
         campaign.gameState.npcs ||= {};
@@ -127,7 +127,11 @@
         campaign.gameState.encounters ||= [];
         campaign.gameState.schemaVersion = VERSION;
         (campaign.players || []).forEach(player => {
-            player.sheet = normalizeSheet(player.sheet, campaign.system, player.persona, player.name);
+            // The game state is canonical. Roster sheets may be an older room
+            // snapshot, especially immediately after a committed turn or reload.
+            // Only use them to seed characters absent from legacy campaigns.
+            player.sheet = normalizeSheet(campaign.gameState.characters[player.id] || player.sheet,
+                campaign.system, player.persona, player.name);
             campaign.gameState.characters[player.id] = clone(player.sheet);
         });
         campaign.snapshot.gameState = clone(campaign.gameState);
@@ -137,7 +141,8 @@
     function normalizeSheet(sheet, rules, persona, name) {
         const created = createSheet(rules, persona, name);
         if (!sheet || typeof sheet !== 'object') return created;
-        const merged = { ...created, ...clone(sheet) };
+        sheet = clone(sheet);
+        const merged = { ...created, ...sheet };
         merged.resources = { ...created.resources, ...(sheet.resources || {}) };
         merged.attributes = { ...created.attributes, ...(sheet.attributes || {}) };
         merged.skills = { ...created.skills, ...(sheet.skills || {}) };
@@ -221,7 +226,7 @@
     function effect(value) {
         return { id: text(value?.id, 100) || id('fx'), name: text(value?.name || 'Effect', 100), kind: ['buff', 'debuff', 'condition'].includes(value?.kind) ? value.kind : 'condition',
             description: text(value?.description, 500), stacks: clamp(value?.stacks || 1, 1, 99), duration: clamp(value?.duration ?? -1, -1, 9999),
-            timing: ['turn', 'round', 'scene', 'permanent'].includes(value?.timing) ? value.timing : 'round', modifiers: value?.modifiers && typeof value.modifiers === 'object' ? clone(value.modifiers) : {} };
+            timing: ['turn', 'round', 'scene', 'permanent'].includes(value?.timing) ? value.timing : 'round', modifiers: Shared.modifiers(value?.modifiers || {}) };
     }
 
     function levelThreshold(rules, level) {
@@ -237,6 +242,9 @@
         // Off is a reversible pause. Inventory, story, locations and journals keep
         // working, while numerical mutations are ignored and retained data is not erased.
         if (!mechanicsEnabled && mechanicalTypes.has(op.type)) return;
+        for (const key of ['set', 'delta', 'max', 'quantity', 'cost', 'round']) {
+            if (op[key] !== undefined && !Number.isFinite(Number(op[key]))) throw new Error(`Invalid numerical state operation ${key}.`);
+        }
         if (!['scene', 'clock', 'quest', 'journal', 'shared-inventory-add', 'shared-inventory-remove', 'encounter-start', 'encounter-end', 'initiative', 'initiative-next', 'npc-add', 'npc-remove'].includes(op.type) && !sheet) throw new Error(`Unknown character ${op.playerId}.`);
         switch (op.type) {
             case 'resource': { const res = sheet.resources?.[op.resource]; if (!res) throw new Error(`Unknown resource ${op.resource}.`); res.value = clamp(op.set ?? (res.value + Number(op.delta || 0)), res.min ?? 0, res.max); syncResourceStatuses(sheet); break; }
@@ -265,7 +273,7 @@
             case 'unequip': { const prior = sheet.equipment[op.slot]; const found = sheet.inventory.find(entry => entry.id === prior); if (found) found.equipped = false; sheet.equipment[op.slot] = null; break; }
             case 'xp': { const gain = Number(op.delta || 0); const progression = state.rules.progression || {};
                 if (progression.kind === 'points') sheet.advancement = Math.max(0, sheet.advancement + gain);
-                else if (progression.kind === 'milestone') { if (gain > 0 && sheet.level < (progression.maxLevel || 20)) { const levels = Math.max(1, Math.floor(gain)); sheet.level = Math.min(progression.maxLevel || 20, sheet.level + levels); sheet.advancement += levels; } }
+                else if (progression.kind === 'milestone') { if (gain > 0 && sheet.level < (progression.maxLevel || 20)) { const levels = Math.min((progression.maxLevel || 20) - sheet.level, Math.max(1, Math.floor(gain))); sheet.level += levels; sheet.advancement += levels; } }
                 else { sheet.xp = Math.max(0, sheet.xp + gain); while (sheet.level < (progression.maxLevel || 20) && sheet.xp >= levelThreshold(state.rules, sheet.level)) { sheet.xp -= levelThreshold(state.rules, sheet.level); sheet.level++; sheet.advancement++; } } break; }
             case 'advancement-spend': { const cost = clamp(op.cost || 1, 1, 100); if (sheet.advancement < cost) throw new Error('Not enough advancement points.');
                 const group = op.group === 'attribute' ? 'attributes' : 'skills'; if (!(op.key in sheet[group])) throw new Error(`Unknown ${op.group || 'skill'} ${op.key}.`);
@@ -299,7 +307,7 @@
                 if (entry.timing === 'permanent' || entry.duration < 0) return true;
                 entry.duration -= 1; return entry.duration > 0;
             });
-            sheet.conditions = (sheet.conditions || []).filter(entry => typeof entry === 'string' || entry.duration < 0 || --entry.duration > 0);
+            sheet.conditions = (sheet.conditions || []).filter(entry => typeof entry === 'string' || entry.timing === 'permanent' || entry.duration < 0 || --entry.duration > 0);
         });
     }
 
@@ -358,6 +366,40 @@
         return `AUTHORITATIVE CAMPAIGN STATE (revision ${state.revision})\nScene: ${state.scene.name} — ${state.scene.description}\nRules: ${state.rules.name}; mechanics ${Shared.mode(state.rules.mechanicsMode)}; ${state.rules.resolution}\nCharacters:\n${characters}\nNPCs / adversaries:\n${npcs || 'none'}\nEncounter: ${encounter ? `${encounter.name}; round ${encounter.round}; active ${encounter.initiative[encounter.turn] || 'unset'}; order ${encounter.initiative.join(', ') || 'unset'}` : 'none'}\nQuests: ${(state.quests || []).map(q => `${q.title} [${q.status}]`).join(', ') || 'none'}\nClocks: ${(state.clocks || []).map(c => `${c.name} ${c.value}/${c.max}`).join(', ') || 'none'}\nShared inventory: ${(state.sharedInventory || []).map(i => `${i.name} x${i.quantity || 1}`).join(', ') || 'empty'}`;
     }
 
+    function restoreDecision(snapshot, decision) {
+        const next = clone(snapshot || {});
+        if (decision === 'reroll') {
+            const checkpoint = next.turnCheckpoint;
+            if (!checkpoint || !checkpoint.gameState || !Array.isArray(next.history)
+                || (!Array.isArray(checkpoint.history) && (!Number.isInteger(checkpoint.historyLength)
+                    || checkpoint.historyLength < 0 || checkpoint.historyLength >= next.history.length))
+                || !Number.isFinite(checkpoint.turn)
+                || !Array.isArray(checkpoint.submissions) || !checkpoint.submissions.length) {
+                throw new Error('This turn has no complete rollback checkpoint. It cannot be rerolled safely.');
+            }
+            next.gameState = clone(checkpoint.gameState);
+            next.history = Array.isArray(checkpoint.history) ? clone(checkpoint.history)
+                : next.history.slice(0, checkpoint.historyLength);
+            next.turn = checkpoint.turn;
+            for (const key of ['hud', 'location']) if (Object.prototype.hasOwnProperty.call(checkpoint, key)) next[key] = clone(checkpoint[key]);
+        } else if (decision === 'reset') {
+            const start = next.campaignStart;
+            if (!start || !start.gameState || !Array.isArray(start.history) || !Number.isFinite(start.turn)) {
+                throw new Error('This legacy campaign has no saved starting state. It cannot be reset safely.');
+            }
+            next.gameState = clone(start.gameState);
+            next.history = clone(start.history);
+            next.turn = start.turn;
+            for (const key of ['hud', 'location']) {
+                if (Object.prototype.hasOwnProperty.call(start, key)) next[key] = clone(start[key]);
+                else delete next[key];
+            }
+        } else throw new Error('Unsupported campaign decision.');
+        delete next.turnCheckpoint;
+        delete next.lastReferee;
+        return next;
+    }
+
     function receiptSchema() {
         return { type: 'object', required: ['narration', 'summary', 'operations', 'checks'], properties: {
             narration: { type: 'string' }, summary: { type: 'string' }, operations: { type: 'array', items: { type: 'object' } }, checks: { type: 'array', items: { type: 'object' } }
@@ -365,5 +407,5 @@
     }
 
     window.HordeMultiplayerEngine = Object.freeze({ VERSION, PACKS, pack, createSheet, createState, migrateCampaign, normalizeSheet,
-        parseDice, roll, check, item, effect, applyOperation, applyReceipt, applyReceiptRecovering, promptState, receiptSchema, levelThreshold, clone });
+        parseDice, roll, check, item, effect, applyOperation, applyReceipt, applyReceiptRecovering, promptState, restoreDecision, receiptSchema, levelThreshold, clone });
 })();

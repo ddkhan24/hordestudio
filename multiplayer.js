@@ -49,6 +49,12 @@
             snapshot: initial, players: []
         };
         campaign.gameState = Engine.createState(campaign.system, initial);
+        campaign.snapshot.campaignStart = {
+            history: Engine.clone(initial.history), turn: Number(initial.turn || 0),
+            gameState: Engine.clone(campaign.gameState),
+            ...(initial.hud !== undefined ? { hud: Engine.clone(initial.hud) } : {}),
+            ...(initial.location !== undefined ? { location: Engine.clone(initial.location) } : {})
+        };
         campaign.snapshot.campaignMeta = { id: campaign.id, name: campaign.name, system: campaign.system };
         campaign.snapshot.gameState = Engine.clone(campaign.gameState);
         return campaign;
@@ -77,6 +83,32 @@
         sheet.location = String(campaign.snapshot?.location || hud.location?.name || campaign.gameState.scene?.name || '').slice(0, 160);
         if (hud.ledger) sheet.notes += `${sheet.notes ? '\n' : ''}Imported ledger: ${String(hud.ledger).slice(0, 2400)}`;
         return sheet;
+    }
+
+    function hostCharacter(campaign, persona, name, resume = party.resumeCampaign) {
+        const previous = resume ? (campaign.players || []).find(player => player.isHost) || campaign.players?.[0] : null;
+        const saved = previous && (campaign.gameState.characters?.[previous.id] || previous.sheet);
+        return { sheet: saved ? Engine.normalizeSheet(saved, campaign.system, persona, name)
+            : sheetFromSource(campaign, persona, name), resumeCharacterId: saved ? previous.id : '' };
+    }
+
+    function remapHostedCharacter(campaign, previousId, playerId) {
+        if (!previousId || previousId === playerId) return;
+        const states = [campaign.gameState, campaign.snapshot.gameState,
+            campaign.snapshot.campaignStart?.gameState, campaign.snapshot.turnCheckpoint?.gameState];
+        for (const game of states.filter(Boolean)) {
+            if (game.characters?.[previousId]) {
+                game.characters[playerId] = game.characters[previousId];
+                delete game.characters[previousId];
+            }
+            for (const encounter of game.encounters || []) encounter.initiative = (encounter.initiative || []).map(id => id === previousId ? playerId : id);
+            for (const roll of game.rolls || []) if (roll.playerId === previousId) roll.playerId = playerId;
+            for (const transaction of game.transactions || []) {
+                if (transaction.actor === previousId) transaction.actor = playerId;
+                for (const row of [...(transaction.operations || []), ...(transaction.checks || [])]) if (row.playerId === previousId) row.playerId = playerId;
+            }
+        }
+        for (const row of campaign.snapshot.turnCheckpoint?.submissions || []) if (row.playerId === previousId) row.playerId = playerId;
     }
 
     const listInput = id => String(byId(id)?.value || '').split(',').map(value => value.trim()).filter(Boolean).slice(0, 60);
@@ -168,32 +200,50 @@
         return relay.toString();
     }
 
-    function socketCommand(command, payload = {}, timeoutMs = 12000) {
-        return new Promise(async (resolve, reject) => {
-            try { await connectSocket(); } catch (error) { reject(error); return; }
+    async function socketCommand(command, payload = {}, timeoutMs = 12000) {
+        await connectSocket();
+        return new Promise((resolve, reject) => {
             const id = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
             const timer = setTimeout(() => { party.pending.delete(id); reject(new Error('Internet room timed out.')); }, timeoutMs);
-            party.pending.set(id, { resolve, reject, timer });
-            party.socket.send(JSON.stringify({ id, command, inviteToken: party.inviteToken,
-                playerId: party.playerId, playerToken: party.playerToken, payload }));
+            const socket = party.socket;
+            party.pending.set(id, { resolve, reject, timer, socket });
+            try {
+                socket.send(JSON.stringify({ id, command, inviteToken: party.inviteToken,
+                    playerId: party.playerId, playerToken: party.playerToken, payload }));
+            } catch (error) {
+                clearTimeout(timer); party.pending.delete(id); reject(error);
+            }
         });
     }
 
     function connectSocket() {
         if (party.transport !== 'online') return Promise.resolve();
-        if (party.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
+        // OPEN means the TCP handshake finished; authenticated room access may
+        // still be pending. Every command must await the same authentication.
         if (party.socketReady) return party.socketReady;
+        if (party.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
         party.socketReady = new Promise((resolve, reject) => {
             let settled = false;
             const socket = new WebSocket(socketUrl()); party.socket = socket;
-            const fail = message => { if (!settled) { settled = true; reject(new Error(message)); } };
+            let authId = '';
+            const timer = setTimeout(() => fail('Relay connection or authentication timed out.'), 12000);
+            const fail = message => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (authId) party.pending.delete(authId);
+                reject(new Error(message));
+                try { socket.close(); } catch (_) {}
+            };
             socket.onopen = () => {
                 const id = `auth_${Date.now()}`;
-                const timer = setTimeout(() => fail('Relay authentication timed out.'), 10000);
+                authId = id;
                 party.pending.set(id, { resolve: data => { clearTimeout(timer); settled = true; party.state = data;
-                    party.reconnectAttempt = 0; render(); resolve(); }, reject: error => { clearTimeout(timer); fail(error.message); }, timer });
-                socket.send(JSON.stringify({ id, command: 'authenticate', inviteToken: party.inviteToken,
-                    playerId: party.playerId, playerToken: party.playerToken }));
+                    party.reconnectAttempt = 0; render(); resolve(); }, reject: error => fail(error.message), timer, socket });
+                try {
+                    socket.send(JSON.stringify({ id, command: 'authenticate', inviteToken: party.inviteToken,
+                        playerId: party.playerId, playerToken: party.playerToken }));
+                } catch (error) { fail(error.message); }
             };
             socket.onmessage = event => {
                 let message; try { message = JSON.parse(event.data); } catch (_) { return; }
@@ -204,8 +254,12 @@
             };
             socket.onerror = () => fail('Could not connect to the online room server. Check its address and try again.');
             socket.onclose = () => {
-                party.socket = null; party.socketReady = null;
+                if (party.socket === socket) { party.socket = null; party.socketReady = null; }
                 if (!settled) fail('Relay connection closed.');
+                for (const [id, pending] of party.pending) if (pending.socket === socket) {
+                    clearTimeout(pending.timer); party.pending.delete(id);
+                    pending.reject(new Error('Relay connection closed before the request completed.'));
+                }
                 if (party.mode !== 'off' && party.transport === 'online') scheduleReconnect();
             };
         }).finally(() => { party.socketReady = null; });
@@ -314,16 +368,20 @@
             }
             party.campaign.system = applyAuthoredSystem(party.campaign.system);
             party.campaign.gameState.rules = Engine.clone(party.campaign.system);
+            if (party.campaign.snapshot.campaignStart?.gameState) {
+                party.campaign.snapshot.campaignStart.gameState.rules = Engine.clone(party.campaign.system);
+            }
             party.campaign.snapshot.campaignMeta = { id: party.campaign.id, name: party.campaign.name, system: party.campaign.system };
             party.campaign.snapshot.gameState = Engine.clone(party.campaign.gameState);
             saveCampaign(party.campaign);
             const persona = hooks.currentPersona?.() || {};
-            const hostSheet = sheetFromSource(party.campaign, persona, hostName);
+            const { sheet: hostSheet, resumeCharacterId } = hostCharacter(party.campaign, persona, hostName);
             const payload = {
                     experienceType: party.campaign.source?.type || party.context?.type || 'world', experienceName: party.campaign.name,
                     worldName: party.campaign.name, sessionName: party.campaign.name,
                     displayName: hostName,
-                    persona, sheet: hostSheet, snapshot: party.campaign.snapshot
+                    persona, sheet: hostSheet, snapshot: party.campaign.snapshot,
+                    ...(resumeCharacterId ? { resumeCharacterId } : {})
             };
             let result;
             if (transport === 'online') {
@@ -335,7 +393,8 @@
                 party.playerId = result.hostPlayerId; party.playerToken = result.playerToken;
                 result.inviteUrl = encodeInvite({ relay: party.relayUrl, roomCode: result.roomCode, inviteToken: result.inviteToken });
             } else result = await hooks.bridgeRequest('/multiplayer/rooms', { method: 'POST', timeoutMs: 12000, body: payload });
-            party.campaign.players = [{ id: result.hostPlayerId, name: hostName, persona, sheet: hostSheet }];
+            remapHostedCharacter(party.campaign, resumeCharacterId, result.hostPlayerId);
+            party.campaign.players = [{ id: result.hostPlayerId, name: hostName, persona, sheet: hostSheet, isHost: true }];
             party.campaign.gameState.characters[result.hostPlayerId] = Engine.clone(hostSheet);
             party.campaign.snapshot.gameState = Engine.clone(party.campaign.gameState);
             saveCampaign(party.campaign);
@@ -383,9 +442,15 @@
 
     async function poll() {
         if (party.mode === 'off' || party.busy || party.committing) return;
+        const roomCode = party.roomCode, playerId = party.playerId;
         party.busy = true;
         try {
-            party.state = await request('/multiplayer/state', auth());
+            const latest = await request('/multiplayer/state', auth());
+            // A poll already in flight may finish while a foreground transaction
+            // or a new room is active. Do not publish that stale response.
+            if (party.mode === 'off' || party.roomCode !== roomCode || party.playerId !== playerId
+                || party.committing || Number(latest.revision || 0) < Number(party.state?.revision || 0)) return;
+            party.state = latest;
             if (!party.context) party.context = {
                 type: party.state?.experienceType || 'world',
                 name: party.state?.experienceName || party.state?.worldName || 'Shared session'
@@ -492,7 +557,7 @@
         campaign.snapshot = current.snapshot || campaign.snapshot || {};
         campaign.gameState = campaign.snapshot.gameState || campaign.gameState || Engine.createState(campaign.system, campaign.snapshot);
         campaign.players = (current.players || []).map(player => {
-            const sheet = player.sheet || campaign.gameState.characters?.[player.id] || emptySheet(player.persona, player.name, campaign.system);
+            const sheet = campaign.gameState.characters?.[player.id] || player.sheet || emptySheet(player.persona, player.name, campaign.system);
             campaign.gameState.characters[player.id] = Engine.normalizeSheet(sheet, campaign.system, player.persona, player.name);
             return { ...player, sheet: campaign.gameState.characters[player.id] };
         });
@@ -570,6 +635,24 @@
         } catch (error) { window.showToast?.(error.message, 'error'); }
     }
 
+    async function completePartyStructured(options, timeoutMs = 12000) {
+        const controller = new AbortController();
+        let timer;
+        try {
+            return await new Promise((resolve, reject) => {
+                timer = setTimeout(() => {
+                    const error = new Error('TinyBrain 2 party review timed out; deterministic validation remains available.');
+                    error.name = 'TimeoutError';
+                    controller.abort();
+                    reject(error);
+                }, timeoutMs);
+                try {
+                    Promise.resolve(window.HordeLabsNeedle.completeStructured(options, controller.signal)).then(resolve, reject);
+                } catch (error) { reject(error); }
+            });
+        } finally { clearTimeout(timer); }
+    }
+
     async function tinyBrainReferee(actions, campaign) {
         if (typeof window.HordeLabsNeedle?.completeStructured !== 'function') return { checks: [], diagnostics: ['TinyBrain 2 unavailable; deterministic validation remained active.'] };
         const game = campaign.gameState; const checks = []; const diagnostics = [];
@@ -583,7 +666,7 @@
             }, required: ['attribute', 'skill', 'difficulty', 'label', 'confidence'] } },
             { name: 'automatic_action', description: 'Use when the action is ordinary, safe, uncontested, impossible without further context, or should simply enter the fiction without a roll.', parameters: { type: 'object', properties: { reason: { type: 'string' }, confidence: { type: 'number', minimum: 0, maximum: 1 } }, required: ['reason', 'confidence'] } }];
             try {
-                const result = await window.HordeLabsNeedle.completeStructured({ name: 'multiplayer_referee',
+                const result = await completePartyStructured({ name: 'multiplayer_referee',
                     description: 'Classify whether this tabletop action needs a mechanical check. Never narrate or invent consequences.', tools,
                     systemFacts: `Rules ${game.rules.name}. Base difficulty ${game.rules.target || 10}.`,
                     input: `Player ${action.playerId} (${player.name}) declares: ${action.text}\nCurrent resources: ${Object.values(sheet.resources || {}).map(r => `${r.name} ${r.value}/${r.max}`).join(', ')}\nEffects: ${(sheet.effects || []).map(e => e.name).join(', ') || 'none'}`, maxTokens: 96 });
@@ -616,7 +699,7 @@
                 }, required: ['type'] } }, confidence: { type: 'number', minimum: 0, maximum: 1 }, note: { type: 'string' }
             }, required: ['acceptedIndexes', 'additions', 'confidence', 'note'] } };
         try {
-            const resultState = await window.HordeLabsNeedle.completeStructured({ name: 'multiplayer_state_manager', tools: [tool],
+            const resultState = await completePartyStructured({ name: 'multiplayer_state_manager', tools: [tool],
                 systemFacts: `Canonical revision ${campaign.gameState.revision}. Valid player IDs: ${Object.keys(campaign.gameState.characters || {}).join(', ')}.`,
                 input: `${Engine.promptState(campaign.gameState, campaign.players).slice(0, 2400)}\nNARRATION: ${String(result.text || '').slice(0, 1200)}\nPROPOSED: ${JSON.stringify(proposed).slice(0, 1600)}`,
                 maxTokens: 384 });
@@ -641,9 +724,10 @@
 
     async function commit() {
         const current = party.state;
-        if (party.mode !== 'host' || current?.round?.status !== 'ready') return;
+        if (party.committing || party.mode !== 'host' || current?.round?.status !== 'ready') return;
         const actions = current.round.submissions.filter(item => item.submitted && item.text);
         if (!actions.length) return;
+        const expectedRevision = current.revision, expectedRoundNumber = current.round.number;
         const button = byId('mp-session-commit');
         button.disabled = true;
         party.committing = true;
@@ -663,9 +747,17 @@
             // newly generated narration while TinyBrain/state validation runs.
             // That race advanced the round but published a stale transcript.
             const campaign = Engine.migrateCampaign(Engine.clone(campaignForRender(current)));
-            campaign.gameState = current.snapshot?.gameState || campaign.gameState || Engine.createState(campaign.system, current.snapshot);
+            campaign.gameState = Engine.clone(current.snapshot?.gameState || campaign.gameState || Engine.createState(campaign.system, current.snapshot));
             campaign.players = (current.players || []).map(player => ({ ...player,
                 sheet: campaign.gameState.characters?.[player.id] || player.sheet || emptySheet(player.persona, player.name, campaign.system) }));
+            const turnCheckpoint = {
+                historyLength: (current.snapshot?.history || campaign.snapshot.history || []).length,
+                history: Engine.clone(current.snapshot?.history || campaign.snapshot.history || []),
+                turn: Number(current.snapshot?.turn || 0), gameState: Engine.clone(campaign.gameState),
+                roomRoundNumber: current.round.number, submissions: Engine.clone(current.round.submissions),
+                ...(current.snapshot?.hud !== undefined ? { hud: Engine.clone(current.snapshot.hud) } : {}),
+                ...(current.snapshot?.location !== undefined ? { location: Engine.clone(current.snapshot.location) } : {})
+            };
             const referee = await tinyBrainReferee(actions, campaign);
             // Resolve uncertainty before prose is generated.  The narrator receives
             // binding roll outcomes; it never gets to invent success after the fact.
@@ -682,7 +774,8 @@
             }).join('\n')}` : '';
             const result = await hooks.executeTurn?.(campaign, prompt + rollBrief);
             if (!result?.text) throw new Error('The host model did not complete the turn. The round remains ready to retry.');
-            campaign.snapshot = current.snapshot || campaign.snapshot || {};
+            campaign.snapshot = Engine.clone(current.snapshot || campaign.snapshot || {});
+            campaign.snapshot.turnCheckpoint = turnCheckpoint;
             if (!Array.isArray(campaign.snapshot.history)) campaign.snapshot.history = [];
             actions.forEach(item => campaign.snapshot.history.push({ role: 'user', name: item.name, text: item.text }));
             campaign.snapshot.history.push({ role: 'dm', text: result.text });
@@ -700,7 +793,8 @@
             campaign.gameState = applied.state;
             campaign.snapshot.gameState = Engine.clone(applied.state);
             const knownRolls = new Set(campaign.snapshot.history.filter(item => item.rollId).map(item => item.rollId));
-                campaign.gameState.rolls.filter(roll => !knownRolls.has(roll.id)).forEach(roll => {
+                campaign.gameState.rolls.filter(roll => !knownRolls.has(roll.id)
+                    && !['gm', 'private'].includes(roll.visibility)).forEach(roll => {
                     const outcome = roll.outcome || (roll.success == null ? '' : roll.success ? 'SUCCESS' : 'FAILURE');
                     const math = roll.poolSize ? `${roll.successes} successes from ${roll.poolSize} dice [${roll.dice.join(', ')}]`
                         : `${roll.expression} [${roll.dice.join(', ')}]${roll.bonus ? ` + ${roll.bonus}` : ''} = ${roll.total}`;
@@ -713,13 +807,22 @@
                 campaign.snapshot.history.push({ role: 'system', name: 'STATE GUARD',
                     text: `${applied.rejected.length} malformed state update${applied.rejected.length === 1 ? '' : 's'} rejected; valid changes were committed safely.` });
             }
-            saveCampaign(campaign);
-            await request('/multiplayer/commit', auth({ snapshot: campaign.snapshot }));
+            const committed = await request('/multiplayer/commit', auth({ snapshot: campaign.snapshot,
+                expectedRevision, expectedRoundNumber }));
             // Publish the completed local transaction before rendering again,
             // then fetch the canonical relay copy while normal polling remains
             // paused. This makes a one-player test follow the same path as a
             // full LAN/Internet party.
             party.campaign = campaign;
+            saveCampaign(campaign);
+            // The relay accepted the turn. Even if the follow-up state fetch
+            // fails, never expose the old ready round as another paid retry.
+            party.state = committed?.snapshot && committed?.round ? Engine.clone(committed)
+                : { ...Engine.clone(current), snapshot: Engine.clone(campaign.snapshot), proposal: null,
+                revision: Number(committed?.revision ?? (Number(expectedRevision || 0) + 1)),
+                round: { number: committed?.roundNumber || expectedRoundNumber + 1, status: 'collecting',
+                    submissions: [], activePlayerId: current.players?.[0]?.id || '' } };
+            render();
             party.state = await request('/multiplayer/state', auth());
             campaign.snapshot = Engine.clone(party.state.snapshot || campaign.snapshot);
             campaign.gameState = Engine.clone(campaign.snapshot.gameState || campaign.gameState);
@@ -763,21 +866,29 @@
 
     async function applyDecision() {
         const proposal = party.state?.proposal;
-        if (party.mode !== 'host' || proposal?.status !== 'approved') return;
+        if (party.committing || party.mode !== 'host' || proposal?.status !== 'approved') return;
+        const current = party.state;
+        let reroll = false;
+        party.committing = true;
         try {
-            const campaign = campaignForRender(party.state);
-            const history = campaign.snapshot?.history || [];
-            if (proposal.type === 'reroll') {
-                const lastDm = [...history].reverse().findIndex(item => item.role === 'dm');
-                if (lastDm >= 0) history.splice(history.length - 1 - lastDm, 1);
-            } else if (proposal.type === 'reset') {
-                campaign.snapshot.history = [];
-                campaign.snapshot.turn = 0;
-            }
+            const campaign = Engine.migrateCampaign(Engine.clone(campaignForRender(current)));
+            campaign.snapshot = Engine.restoreDecision(current.snapshot || campaign.snapshot, proposal.type);
+            campaign.gameState = Engine.clone(campaign.snapshot.gameState);
+            await request('/multiplayer/resolve', auth({ snapshot: campaign.snapshot,
+                expectedRevision: current.revision, proposalId: proposal.id }));
+            party.campaign = campaign;
             saveCampaign(campaign);
-            await request('/multiplayer/resolve', auth({ snapshot: campaign.snapshot }));
-            await poll();
+            party.state = await request('/multiplayer/state', auth());
+            campaign.snapshot = Engine.clone(party.state.snapshot || campaign.snapshot);
+            campaign.gameState = Engine.clone(campaign.snapshot.gameState || campaign.gameState);
+            campaign.lastRoomRevision = Number(party.state.revision || 0);
+            saveCampaign(campaign);
+            render();
+            reroll = proposal.type === 'reroll';
         } catch (error) { window.showToast?.(error.message, 'error'); }
+        finally { party.committing = false; }
+        await poll();
+        if (reroll) await commit();
     }
 
     async function end() {
@@ -968,7 +1079,9 @@
 
     function openGmConsole() {
         if (party.mode !== 'host') return;
-        const campaign = campaignForRender(party.state); let overlay = byId('mp-gm-overlay');
+        const campaign = Engine.migrateCampaign(Engine.clone(campaignForRender(party.state)));
+        const roomRevision = party.state.revision;
+        let overlay = byId('mp-gm-overlay');
         if (!overlay) { overlay = document.createElement('div'); overlay.id = 'mp-gm-overlay'; overlay.className = 'modal-overlay'; document.body.appendChild(overlay); }
         const encounter = (campaign.gameState.encounters || []).find(entry => entry.status === 'active');
         overlay.innerHTML = `<div class="modal mp-gm-modal"><header><div><span class="vh-eyebrow">HOST AUTHORITY</span><h2>GM Console</h2><p>Manual changes use the same validated transaction engine as AI turns.</p></div><button class="labs-close-btn" data-gm-close>✕</button></header><div class="mp-gm-body"><h3 class="mp-gm-wide">Character</h3><label><span>Target character</span><select class="form-input" data-gm-player>${(party.state.players || []).map(player => `<option value="${escape(player.id)}">${escape(player.name)}</option>`).join('')}${Object.entries(campaign.gameState.npcs || {}).map(([npcId,npc]) => `<option value="${escape(npcId)}">NPC · ${escape(npc.name)}</option>`).join('')}</select></label><label><span>Resource</span><select class="form-input" data-gm-resource>${Object.values(campaign.gameState.characters?.[party.state.players?.[0]?.id]?.resources || {}).map(resource => `<option value="${escape(resource.id)}">${escape(resource.name)}</option>`).join('')}</select></label><label><span>Change (+ heal / − damage)</span><input class="form-input" type="number" data-gm-delta value="0"></label><label><span>Currency key and change</span><div class="mp-inline-fields"><input class="form-input" data-gm-currency placeholder="Gold, credits…"><input class="form-input" type="number" data-gm-currency-delta value="0"></div></label><label><span>Add buff, debuff or condition</span><input class="form-input" data-gm-effect placeholder="Poisoned, inspired, bleeding…"></label><label><span>Effect kind</span><select class="form-input" data-gm-effect-kind><option value="condition">Condition</option><option value="buff">Buff</option><option value="debuff">Debuff</option></select></label><label><span>Check modifier</span><input class="form-input" type="number" data-gm-modifier value="0"></label><label><span>Duration in rounds (-1 permanent)</span><input class="form-input" type="number" data-gm-duration value="-1"></label><label><span>XP / advancement award</span><input class="form-input" type="number" data-gm-xp value="0"></label><h3 class="mp-gm-wide">Encounter & cast</h3><label><span>Encounter</span><select class="form-input" data-gm-encounter><option value="none">No encounter change</option>${encounter ? '<option value="end">End active encounter</option>' : '<option value="start">Start an encounter</option>'}</select></label><label><span>Encounter name</span><input class="form-input" data-gm-encounter-name placeholder="Ambush at Blackwater Bridge"></label><label><span>Create NPC / adversary</span><input class="form-input" data-gm-npc-name placeholder="Goblin scout, corporate guard…"></label><label><span>NPC archetype</span><input class="form-input" data-gm-npc-archetype placeholder="Skirmisher, fixer, rival…"></label><h3 class="mp-gm-wide">Campaign state</h3><label><span>Scene / party location</span><input class="form-input" data-gm-scene placeholder="Blackwater Bridge"></label><label><span>Add to party inventory</span><div class="mp-inline-fields"><input class="form-input" data-gm-shared-item placeholder="Rope, medkit…"><input class="form-input" type="number" min="1" data-gm-shared-qty value="1"></div></label><label><span>Clock and progress</span><div class="mp-inline-fields"><input class="form-input" data-gm-clock placeholder="Alarm"><input class="form-input" type="number" data-gm-clock-delta value="0"></div></label><label><span>Clock maximum</span><input class="form-input" type="number" min="1" data-gm-clock-max value="6"></label><label><span>Quest / objective</span><input class="form-input" data-gm-quest placeholder="Open the sealed gate"></label><label><span>Quest status</span><select class="form-input" data-gm-quest-status><option value="active">Active</option><option value="complete">Complete</option><option value="failed">Failed</option><option value="paused">Paused</option></select></label><label class="mp-gm-wide"><span>Transaction note</span><input class="form-input" data-gm-note placeholder="Goblin blade deals 4 damage"></label><button class="btn btn-primary" data-gm-apply>Commit state change</button></div></div>`;
@@ -1012,8 +1125,9 @@
                 campaign.system.mechanicsMode = nextMechanicsMode;
                 campaign.gameState.rules.mechanicsMode = nextMechanicsMode;
                 const applied = Engine.applyReceiptRecovering(campaign.gameState, { baseRevision: campaign.gameState.revision, operations, checks: [], advanceRound: false, summary: overlay.querySelector('[data-gm-note]').value || 'GM state change' }, party.playerId);
-                campaign.gameState = applied.state; campaign.snapshot.gameState = Engine.clone(applied.state); saveCampaign(campaign);
-                await request('/multiplayer/gm', auth({ snapshot: campaign.snapshot })); overlay.classList.add('hidden'); await poll();
+                campaign.gameState = applied.state; campaign.snapshot.gameState = Engine.clone(applied.state);
+                await request('/multiplayer/gm', auth({ snapshot: campaign.snapshot, expectedRevision: roomRevision }));
+                party.campaign = campaign; saveCampaign(campaign); overlay.classList.add('hidden'); await poll();
             } catch (error) { window.showToast?.(error.message, 'error'); }
         };
     }

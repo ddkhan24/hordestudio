@@ -7,6 +7,7 @@ import concurrent.futures
 import hashlib
 import json
 import re
+import sqlite3
 import threading
 from .vh2_provider import transport, parse_response, UnknownOutcome, RejectedOutput
 
@@ -211,7 +212,6 @@ def _poll(service):
                 rev,state=service.read(db,row['world_id']);status(service,db,row['world_id'],rev,state,'unknown','Host restarted during review. The next daily review will use current evidence.')
     for ident,(future,world,frozen) in list(service._story_pending.items()):
         if not future.done():continue
-        del service._story_pending[ident]
         with service.connect() as db:
             db.execute('BEGIN IMMEDIATE');rev,state=service.read(db,world)
             data=None
@@ -221,14 +221,19 @@ def _poll(service):
                 if not accepted:status(service,db,world,rev,state,'discarded',error)
                 db.execute('UPDATE vh2_story_jobs SET status=?,result=?,error=? WHERE id=?',(outcome,encode(data) if accepted else None,error,ident))
             except Exception as exc:
+                if isinstance(exc,sqlite3.Error) and future.exception() is not exc:raise
                 outcome='unknown' if isinstance(exc,UnknownOutcome) else 'failed'
                 error='Provider outcome unknown; no retry of this review.' if outcome=='unknown' else ('Daily review not applied: '+str(exc) if isinstance(exc,InvalidLifeReview) else 'The daily review failed validation or provider processing ('+type(exc).__name__+').')+' Life continues normally.'
                 # Keep bounded parsed output for local diagnosis. Failed candidates
                 # never enter memories, prompts or executable advice.
-                candidate=encode(data) if isinstance(data,dict) else None
+                try:candidate=encode(data) if isinstance(data,dict) else None
+                except (TypeError,ValueError):candidate=None
                 if candidate and len(candidate)>16000:candidate=None
                 db.execute('UPDATE vh2_story_jobs SET status=?,result=?,error=? WHERE id=?',(outcome,candidate,error,ident));status(service,db,world,rev,state,outcome,error)
             prune_terminal_jobs(db,world,service.clock())
+        # Keep the completed take until its result transaction is durable. A
+        # storage retry reuses this result and never calls the provider again.
+        service._story_pending.pop(ident,None)
     if service._story_pending:return
     pending=None
     with service.connect() as db:
@@ -248,9 +253,7 @@ def _poll(service):
             provider=service.dialogue_provider.current(db,state.get('integration',{}).get('providerScope'))
             if not provider or not json.loads(provider['config']).get('enabled'):
                 status(service,db,world,rev,state,'waiting','Configure the character’s text provider to enable daily reviews.');continue
-            config=json.loads(provider['config']);budget_error=service.dialogue_provider.budget_error(db,config,'background')
-            if budget_error:
-                status(service,db,world,rev,state,'waiting',budget_error);continue
+            config=json.loads(provider['config'])
             try:frozen=snapshot(service,world,rev,state)
             except ValueError:
                 status(service,db,world,rev,state,'waiting','The life context exceeds the daily review size limit.');continue

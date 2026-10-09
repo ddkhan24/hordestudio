@@ -51,33 +51,66 @@ async function decodeWorldShard(value) {
 const HordeDB = {
     db: null,
     revision: null,
+    identity: null,
+    initialized: false,
+    opening: null,
+    closedIntentionally: false,
+    storageError: null,
+    unresolvedWriteFailure: false,
     conflicted: false,
     conflictNotified: false,
     async init() {
-        return new Promise((resolve, reject) => {
+        this.closedIntentionally = false;
+        await this.ensureOpen();
+    },
+    conflict(message) {
+        const error = new Error(message);
+        error.code = 'STATE_CONFLICT';
+        this.conflicted = true;
+        this.storageError = error;
+        this.startupReads?.clear();
+        this.reportStorageFailure(error);
+        return error;
+    },
+    reportStorageFailure(error) {
+        if (typeof showStorageFailureBanner === 'function') showStorageFailureBanner(error);
+    },
+    async openConnection(recovering) {
+        const db = await new Promise((resolve, reject) => {
             const request = indexedDB.open(DB_NAME, DB_VERSION);
-            request.onerror = () => reject(request.error || new Error('Database error'));
+            let finished = false;
+            let unexpectedUpgrade = false;
+            const timeout = setTimeout(() => {
+                if (finished) return;
+                finished = true;
+                reject(new Error('The local database did not reopen within 15 seconds. Keep this tab open and export an emergency memory copy.'));
+            }, 15_000);
+            request.onerror = () => {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timeout);
+                reject(unexpectedUpgrade
+                    ? this.conflict('The original saved database is missing or has a different version. Saving is paused; export an emergency memory copy before reloading.')
+                    : request.error || new Error('Database error'));
+            };
             request.onupgradeneeded = (e) => {
-                const db = e.target.result;
-                if (!db.objectStoreNames.contains(STORE_NAME)) {
-                    db.createObjectStore(STORE_NAME);
+                if (recovering) {
+                    // Opening a deleted database would otherwise create an
+                    // empty replacement before we could verify its identity.
+                    unexpectedUpgrade = true;
+                    e.target.transaction.abort();
+                    return;
+                }
+                const opened = e.target.result;
+                if (!opened.objectStoreNames.contains(STORE_NAME)) {
+                    opened.createObjectStore(STORE_NAME);
                 }
             };
-            request.onsuccess = (e) => {
-                this.db = e.target.result;
-                this.db.onversionchange = () => {
-                    this.conflicted = true;
-                    this.db.close();
-                    if (document.getElementById('toast-container')) {
-                        showToast('Horde Studio storage changed in another tab. Reload this tab before saving.', 'error');
-                    }
-                };
-                this.get('stateRevision').then(value => {
-                    this.revision = Number.isSafeInteger(value) ? value : 0;
-                    this.conflicted = false;
-                    this.conflictNotified = false;
-                    resolve();
-                }, reject);
+            request.onsuccess = () => {
+                if (finished) { request.result.close(); return; }
+                finished = true;
+                clearTimeout(timeout);
+                resolve(request.result);
             };
             request.onblocked = () => {
                 if (document.getElementById('toast-container')) {
@@ -85,6 +118,137 @@ const HordeDB = {
                 }
             };
         });
+        try {
+            // An identity distinguishes the original database from an empty
+            // replacement whose revision happens to match. Initialize it once
+            // for existing installations without changing their stateRevision.
+            const readMetadata = createIdentity => new Promise((resolve, reject) => {
+                const tx = db.transaction([STORE_NAME], createIdentity ? 'readwrite' : 'readonly');
+                const store = tx.objectStore(STORE_NAME);
+                let revision, identity, operationError;
+                const revisionRequest = store.get('stateRevision');
+                const identityRequest = store.get('databaseIdentity');
+                revisionRequest.onsuccess = () => {
+                    revision = Number.isSafeInteger(revisionRequest.result) ? revisionRequest.result : 0;
+                };
+                identityRequest.onsuccess = () => {
+                    identity = identityRequest.result;
+                    if (createIdentity && (typeof identity !== 'string' || !identity)) {
+                        identity = crypto.randomUUID();
+                        try { store.put(identity, 'databaseIdentity'); }
+                        catch (error) { operationError = error; tx.abort(); }
+                    }
+                };
+                tx.oncomplete = () => resolve({ revision, identity });
+                tx.onerror = tx.onabort = () => reject(operationError || tx.error || Error('Unable to verify saved data'));
+            });
+            let metadata = await readMetadata(false);
+            if (!recovering && (typeof metadata.identity !== 'string' || !metadata.identity)) {
+                try { metadata = await readMetadata(true); }
+                catch (error) {
+                    // A full browser quota must not make an otherwise readable
+                    // installation impossible to open and back up. Without an
+                    // identity, any later reconnect will fail closed.
+                    if (error?.name !== 'QuotaExceededError') throw error;
+                }
+            }
+            if (this.closedIntentionally) throw Error('Database was intentionally closed. Reload Horde Studio before saving.');
+            if (recovering && (!this.identity || metadata.identity !== this.identity || metadata.revision !== this.revision)) {
+                throw this.conflict('The saved database was replaced or changed while Horde Studio was open. Saving is paused to protect your in-memory work. Export an emergency copy before reloading.');
+            }
+            if (this.conflicted) throw this.storageError || Error('Storage changed in another tab. Reload before saving.');
+            this.db = db;
+            this.identity = metadata.identity;
+            this.initialized = true;
+            this.revision = metadata.revision;
+            this.storageError = null;
+            this.conflictNotified = false;
+            if (recovering && typeof retryPendingStorageWrites === 'function') {
+                // A previous save may have failed before this reopen. Keep the
+                // warning visible until every queued snapshot is durable.
+                queueMicrotask(() => retryPendingStorageWrites()
+                    .then(() => {
+                        if (this.unresolvedWriteFailure) showStorageFailureBanner(
+                            Error('The connection reopened, but a previous write failed and may not have been retried. Export an emergency memory copy and re-save the affected work before closing this tab.')
+                        );
+                        else clearStorageFailureBanner();
+                    })
+                    .catch(error => showStorageFailureBanner(error)));
+            } else if (!this.unresolvedWriteFailure && typeof clearStorageFailureBanner === 'function') {
+                clearStorageFailureBanner();
+            }
+            db.onversionchange = () => {
+                if (this.db !== db) return;
+                this.db = null;
+                db.close();
+                this.conflict('Horde Studio storage changed in another tab. Saving is paused; export unsaved work before reloading.');
+            };
+            db.onclose = () => {
+                if (this.db !== db) return;
+                this.db = null;
+                if (!this.closedIntentionally && !this.conflicted) {
+                    this.ensureOpen().catch(error => this.reportStorageFailure(error));
+                }
+            };
+            return db;
+        } catch (error) {
+            db.close();
+            throw error;
+        }
+    },
+    async ensureOpen({ readOnly = false } = {}) {
+        if (this.conflicted && !(readOnly && this.db)) throw this.storageError || Error('Saving is paused because storage changed.');
+        if (this.closedIntentionally) throw Error('Database was intentionally closed. Reload Horde Studio before saving.');
+        if (this.db) return this.db;
+        if (this.opening) return this.opening;
+        const pending = this.openConnection(this.initialized);
+        this.opening = pending;
+        try { return await pending; }
+        catch (error) {
+            this.storageError = error;
+            this.reportStorageFailure(error);
+            throw error;
+        } finally {
+            if (this.opening === pending) this.opening = null;
+        }
+    },
+    async runTransaction(task, { readOnly = false, write = false, managedRetry = false } = {}) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+            let db;
+            try { db = await this.ensureOpen({ readOnly }); }
+            catch (error) {
+                if (write && !managedRetry) this.unresolvedWriteFailure = true;
+                throw error;
+            }
+            try { return await task(db); }
+            catch (error) {
+                const closedBeforeStart = error?.name === 'InvalidStateError';
+                const closedDuringTransaction = error?.name === 'AbortError' && this.db !== db;
+                if (attempt || this.conflicted || (!closedBeforeStart && !closedDuringTransaction)) {
+                    if (write && !this.conflicted) {
+                        if (!managedRetry) this.unresolvedWriteFailure = true;
+                        this.storageError = error;
+                        this.reportStorageFailure(error);
+                    }
+                    throw error;
+                }
+                if (this.db === db) this.db = null;
+                db.close();
+                try { await this.ensureOpen({ readOnly }); }
+                catch (reopenError) {
+                    if (write && !managedRetry) this.unresolvedWriteFailure = true;
+                    throw reopenError;
+                }
+            }
+        }
+    },
+    async verifyConnection() {
+        return this.runTransaction(db => new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readonly');
+            transaction.objectStore(STORE_NAME).get('stateRevision');
+            transaction.oncomplete = resolve;
+            transaction.onerror = transaction.onabort = () => reject(transaction.error || Error('Unable to verify storage connection'));
+        }), { readOnly: true });
     },
     async prefetch(keys) {
         // Read startup records together, but keep their storage wrappers lazy.
@@ -92,16 +256,19 @@ const HordeDB = {
         // strings. Doing that for every domain before the first screen is
         // interactive made startup scale with old photos and memory caches,
         // even when the user was only opening the Chat Library.
-        const values = new Map();
-        await new Promise((resolve, reject) => {
-            const tx = this.db.transaction([STORE_NAME], 'readonly'), store = tx.objectStore(STORE_NAME);
+        const values = await this.runTransaction(db => new Promise((resolve, reject) => {
+            const snapshot = new Map();
+            const tx = db.transaction([STORE_NAME], 'readonly'), store = tx.objectStore(STORE_NAME);
             for (const key of new Set([...keys, 'stateRevision'])) {
                 const request = store.get(key);
-                request.onsuccess = () => values.set(key, request.result);
+                request.onsuccess = () => snapshot.set(key, request.result);
             }
-            tx.oncomplete = resolve;
+            tx.oncomplete = () => resolve(snapshot);
             tx.onerror = tx.onabort = () => reject(tx.error || Error('Unable to load saved setup'));
-        });
+        }));
+        if (this.revision !== (Number.isSafeInteger(values.get('stateRevision')) ? values.get('stateRevision') : 0)) {
+            throw this.conflict('Saved data changed during startup. Saving is paused; export unsaved work before reloading.');
+        }
         this.revision = Number.isSafeInteger(values.get('stateRevision')) ? values.get('stateRevision') : 0;
         values.delete('stateRevision');
         this.startupReads = values;
@@ -113,15 +280,16 @@ const HordeDB = {
             return key.startsWith('worldInstance:') ? decodeWorldShard(value)
                 : HordeHumanPackage.storageDecode(value);
         }
-        if (!this.db) throw new Error('Database is not initialized');
-        return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([STORE_NAME], 'readonly');
+        const raw = await this.runTransaction(db => new Promise((resolve, reject) => {
+            let result;
+            const transaction = db.transaction([STORE_NAME], 'readonly');
             const request = transaction.objectStore(STORE_NAME).get(key);
-            request.onsuccess = () => (key.startsWith('worldInstance:')
-                ? decodeWorldShard(request.result)
-                : HordeHumanPackage.storageDecode(request.result)).then(resolve, reject);
+            request.onsuccess = () => { result = request.result; };
+            transaction.oncomplete = () => resolve(result);
             request.onerror = () => reject(request.error || transaction.error || new Error(`Unable to read ${key}`));
-        });
+            transaction.onerror = transaction.onabort = () => reject(transaction.error || new Error(`Unable to read ${key}`));
+        }), { readOnly: true });
+        return key.startsWith('worldInstance:') ? decodeWorldShard(raw) : HordeHumanPackage.storageDecode(raw);
     },
     async set(key, value) {
         // Canonical records must participate in revision checks even when a
@@ -129,27 +297,25 @@ const HordeDB = {
         if (!/^(?:embedding_cache|labsDiagnostics|chatAsset:|companionVideoAsset:)/.test(key)) {
             return this.setMultiple({ [key]: value });
         }
-        if (!this.db) throw new Error('Database is not initialized');
-        return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([STORE_NAME], 'readwrite');
+        return this.runTransaction(db => new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
             const request = transaction.objectStore(STORE_NAME).put(value, key);
             transaction.oncomplete = () => resolve();
             transaction.onerror = () => reject(transaction.error || request.error || new Error(`Unable to save ${key}`));
             transaction.onabort = () => reject(transaction.error || new Error(`Saving ${key} was aborted`));
-        });
+        }), { write: true });
     },
     async delete(key) {
-        if (!this.db) throw new Error('Database is not initialized');
-        return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([STORE_NAME], 'readwrite');
+        return this.runTransaction(db => new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
             const request = transaction.objectStore(STORE_NAME).delete(key);
             transaction.oncomplete = () => resolve();
             transaction.onerror = () => reject(transaction.error || request.error || new Error(`Unable to delete ${key}`));
             transaction.onabort = () => reject(transaction.error || new Error(`Deleting ${key} was aborted`));
-        });
+        }), { write: true });
     },
-    async setMultiple(kvMap) {
-        if (!this.db || this.revision == null) throw new Error('Database is not initialized');
+    async setMultiple(kvMap, { managedRetry = false } = {}) {
+        if (this.conflicted) throw this.storageError || Error('Saving is paused because storage changed.');
         // Capture media-heavy snapshots synchronously before the transaction;
         // Blob deduplication preserves complete reversible history within IDB limits.
         const storedMap = Object.fromEntries(Object.entries(kvMap).map(([key, value]) =>
@@ -164,8 +330,8 @@ const HordeDB = {
             const readyMap = Object.fromEntries(await Promise.all(Object.entries(storedMap).map(async ([key, value]) =>
                 [key, value?.$hordeWorldShardSource !== undefined
                     ? await compressWorldShard(value.$hordeWorldShardSource) : value])));
-            return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([STORE_NAME], 'readwrite');
+            return this.runTransaction(db => new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
             const store = transaction.objectStore(STORE_NAME);
             let operationError = null;
             let committedRevision = null;
@@ -175,9 +341,7 @@ const HordeDB = {
                 // Compare inside the same transaction as the writes. Another
                 // tab cannot interleave between validation and commit.
                 if (this.conflicted || storedRevision !== this.revision) {
-                    this.conflicted = true;
-                    operationError = new Error('Another Horde Studio tab changed the saved data. Saving in this tab is paused to protect both copies. Export any unsaved work from this tab, then reload it.');
-                    operationError.code = 'STATE_CONFLICT';
+                    operationError = this.conflict('Another Horde Studio tab changed the saved data. Saving in this tab is paused to protect both copies. Export any unsaved work from this tab, then reload it.');
                     transaction.abort();
                     return;
                 }
@@ -186,6 +350,7 @@ const HordeDB = {
             };
             transaction.oncomplete = () => {
                 this.revision = committedRevision;
+                for (const key of Object.keys(readyMap)) this.startupReads?.delete(key);
                 resolve();
             };
             transaction.onerror = () => reject(operationError || transaction.error || new Error('Unable to save application data'));
@@ -195,20 +360,20 @@ const HordeDB = {
                 // check aborts every put, so no partial stale snapshot is durable.
                 for (const [key, value] of Object.entries(readyMap)) {
                     if (key === 'stateRevision') throw new Error('The storage revision is engine-owned');
-                    this.startupReads?.delete(key);
                     store.put(value, key);
                 }
             } catch (error) {
                 operationError = error;
                 transaction.abort();
             }
-            });
+            }), { write: true, managedRetry });
         };
         const pending = (this.writeQueue || Promise.resolve()).catch(() => {}).then(commit);
         this.writeQueue = pending.catch(() => {});
         return pending;
     },
     close() {
+        this.closedIntentionally = true;
         if (this.db) this.db.close();
         this.db = null;
     }
@@ -280,14 +445,19 @@ const HordeVectorMemory = {
         return `h_${hash.toString(16).padStart(16, '0')}_${clean.length}`;
     },
 
-    async getCachedEmbedding(text, onDiagnostics = null) {
+    async getCachedEmbedding(text, onDiagnostics = null, signal = null) {
+        if (signal?.aborted) return HordeWorldModelClient.runAbortable(() => null, signal);
         if (!text) return null;
-        await this.init();
+        await HordeWorldModelClient.runAbortable(() => this.init(), signal);
+        if (signal?.aborted) return HordeWorldModelClient.runAbortable(() => null, signal);
         // Cache entries are provider/model scoped. Text-only keys silently mixed
         // incompatible vector spaces after an embedding model was changed.
-        const key = `${this.namespace()}|${this.hashText(text)}`;
+        const namespace = this.namespace();
+        const key = `${namespace}|${this.hashText(text)}`;
         if (this.cache.has(key)) {
-            return this.cache.get(key);
+            const cached = this.cache.get(key);
+            if (Array.isArray(cached) && cached.length && cached.every(value => typeof value === 'number' && Number.isFinite(value))) return cached;
+            this.cache.delete(key);
         }
         
         // A transient outage only enables fallback briefly; future requests retry.
@@ -295,17 +465,19 @@ const HordeVectorMemory = {
         if (this.isFallbackActive) this.triggerFallback(false);
 
         try {
-            const emb = await getEmbedding(text, onDiagnostics);
+            const emb = await getEmbedding(text, onDiagnostics, signal);
+            if (signal?.aborted) return HordeWorldModelClient.runAbortable(() => null, signal);
             this.cache.set(key, emb);
             while (this.cache.size > this.maxCacheEntries) {
                 this.cache.delete(this.cache.keys().next().value);
             }
-            this.triggerFallback(false);
+            if (this.namespace() === namespace) this.triggerFallback(false);
             this.scheduleCacheSave();
             return emb;
         } catch (err) {
+            if (signal?.aborted || err?.name === 'AbortError') throw err;
             console.error("Embedding API failed, temporarily activating keyword fallback:", err);
-            this.triggerFallback(true);
+            if (this.namespace() === namespace) this.triggerFallback(true);
             return null;
         }
     },
@@ -324,20 +496,26 @@ const HordeVectorMemory = {
         }
     },
 
-    async search(memoryList, queryText, limit = 4, threshold = 0.35, onDiagnostics = null, maxBackfill = 12) {
+    async search(memoryList, queryText, limit = 4, threshold = 0.35, onDiagnostics = null, maxBackfill = 12, signal = null) {
+        if (signal?.aborted) return HordeWorldModelClient.runAbortable(() => [], signal);
         if (!memoryList || memoryList.length === 0) return [];
 
         const words = memorySearchTerms(queryText);
+        const namespace = this.namespace();
         let queryVec = null;
-        if (!this.isFallbackActive) {
-            try { queryVec = await this.getCachedEmbedding(queryText, onDiagnostics); }
+        if (!this.isFallbackActive || Date.now() >= this.fallbackUntil) {
+            try { queryVec = await this.getCachedEmbedding(queryText, onDiagnostics, signal); }
             catch (err) {
+                if (signal?.aborted || err?.name === 'AbortError') throw err;
                 console.warn("Vector search failed, falling back to hybrid keyword search:", err);
                 this.triggerFallback(true);
             }
         }
 
-        const namespace = this.namespace();
+        // A settings change during cache hydration/request must not relabel a
+        // vector from a different provider or model as this search's namespace.
+        if (signal?.aborted) return HordeWorldModelClient.runAbortable(() => [], signal);
+        if (this.namespace() !== namespace) queryVec = null;
         // Lazily rebuild only relevant stale records after a model/provider
         // change. This avoids a surprise bulk embedding bill while ensuring
         // frequently recalled memories migrate themselves back to semantic search.
@@ -349,7 +527,10 @@ const HordeVectorMemory = {
                 .sort((a, b) => b.lexical - a.lexical)
                 .slice(0, Math.max(0, Math.min(12, maxBackfill, limit * 2)));
             for (const item of stale) {
-                const embedding = await this.getCachedEmbedding(item.block.text, onDiagnostics);
+                if (this.namespace() !== namespace) break;
+                const embedding = await this.getCachedEmbedding(item.block.text, onDiagnostics, signal);
+                if (signal?.aborted) return HordeWorldModelClient.runAbortable(() => [], signal);
+                if (this.namespace() !== namespace) break;
                 if (!embedding) break;
                 item.block.embedding = embedding;
                 item.block.embeddingNamespace = namespace;
@@ -421,6 +602,7 @@ function memoryDedupeKey(memory) {
 }
 
 let generationController = null;
+let chatTurnInProgress = false;
 let worldTurnInProgress = false; // re-entry guard for executeWorldTurn
 const WORLD_HOSTED_TURN_DEADLINE_MS = 150000;
 let worldMutationInProgress = false; // short, persisted non-generation commands
@@ -2800,7 +2982,7 @@ async function loadPersistedWorldInstances() {
 
 async function commitWorldMigrationAware(records) {
     try {
-        await HordeDB.setMultiple(records);
+        await HordeDB.setMultiple(records, { managedRetry: true });
         return !worldMigrationDeferred;
     } catch (error) {
         const quota = error?.name === 'QuotaExceededError' || /quota/i.test(error?.message || '');
@@ -2811,7 +2993,7 @@ async function commitWorldMigrationAware(records) {
         const legacyRecords = Object.fromEntries(Object.entries(records).filter(([key]) =>
             key !== 'worldInstanceIndex' && !key.startsWith('worldInstance:')));
         legacyRecords.worldInstances = state.worldInstances;
-        await HordeDB.setMultiple(legacyRecords);
+        await HordeDB.setMultiple(legacyRecords, { managedRetry: true });
         worldMigrationDeferred = true;
         if (!worldMigrationNoticeShown) {
             worldMigrationNoticeShown = true;
@@ -2928,7 +3110,14 @@ async function saveWorldsState({ worldId = null } = {}) {
             const requestedWorldIds = [...worldSaveRequestedIds];
             worldSaveActiveRequested = false;
             worldSaveRequestedIds = new Set();
-            await persistWorldStateSnapshot({ includeActiveInstance, requestedWorldIds });
+            try {
+                await persistWorldStateSnapshot({ includeActiveInstance, requestedWorldIds });
+            } catch (error) {
+                worldSaveActiveRequested ||= includeActiveInstance;
+                requestedWorldIds.forEach(id => worldSaveRequestedIds.add(id));
+                worldSaveQueued = true;
+                throw error;
+            }
         } while (worldSaveQueued);
     })();
     try {
@@ -2967,11 +3156,21 @@ async function saveState({ allWorldInstances = false, replaceWorldLibrary = fals
             saveStateReplaceWorldLibraryQueued = false;
             const flushAssetRecords = Object.fromEntries(saveStateAssetRecordsQueued);
             saveStateAssetRecordsQueued = new Map();
-            await persistStateSnapshot({
-                allWorldInstances: flushWorldInstances,
-                replaceWorldLibrary: replacingWorldLibrary,
-                assetRecords: flushAssetRecords
-            });
+            try {
+                await persistStateSnapshot({
+                    allWorldInstances: flushWorldInstances,
+                    replaceWorldLibrary: replacingWorldLibrary,
+                    assetRecords: flushAssetRecords
+                });
+            } catch (error) {
+                saveStateAllWorldInstancesQueued ||= flushWorldInstances;
+                saveStateReplaceWorldLibraryQueued ||= replacingWorldLibrary;
+                for (const [key, value] of Object.entries(flushAssetRecords)) {
+                    if (!saveStateAssetRecordsQueued.has(key)) saveStateAssetRecordsQueued.set(key, value);
+                }
+                saveStateQueued = true;
+                throw error;
+            }
         } while (saveStateQueued);
     })();
     try {
@@ -2994,19 +3193,24 @@ async function saveVirtualHumansState(options = {}) {
         do {
             const scope = virtualHumanSaveScope;
             virtualHumanSaveScope = 0;
-            // Avoid making a second large clone while an older full snapshot is
-            // still committing. IndexedDB revision checks remain authoritative.
-            if (saveStateInFlight) await saveStateInFlight;
-            if (scope > 1) (state.companions || []).forEach(companion => persistCompanionRuntime(companion));
-            const records = {
-                companions: state.companions,
-                activeCompanionId: state.activeCompanionId
-            };
-            if (scope > 1) {
-                records.companionThreads = state.companionThreads;
-                records.companionTimelines = state.companionTimelines;
+            try {
+                // Avoid making a second large clone while an older full snapshot is
+                // still committing. IndexedDB revision checks remain authoritative.
+                if (saveStateInFlight) await saveStateInFlight;
+                if (scope > 1) (state.companions || []).forEach(companion => persistCompanionRuntime(companion));
+                const records = {
+                    companions: state.companions,
+                    activeCompanionId: state.activeCompanionId
+                };
+                if (scope > 1) {
+                    records.companionThreads = state.companionThreads;
+                    records.companionTimelines = state.companionTimelines;
+                }
+                await HordeDB.setMultiple(records, { managedRetry: true });
+            } catch (error) {
+                virtualHumanSaveScope = Math.max(virtualHumanSaveScope, scope);
+                throw error;
             }
-            await HordeDB.setMultiple(records);
         } while (virtualHumanSaveScope);
     })();
     try {
@@ -5958,6 +6162,7 @@ function setupStudioLogic() {
     document.getElementById('delete-char-btn').onclick = () => {
         if (!state.editingChar) return;
         showConfirmModal('Delete Character', `Permanently delete ${state.editingChar.name}?`, async () => {
+            if (chatTurnInProgress || generationController) return showToast('Wait for the current reply or stop it before changing chat history.', 'info');
             const idx = state.characters.findIndex(c => c.id === state.editingChar.id);
             if (idx !== -1) {
                 state.characters.splice(idx, 1);
@@ -7010,9 +7215,9 @@ function invalidateMemoryEmbeddingsForNamespaceChange(previousNamespace) {
     return cleared;
 }
 
-function chatMemoryVisibleTo(record, targetChar, isRoom) {
+function chatMemoryVisibleTo(record, targetChar, isRoom, originPersonaId = state.activePersonaId) {
     if (!record || record.status === 'superseded') return false;
-    const personaId = String(state.activePersonaId || '');
+    const personaId = String(originPersonaId || '');
     if (record.scope === 'relationship' && record.personaId && personaId && record.personaId !== personaId) return false;
     if (!isRoom || !targetChar) return true;
     const witnesses = normalizeMemoryStringList(record.witnessedBy);
@@ -7044,7 +7249,7 @@ function memoryTextWithinBudget(records, tokenBudget) {
     return parts.join('\n\n');
 }
 
-function recordImmediateChatMemory(session, config, text, targetChar) {
+function recordImmediateChatMemory(session, config, text, targetChar, originPersonaId = state.activePersonaId) {
     if (!session?.messages || !text) return null;
     const continuity = ensureChatContinuity(session, config?.id || chatOwnerId());
     const source = session.messages.slice(-2);
@@ -7058,7 +7263,7 @@ function recordImmediateChatMemory(session, config, text, targetChar) {
         witnessedBy: targetChar?.id ? [targetChar.id] : [],
         sourceSessionId: session.id,
         sourceMessageIds: source.map(message => message.id).filter(Boolean)
-    }], { personaId: state.activePersonaId || '' });
+    }], { personaId: originPersonaId || '' });
     if (record) hydrateChatMemoryEmbedding(record)
         .then(() => HordeDB.set('chatContinuities', state.chatContinuities))
         .catch(error => console.warn('Immediate memory embedding failed:', error));
@@ -7360,8 +7565,10 @@ function normalizeChatCitations(values) {
 }
 
 async function handleChatImageGeneration(character, session) {
+    if (generationController) return showToast('Please wait for the current generation to finish.', 'info');
     const input = document.getElementById('user-input');
-    const prompt = input.value.trim();
+    const draft = input.value;
+    const prompt = draft.trim();
     if (!prompt) return showToast('Describe the image you want to create.', 'info');
     const runtime = chatRuntimeCapabilities(character);
     if (!runtime.imageGeneration) return showToast('Image generation is not available for this character and provider.', 'error');
@@ -7369,71 +7576,125 @@ async function handleChatImageGeneration(character, session) {
     if (pending.some(item => item.kind !== 'image')) {
         return showToast('Create image mode can only use image attachments as references.', 'info');
     }
+    // Freeze the destination and request before attachment storage can yield to navigation.
+    const interactionKey = chatInteractionKey();
+    const isCurrentChat = () => getCurrentSession() === session;
+    const capability = normalizeChatCreatorCapabilities(character.chatCapabilities);
+    const provider = runtime.imageProvider;
+    const characterId = character.id;
+    const body = { model: capability.imageModel || companionImageModelFallback(provider),
+        prompt: `Create an image for a roleplay conversation with ${character.name}. ${prompt}` };
     const button = document.getElementById('send-btn');
+    const controller = new AbortController();
     const persisted = [];
+    let submittedMessage = null;
+    let delivered = false;
+    let placeholder = null;
+    let embeddedCopy = false;
+    const checkStopped = () => {
+        if (!controller.signal.aborted) return;
+        const error = new Error('Image generation stopped before submission.');
+        error.name = 'AbortError';
+        throw error;
+    };
+    generationController = controller;
+    button.innerHTML = '⏹';
+    button.classList.add('stop');
+    button.disabled = false;
     try {
-        for (const item of pending) persisted.push(await persistChatAttachment(item));
-        const userMessage = { id: newChatMemoryId('message'), role: 'user', content: prompt,
+        for (const item of pending) {
+            checkStopped();
+            persisted.push(await persistChatAttachment(item));
+        }
+        checkStopped();
+        submittedMessage = { id: newChatMemoryId('message'), role: 'user', content: prompt,
             attachments: persisted, imageGeneration: true };
-        session.messages.push(userMessage);
-        input.value = '';
-        input.style.height = 'auto';
-        chatPendingAttachments.set(chatInteractionKey(), []);
-        pending.forEach(item => item.previewUrl && URL.revokeObjectURL(item.previewUrl));
+        session.messages.push(submittedMessage);
+        if (isCurrentChat() && input.value === draft) {
+            input.value = '';
+            input.style.height = 'auto';
+        }
+        // Attachments added while storing the original draft belong to the next turn.
+        chatPendingAttachments.set(interactionKey,
+            (chatPendingAttachments.get(interactionKey) || []).filter(item => !pending.includes(item)));
         await saveState();
+        if (!isCurrentChat()) return;
         renderChat();
-
-        generationController = new AbortController();
-        button.innerHTML = '⏹';
-        button.classList.add('stop');
-        button.disabled = false;
-        const placeholder = appendMessageUI('ai', 'Creating image…');
-        const capability = normalizeChatCreatorCapabilities(character.chatCapabilities);
-        const provider = runtime.imageProvider;
-        const model = capability.imageModel || companionImageModelFallback(provider);
-        const body = { model, prompt: `Create an image for a roleplay conversation with ${character.name}. ${prompt}` };
+        checkStopped();
+        placeholder = appendMessageUI('ai', 'Creating image…');
         const reference = persisted.find(item => item.kind === 'image');
         if (reference) {
             const blob = await chatAttachmentBlob(reference);
-            const dataUrl = blob ? await blobToDataUrl(blob) : '';
+            if (!blob) throw new Error('The reference image could not be loaded. Reattach it before generating.');
+            const dataUrl = await blobToDataUrl(blob);
             if (provider === 'fal') body.imageDataUrl = dataUrl;
             else if (provider === 'openrouter') body.input_references = [{ type: 'image_url', image_url: { url: dataUrl } }];
         }
+        checkStopped();
+        if (!isCurrentChat()) return;
+        // This provider helper cannot cancel a submitted image job. Keep its result
+        // and prevent another submission while the paid request is being delivered.
+        button.innerHTML = '…';
+        button.classList.remove('stop');
+        button.disabled = true;
         let generated = await requestCompanionPhoto(body, provider);
         generated = await stabilizeGeneratedImageSource(generated);
         // Confirm actual decodable pixels before marking this turn successful.
         generated = await loadGeneratedImage(new Image(), generated);
-        let generatedAttachment;
+        let generatedAttachment = { kind: 'image', name: 'Generated image', mime: 'image/png', size: 0,
+            url: generated, generated: true };
         if (/^data:image\//i.test(generated)) {
             const blob = dataUrlToBlob(generated);
             const id = newChatMemoryId('asset');
-            await HordeDB.set(`chatAsset:${id}`, blob);
-            generatedAttachment = { id, kind: 'image', name: `Generated image · ${new Date().toLocaleTimeString()}`,
-                mime: blob.type, size: blob.size, generated: true };
-        } else {
-            generatedAttachment = { kind: 'image', name: 'Generated image', mime: 'image/png', size: 0,
-                url: generated, generated: true };
+            generatedAttachment.mime = blob.type;
+            generatedAttachment.size = blob.size;
+            try {
+                await HordeDB.set(`chatAsset:${id}`, blob);
+                generatedAttachment = { id, kind: 'image', name: `Generated image · ${new Date().toLocaleTimeString()}`,
+                    mime: blob.type, size: blob.size, generated: true };
+            } catch (error) {
+                // A paid result must remain exportable even when the asset store is full.
+                embeddedCopy = true;
+            }
         }
         session.messages.push({ id: newChatMemoryId('message'), role: 'assistant', content: '',
-            charId: character.id, attachments: [generatedAttachment], generatedImage: true });
+            charId: characterId, attachments: [generatedAttachment], generatedImage: true });
+        delivered = true;
+        chatImageModeBySession.set(interactionKey, false);
         await saveState();
-        placeholder.closest('.message')?.remove();
-        chatImageModeBySession.set(chatInteractionKey(), false);
-        renderChat();
+        if (embeddedCopy) showToast('Image created. An embedded copy was saved with the chat because separate media storage failed.', 'info');
     } catch (error) {
-        const last = session.messages[session.messages.length - 1];
-        if (last?.imageGeneration && last.role === 'user') {
-            session.messages.pop();
-            await deleteChatMessageAssets(last);
+        if (delivered) {
+            // Do not turn a completed paid image into a failed prompt or delete its media.
+            showToast('Image created, but the chat could not be saved: ' + error.message
+                + '. Keep this tab open and export a backup before reloading.', 'error');
+        } else {
+            const index = session.messages.indexOf(submittedMessage);
+            if (index >= 0 && isCurrentChat() && (!input.value || input.value === draft)) {
+                session.messages.splice(index, 1);
+                submittedMessage = null;
+                const nextPending = chatPendingAttachments.get(interactionKey) || [];
+                chatPendingAttachments.set(interactionKey, [...pending, ...nextPending.filter(item => !pending.includes(item))]);
+            }
+            if (!submittedMessage) {
+                await deleteChatMessageAssets({ attachments: persisted });
+                if (isCurrentChat() && !input.value) input.value = draft;
+            }
+            // An off-screen originating message retains its prompt and reference media.
+            try { await saveState(); }
+            catch (saveError) {
+                showToast('The chat could not be saved: ' + saveError.message + '. Keep this tab open before retrying.', 'error');
+            }
+            showToast(error.name === 'AbortError' ? error.message
+                : 'Image generation failed: ' + humanizeApiError(error, provider), error.name === 'AbortError' ? 'info' : 'error');
         }
-        input.value = prompt;
-        await saveState();
-        renderChat();
-        showToast('Image generation failed: ' + humanizeApiError(error, runtime.imageProvider), 'error');
     } finally {
-        generationController = null;
+        placeholder?.closest('.message')?.remove();
+        if (submittedMessage) pending.forEach(item => item.previewUrl && URL.revokeObjectURL(item.previewUrl));
+        if (generationController === controller) generationController = null;
         button.innerHTML = '➤';
         button.classList.remove('stop');
+        if (isCurrentChat()) renderChat();
         updateChatSendButton();
     }
 }
@@ -7495,6 +7756,7 @@ function setupChatLogic() {
 
     document.getElementById('clear-history-btn').onclick = () => {
         showConfirmModal('Clear History', 'Are you sure you want to clear the chat history for this session?', async () => {
+            if (chatTurnInProgress || generationController) return showToast('Wait for the current reply or stop it before changing chat history.', 'info');
             const sessionId = state.activeRoomId || state.activeCharId;
             const currentSessId = state.activeSessionId[sessionId];
             const removedSession = state.chats[sessionId].find(session => session.id === currentSessId);
@@ -7516,6 +7778,7 @@ function setupChatLogic() {
     };
     
     document.getElementById('roll-dice-btn').onclick = async () => {
+            if (chatTurnInProgress || generationController) return showToast('Wait for the current reply or stop it before changing chat history.', 'info');
         const session = getCurrentSession();
         if (!session) return;
         const roll = Math.floor(Math.random() * 6) + 1;
@@ -8170,6 +8433,7 @@ function appendMessageUI(role, content, index = null, charId = null, isStreaming
 
     if (hasVersions) {
         const setVersion = async (i) => {
+            if (chatTurnInProgress || generationController) return showToast('Wait for the current reply or stop it before changing chat history.', 'info');
             const clamped = Math.max(0, Math.min(msgRef.versions.length - 1, i));
             if (clamped === verIdx) return;
             msgRef.currentVersion = clamped;
@@ -8201,6 +8465,7 @@ function appendMessageUI(role, content, index = null, charId = null, isStreaming
         
         delBtn.onclick = () => {
             showConfirmModal('Delete Message', 'Permanently delete this message?', async () => {
+            if (chatTurnInProgress || generationController) return showToast('Wait for the current reply or stop it before changing chat history.', 'info');
                 const session = getCurrentSession();
                 if (session) {
                     invalidateEpisodicFrom(session, index);
@@ -8217,6 +8482,7 @@ function appendMessageUI(role, content, index = null, charId = null, isStreaming
         const originalDel = delBtn.onclick;
 
         editBtn.onclick = async () => {
+            if (chatTurnInProgress || generationController) return showToast('Wait for the current reply or stop it before changing chat history.', 'info');
             if (!isEditing) {
                 const session = getCurrentSession();
                 if (!session || !session.messages[index]) return;
@@ -8303,9 +8569,9 @@ function updateContextMeter() {
 }
 
 // --- Macro Replacement ---
-function replaceMacros(text, char) {
+function replaceMacros(text, char, origin = {}) {
     if (!text) return text;
-    const persona = state.personas.find(p => p.id === state.activePersonaId);
+    const persona = origin.persona !== undefined ? origin.persona : state.personas.find(p => p.id === state.activePersonaId);
     const userName = persona ? persona.name : 'User';
     const personaDesc = personaPromptText(persona);
     const charName = char ? char.name : '';
@@ -8315,7 +8581,7 @@ function replaceMacros(text, char) {
     const weekday = now.toLocaleDateString([], { weekday: 'long' });
 
     // Pull recent chat context for {{lastMessage}} family
-    const sess = getCurrentSession && getCurrentSession();
+    const sess = origin.session || (getCurrentSession && getCurrentSession());
     const msgs = sess && Array.isArray(sess.messages) ? sess.messages : [];
     const lastMsg = msgs.length ? (msgs[msgs.length - 1].content || '') : '';
     const lastUser = [...msgs].reverse().find(m => m.role === 'user');
@@ -8564,9 +8830,14 @@ function loreKeywordMatches(haystack, keyword) {
     return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, 'iu').test(haystack);
 }
 
-async function buildContext(config, targetChar, messages, userText) {
-    const isRoom = !!state.activeRoomId;
-    const activePersona = state.personas.find(p => p.id === state.activePersonaId);
+async function buildContext(config, targetChar, messages, userText, origin = {}) {
+    const isRoom = origin.isRoom ?? !!state.activeRoomId;
+    const session = origin.session || getCurrentSession();
+    const activePersona = origin.persona !== undefined ? origin.persona : state.personas.find(p => p.id === state.activePersonaId);
+    const checkStopped = () => { if (origin.signal?.aborted) throw origin.signal.reason || new DOMException('Generation stopped', 'AbortError'); };
+    checkStopped();
+    const macroOrigin = { session, persona: activePersona || null };
+    const expandMacros = value => replaceMacros(value, targetChar, macroOrigin);
     const memoryQuery = chatMemoryQuery(messages, userText, config, targetChar);
     const memoryBudgetTokens = Math.max(500, Math.min(2600, Math.floor((config.contextSize || 8192) * 0.16)));
     
@@ -8577,8 +8848,9 @@ async function buildContext(config, targetChar, messages, userText) {
     const labsSocial = userText ? await labsProposal('social_signal', {
         message: String(userText).slice(0, 1800),
         text: String(userText).slice(0, 1800),
-        relationshipContext: `Mode: ${state.activeRoomId ? 'group room' : 'one-to-one chat'}; character: ${targetChar.name || 'unknown'}; recent turns: ${messages.slice(-4).length}`
+        relationshipContext: `Mode: ${isRoom ? 'group room' : 'one-to-one chat'}; character: ${targetChar.name || 'unknown'}; recent turns: ${messages.slice(-4).length}`
     }, 'chat', { priority: 110 }) : null;
+    checkStopped();
     
     let combinedLore = [];
     if (isRoom && config.lorebook) combinedLore = combinedLore.concat(config.lorebook);
@@ -8610,7 +8882,7 @@ async function buildContext(config, targetChar, messages, userText) {
         const thresh = state.globalSettings.memoryThreshold !== undefined ? state.globalSettings.memoryThreshold : 0.35;
         const topk = state.globalSettings.memoryTopK !== undefined ? state.globalSettings.memoryTopK : 8;
         try {
-            const memoryResults = await HordeVectorMemory.search(targetChar.memory, memoryQuery, topk, thresh);
+            const memoryResults = await HordeVectorMemory.search(targetChar.memory, memoryQuery, topk, thresh, null, 12, origin.signal);
             if (memoryResults && memoryResults.length > 0) {
                 relevantMemory = memoryTextWithinBudget(memoryResults, Math.floor(memoryBudgetTokens * 0.25));
             }
@@ -8619,7 +8891,7 @@ async function buildContext(config, targetChar, messages, userText) {
         }
     }
 
-    const session = getCurrentSession();
+    checkStopped();
     let relevantEpisodic = '';
 
     // Episodic Memory Scan (Past Chat Events)
@@ -8633,8 +8905,8 @@ async function buildContext(config, targetChar, messages, userText) {
                 ...(session.episodicMemories || []).map(memory => normalizeChatMemoryRecord(memory, {
                     type: 'episode', continuityId: continuity?.id || '', sourceSessionId: session.id
                 }))
-            ].filter(memory => chatMemoryVisibleTo(memory, targetChar, isRoom));
-            const episodicResults = await HordeVectorMemory.search(candidates, memoryQuery, Math.max(topk, 6), thresh);
+            ].filter(memory => chatMemoryVisibleTo(memory, targetChar, isRoom, activePersona?.id || ''));
+            const episodicResults = await HordeVectorMemory.search(candidates, memoryQuery, Math.max(topk, 6), thresh, null, 12, origin.signal);
             if (episodicResults && episodicResults.length > 0) {
                 relevantEpisodic = memoryTextWithinBudget(episodicResults, Math.floor(memoryBudgetTokens * 0.55));
             }
@@ -8643,6 +8915,7 @@ async function buildContext(config, targetChar, messages, userText) {
         }
     }
 
+    checkStopped();
     // 2. Base System Message Construction
     let baseSystemParts = [];
     if (isRoom) {
@@ -8658,7 +8931,7 @@ async function buildContext(config, targetChar, messages, userText) {
     }
     const labsHint = labsSocialContext(labsSocial);
     if (labsHint) baseSystemParts.push(labsHint);
-    const hudInstruction = !isRoom ? chatHudPrompt(targetChar, getCurrentSession()) : '';
+    const hudInstruction = !isRoom ? chatHudPrompt(targetChar, session) : '';
     if (hudInstruction) baseSystemParts.push(hudInstruction);
     if (worldTruths) {
         baseSystemParts.push(`### WORLD TRUTHS (ABSOLUTE FACTS)\n${worldTruths}`);
@@ -8774,7 +9047,7 @@ Getting this right creates dramatic irony — the reader knowing more than the c
         const override = presetOverrides[idx] || {};
         const raw = override.prompt !== undefined ? override.prompt : (p.content || p.prompt || '');
         const expanded = freakyMacroState ? expandFreakyPresetMacros(raw, freakyMacroState) : raw;
-        resolvedPresetBlocks.set(p, replaceMacros(expanded, targetChar));
+        resolvedPresetBlocks.set(p, expandMacros(expanded));
     });
     const usingMarkers = orderedItems.some(p => p.marker);
 
@@ -8807,9 +9080,9 @@ Getting this right creates dramatic irony — the reader knowing more than the c
         // Append blocks not covered by any marker (memories, episodic, matrix, etc.)
         if (relevantMemory) parts.push(`### RELEVANT MEMORIES (BIOGRAPHY & LORE)\n${relevantMemory}`);
         if (relevantEpisodic) parts.push(`### RECALLED CONVERSATION EVENTS (EPISODIC MEMORY)\n${relevantEpisodic}`);
-        systemPromptText = replaceMacros(parts.join('\n\n') + ledgerPrompt + knowledgeBarrier, targetChar);
+        systemPromptText = expandMacros(parts.join('\n\n') + ledgerPrompt + knowledgeBarrier);
     } else {
-        systemPromptText = replaceMacros(baseSystemParts.join('\n\n') + ledgerPrompt + knowledgeBarrier, targetChar);
+        systemPromptText = expandMacros(baseSystemParts.join('\n\n') + ledgerPrompt + knowledgeBarrier);
     }
 
     if (preset && preset.data && preset.data.prompts && !usingMarkers) {
@@ -8858,7 +9131,7 @@ Do not emit a memory line for ordinary dialogue, repeated information, mood, des
         injectedHistory.push({
             role: ['system', 'user', 'assistant'].includes(importedDepthPrompt.role)
                 ? importedDepthPrompt.role : 'system',
-            content: replaceMacros(String(importedDepthPrompt.prompt), targetChar),
+            content: expandMacros(String(importedDepthPrompt.prompt)),
             depth: livingClamp(parseInt(importedDepthPrompt.depth) || 0, 0, 100)
         });
     }
@@ -8890,7 +9163,7 @@ Do not emit a memory line for ordinary dialogue, repeated information, mood, des
         if (!m || !m.content) continue;
         
         let role = m.role;
-        let content = replaceMacros(m.content, targetChar);
+        let content = expandMacros(m.content);
         if (role === 'user') content = applyRegexScripts(content, 'user'); // prompt-facing only
         if (role === 'assistant' && freakyMacroState) {
             const hasState = /<internal_states\b/i.test(content);
@@ -8919,6 +9192,7 @@ Do not emit a memory line for ordinary dialogue, repeated information, mood, des
                 sum + (item.kind === 'image' ? 900 : item.kind === 'video' ? 4000 : item.kind === 'audio' ? 2000 : 1200), 0) : 0);
         if (availableTokens - msgTokens > 0) {
             messagesToSend.unshift({ role, content: await chatProviderContent(m, content) });
+            checkStopped();
             availableTokens -= msgTokens;
         } else {
             break;
@@ -8938,7 +9212,7 @@ Do not emit a memory line for ordinary dialogue, repeated information, mood, des
     let anFreq = targetChar.authorsNoteFreq || 1;
 
     if (isRoom) {
-        const room = state.rooms.find(r => r.id === state.activeRoomId);
+        const room = config;
         if (room && room.authorsNote) {
             anContent = room.authorsNote;
             anDepth = room.authorsNoteDepth || 4;
@@ -8947,11 +9221,10 @@ Do not emit a memory line for ordinary dialogue, repeated information, mood, des
     }
     
     if (anContent && anFreq > 0) {
-        const session = getCurrentSession();
         const msgCount = session && session.messages ? session.messages.length : 0;
         if (msgCount % anFreq === 0) {
             const index = Math.max(0, messagesToSend.length - anDepth);
-            const content = `[AUTHOR'S NOTE: ${replaceMacros(anContent, targetChar)}]`;
+            const content = `[AUTHOR'S NOTE: ${expandMacros(anContent)}]`;
             messagesToSend.splice(index, 0, { role: 'system', content });
         }
     }
@@ -8963,20 +9236,101 @@ Do not emit a memory line for ordinary dialogue, repeated information, mood, des
     
     messagesToSend.push({ role: 'system', content: reminderText });
 
+    checkStopped();
     return [{ role: 'system', content: systemPromptText }, ...messagesToSend];
 }
 
+async function readChatProviderReply(response, signal, onUpdate) {
+    const result = { content: '', reasoning: '', citations: [], finishReason: '' };
+    const text = value => typeof value === 'string' ? value : Array.isArray(value)
+        ? value.map(part => typeof part === 'string' ? part : part?.text || '').join('') : '';
+    const accept = payload => {
+        if (payload?.error) throw Error(String(payload.error?.message || payload.error || 'Unknown provider error'));
+        const choice = payload?.choices?.[0];
+        if (!choice) throw Error('The provider returned no chat completion. Retry or choose another model.');
+        const delta = choice.delta || choice.message || {};
+        result.content += text(delta.content);
+        result.reasoning += text(delta.reasoning || delta.thought);
+        result.citations = normalizeChatCitations([...result.citations,
+            ...(Array.isArray(delta.annotations) ? delta.annotations : [])]);
+        result.finishReason = String(choice.finish_reason || result.finishReason);
+        if (choice.finish_reason === 'content_filter') result.content += '\n\n[Response filtered by provider]';
+        onUpdate?.(result);
+    };
+    const contentType = String(response.headers?.get('content-type') || '');
+    if (/application\/json/i.test(contentType) || !response.body) {
+        accept(HordeWorldModelClient.decodeCompletionBody(await HordeWorldModelClient.readText(response, signal)));
+    } else {
+        const reader = response.body.getReader(), decoder = new TextDecoder();
+        let buffer = '', jsonBody = null, ended = false;
+        const line = raw => {
+            const value = raw.trim();
+            if (!value || value.startsWith(':') || /^(?:event|id|retry):/.test(value)) return;
+            if (!value.startsWith('data:')) throw Error('The provider returned an invalid chat stream. Retry or choose another model.');
+            const data = value.slice(5).trim();
+            if (data === '[DONE]') { ended = true; return; }
+            let payload;
+            try { payload = JSON.parse(data); }
+            catch (_) { throw Error('The provider returned malformed chat data. Retry or choose another model.'); }
+            // Usage-only events can follow the final completion delta.
+            if (Array.isArray(payload?.choices) && !payload.choices.length && payload.usage && !payload.error) return;
+            accept(payload);
+        };
+        try {
+            while (!ended) {
+                const { done, value } = await HordeWorldModelClient.readChunk(reader, signal);
+                const chunk = done ? decoder.decode() : decoder.decode(value, { stream: true });
+                if (jsonBody !== null) jsonBody += chunk;
+                else {
+                    buffer += chunk;
+                    if (buffer.trimStart().startsWith('{')) { jsonBody = buffer; buffer = ''; }
+                    else {
+                        const lines = buffer.split('\n'); buffer = lines.pop();
+                        for (const value of lines) { line(value); if (ended) break; }
+                    }
+                }
+                if (done) { if (jsonBody === null && buffer.trim() && !ended) line(buffer); break; }
+            }
+            if (jsonBody !== null) accept(HordeWorldModelClient.decodeCompletionBody(jsonBody));
+        } finally {
+            reader.cancel().catch(() => {});
+            reader.releaseLock();
+        }
+    }
+    if (!result.content.trim()) throw Error('The provider completed without visible text. Retry or choose another model.');
+    return result;
+}
+
 async function handleChat(isReroll = false, specificCharId = null) {
+    if (chatTurnInProgress || generationController) {
+        showToast('Please wait for the current reply or stop it before starting another.', 'info');
+        return;
+    }
+    chatTurnInProgress = true;
+    try {
     const isRoom = !!state.activeRoomId;
     const sessionId = isRoom ? state.activeRoomId : state.activeCharId;
     if (!sessionId) return;
     
     const session = getCurrentSession();
+    if (!session) return;
     if (!session.messages) session.messages = [];
+    const interactionKey = chatInteractionKey();
+    const persona = state.personas.find(item => item.id === state.activePersonaId) || null;
+    const config = isRoom ? state.rooms.find(item => item.id === sessionId) : state.characters.find(item => item.id === sessionId);
+    const targetId = specificCharId || (isReroll && isRoom ? session.messages.at(-1)?.charId : null);
+    const targetChar = isRoom ? state.characters.find(item => item.id === targetId) : config;
+    if (!config || ((isReroll || !isRoom || specificCharId) && !targetChar)) return;
+    const originProvider = normalizedProviderId();
+    const originApiUrl = apiBase() + '/chat/completions';
+    const originHeaders = { ...authHeaders(), 'Content-Type': 'application/json', ...attributionHeaders() };
+    const originModel = config.model || state.globalSettings.defaultModel;
+    const isCurrentChat = () => getCurrentSession() === session;
+    const renderOriginChat = () => { if (isCurrentChat()) renderChat(); };
 
     if (!isReroll && !state.activeRoomId && chatImageModeBySession.get(chatInteractionKey()) === true) {
         const character = state.characters.find(item => item.id === state.activeCharId);
-        if (character) return handleChatImageGeneration(character, session);
+        if (character) return await handleChatImageGeneration(character, session);
     }
 
     const sendBtn = document.getElementById('send-btn');
@@ -8990,20 +9344,24 @@ async function handleChat(isReroll = false, specificCharId = null) {
         document.getElementById('user-input').style.height = 'auto';
         
         let prefix = '[User]: ';
-        const p = state.personas.find(x => x.id === state.activePersonaId);
+        const p = persona;
         if (p && p.name) prefix = `[${p.name}]: `;
         
         session.messages.push({ id: newChatMemoryId('message'), role: 'user', content: prefix + text });
-        await saveState();
-        renderChat();
+        try { await saveState(); }
+        catch (error) { showToast('Your message is still in this chat, but it could not be saved: ' + error.message, 'error'); }
+        renderOriginChat();
         return; // Don't trigger API if no character was selected
     }
 
     let text = '';
+    let rawDraft = '';
     let rerollVersions = null; // prior response versions to preserve across a reroll
     let rerollLedgerEntries = null; // per-take chronicle entries, parallel to versions
     let rerollHudBefore = null;
     let rerollHudAfter = null;
+    let rerollOriginal = null;
+    let submittedMessage = null;
     let draftAttachments = [];
     let persistedUserAttachments = [];
 
@@ -9017,20 +9375,22 @@ async function handleChat(isReroll = false, specificCharId = null) {
         }
         invalidateEpisodicFrom(session, session.messages.length - 1);
         const popped = session.messages.pop();
+        rerollOriginal = popped;
         rerollVersions = popped.versions || [popped.content];
-        rerollLedgerEntries = popped.versionLedgerEntries || rerollVersions.map((v, i) => (i === rerollVersions.length - 1 ? (popped.ledgerEntry || null) : null));
+        rerollLedgerEntries = popped.versionLedgerEntries || rerollVersions.map((v, i) => (i === (popped.currentVersion ?? rerollVersions.length - 1) ? (popped.ledgerEntry || null) : null));
         rerollHudBefore = popped.hudBefore ? safeJsonClone(popped.hudBefore) : null;
         rerollHudAfter = popped.hudAfter ? safeJsonClone(popped.hudAfter) : null;
         if (!isRoom && rerollHudBefore) session.chatHudState = safeJsonClone(rerollHudBefore);
         stripChatLedgerEntry(session, popped); // ghost-cleanup: rerolled events must leave the chronicle
-        renderChat();
+        renderOriginChat();
         const lastUser = [...session.messages].reverse().find(m => m.role === 'user');
         text = lastUser ? lastUser.content : '';
     } else {
-        text = document.getElementById('user-input').value.trim();
+        rawDraft = userInput.value;
+        text = rawDraft.trim();
         draftAttachments = [...chatPendingForCurrentSession()];
         if (text || draftAttachments.length) {
-            const runtime = !isRoom ? chatRuntimeCapabilities(state.characters.find(item => item.id === state.activeCharId)) : null;
+            const runtime = !isRoom ? chatRuntimeCapabilities(targetChar) : null;
             const unsupported = draftAttachments.find(item => !runtime?.[item.kind]);
             if (unsupported) return showToast(`${unsupported.kind} input is not enabled for this character and model.`, 'error');
             try {
@@ -9039,43 +9399,41 @@ async function handleChat(isReroll = false, specificCharId = null) {
                 for (const attachment of persistedUserAttachments) await deleteChatMessageAssets({ attachments: [attachment] });
                 return showToast('Could not store attachment: ' + error.message, 'error');
             }
-            document.getElementById('user-input').value = '';
-            document.getElementById('user-input').style.height = 'auto';
+            if (isCurrentChat() && userInput.value === rawDraft) {
+                userInput.value = '';
+                userInput.style.height = 'auto';
+            }
             
             let pushText = text || `Shared ${draftAttachments.length} attachment${draftAttachments.length === 1 ? '' : 's'}.`;
             if (isRoom) {
                 let prefix = '[User]: ';
-                const p = state.personas.find(x => x.id === state.activePersonaId);
+                const p = persona;
                 if (p && p.name) prefix = `[${p.name}]: `;
                 pushText = prefix + text;
             }
             
-            const webSearch = !isRoom && chatWebSearchBySession.get(chatInteractionKey()) === true;
-            session.messages.push({ id: newChatMemoryId('message'), role: 'user', content: pushText,
-                attachments: persistedUserAttachments, webSearch });
-            chatPendingAttachments.set(chatInteractionKey(), []);
+            const webSearch = !isRoom && chatWebSearchBySession.get(interactionKey) === true;
+            submittedMessage = { id: newChatMemoryId('message'), role: 'user', content: pushText,
+                attachments: persistedUserAttachments, webSearch };
+            session.messages.push(submittedMessage);
+            chatPendingAttachments.set(interactionKey, (chatPendingAttachments.get(interactionKey) || [])
+                .filter(item => !draftAttachments.includes(item)));
             draftAttachments.forEach(item => item.previewUrl && URL.revokeObjectURL(item.previewUrl));
-            if (webSearch) chatWebSearchBySession.set(chatInteractionKey(), false);
-            await saveState();
-            renderChat();
+            if (webSearch) chatWebSearchBySession.set(interactionKey, false);
+            try { await saveState(); }
+            catch (error) {
+                renderOriginChat();
+                showToast('Your message is still in this chat, but it could not be saved: ' + error.message, 'error');
+                return;
+            }
+            renderOriginChat();
         }
     }
 
-    document.getElementById('send-btn').disabled = true;
-    
-    // Resolve Character/Room config
-    let config = null;
-    let targetChar = null;
-    
-    if (isRoom) {
-        config = state.rooms.find(r => r.id === state.activeRoomId);
-        targetChar = state.characters.find(c => c.id === specificCharId);
-    } else {
-        config = state.characters.find(c => c.id === state.activeCharId);
-        targetChar = config;
-    }
-
-    if (!config || !targetChar) return;
+    // Navigation during attachment storage or the initial save leaves the
+    // originating draft available to continue, without generating in another chat.
+    if (!isCurrentChat()) return;
+    sendBtn.disabled = true;
 
     // A chat HUD belongs to the timeline, not the character template. Keeping a
     // pre-turn snapshot makes rerolls transactional instead of double-applying
@@ -9087,32 +9445,45 @@ async function handleChat(isReroll = false, specificCharId = null) {
     const aiMsgDiv = appendMessageUI('ai', pre_ai_prefix + '...');
     
     let fullContent = '';
+    let replySavedInMemory = false;
+    let requestDeadline = null;
+    let requestTimedOut = false;
+    let extractedChronicle = null;
 
     try {
         sendBtn.innerHTML = '⏹';
         sendBtn.classList.add('stop');
         sendBtn.disabled = false;
         generationController = new AbortController();
+        requestDeadline = setTimeout(() => {
+            requestTimedOut = true;
+            const error = Error('The chat provider did not complete within 120 seconds. Retry or choose another model.');
+            error.name = 'TimeoutError';
+            generationController?.abort(error);
+        }, 120_000);
 
         // 1. Build modular context
-        const apiMessages = await buildContext(config, targetChar, session.messages, text);
+        const apiMessages = await HordeWorldModelClient.runAbortable(() =>
+            buildContext(config, targetChar, session.messages, text, { session, isRoom, persona, signal: generationController.signal }),
+            generationController.signal);
         
         // Final context size check for UI
-        updateContextMeter();
+        if (isCurrentChat()) updateContextMeter();
+        if (generationController.signal.aborted) throw generationController.signal.reason;
 
         // 2. Prepare Request Body
-        const modelId = config.model || state.globalSettings.defaultModel;
+        const modelId = originModel;
         if (!modelId) throw new Error('No AI model specified');
 
         const requestBody = {
             model: modelId,
-            messages: sanitizeMessagesForProvider(apiMessages),
+            messages: sanitizeMessagesForProvider(apiMessages, originProvider),
             stream: true
         };
 
         const latestUserMessage = [...session.messages].reverse().find(message => message.role === 'user');
         if (latestUserMessage?.webSearch) {
-            if (normalizedProviderId() !== 'openrouter') throw new Error('Web search is only available through OpenRouter in Chat.');
+            if (originProvider !== 'openrouter') throw new Error('Web search is only available through OpenRouter in Chat.');
             requestBody.tools = [COMPANION_WEB_SEARCH_TOOL];
             requestBody.max_tool_calls = 4;
         }
@@ -9152,85 +9523,25 @@ async function handleChat(isReroll = false, specificCharId = null) {
             if (config.includeReasoning) requestBody.include_reasoning = true;
         }
 
-        const response = await fetch(apiBase() + '/chat/completions', {
+        const { response } = await HordeWorldModelClient.stream({ url: originApiUrl, body: requestBody, init: {
             method: 'POST',
-            headers: {
-                ...authHeaders(),
-                'Content-Type': 'application/json',
-                ...attributionHeaders()
-            },
-            body: JSON.stringify(requestBody),
+            headers: originHeaders,
             signal: generationController.signal
-        });
+        } });
 
         if (!response.ok) {
-            let errorText = response.statusText;
-            try {
-                const errData = await response.json();
-                errorText = errData.error?.message || JSON.stringify(errData);
-            } catch(e) {
-                errorText = await response.text() || response.statusText;
-            }
+            const rawError = await HordeWorldModelClient.readText(response, generationController.signal);
+            let errorText = rawError || response.statusText;
+            try { const errData = JSON.parse(rawError); errorText = errData.error?.message || errorText; } catch (_) {}
             throw new Error(errorText);
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let responseCitations = [];
-        let providerFinishReason = '';
-        
         aiMsgDiv.classList.add('is-generating');
         aiMsgDiv.textContent = '';
-        if (isRoom && pre_ai_prefix) {
-            aiMsgDiv.textContent = pre_ai_prefix;
-            fullContent += pre_ai_prefix;
-        }
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop(); // Keep the incomplete line in the buffer
-            
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6);
-                    if (data.trim() === '[DONE]') break; // Done indicator
-                    try {
-                        const json = JSON.parse(data);
-                        
-                        // Catch provider-side errors inside the stream
-                        if (json.error) {
-                            throw new Error(json.error.message || 'Unknown provider error');
-                        }
-
-                        const delta = json.choices[0]?.delta || {};
-                        const content = delta.content || '';
-                        const reasoning = delta.reasoning || delta.thought || ''; // Support 'thought' fallback
-                        responseCitations = normalizeChatCitations([
-                            ...responseCitations,
-                            ...(Array.isArray(delta.annotations) ? delta.annotations : []),
-                            ...(Array.isArray(json.choices[0]?.message?.annotations) ? json.choices[0].message.annotations : [])
-                        ]);
-                        
-                        providerFinishReason = String(json.choices[0]?.finish_reason || providerFinishReason);
-                        // Check for content filter
-                        if (providerFinishReason === 'content_filter') {
-                            fullContent += '\n\n[Response filtered by provider]';
-                        }
-                        
-                        // Track reasoning content separately
-                        if (reasoning) {
-                            if (!requestBody._reasoningContent) requestBody._reasoningContent = '';
-                            requestBody._reasoningContent += reasoning;
-                        }
-                        
-                        fullContent += content;
-                        
-                        // Build display with optional reasoning block
+        const completion = await readChatProviderReply(response, generationController.signal, partial => {
+                        fullContent = pre_ai_prefix + partial.content;
+                        requestBody._reasoningContent = partial.reasoning;
+                        if (!isCurrentChat()) return;
                         let displayHtml = '';
                         if (requestBody._reasoningContent && config.includeReasoning) {
                             displayHtml += `<div class="thinking-block collapsed">
@@ -9253,19 +9564,16 @@ async function handleChat(isReroll = false, specificCharId = null) {
                         if (isAtBottom) {
                             container.scrollTop = container.scrollHeight;
                         }
-                    } catch(e) {
-                        console.error('Stream chunk error:', e, data);
-                    }
-                }
-            }
-        }
+        });
+        fullContent = pre_ai_prefix + completion.content;
+        const responseCitations = completion.citations;
+        const providerFinishReason = completion.finishReason;
 
         // --- MEMORY MATRIX: CHRONICLE EXTRACTION ---
-        let extractedChronicle = null;
         const memoryMatch = fullContent.match(/\[MEMORY\]:\s*(.*)/i) || fullContent.match(/\[MEMORY\]\s*(.*)/i);
         if (memoryMatch) {
             const chronicleEntry = memoryMatch[1].trim();
-            const currentSess = getCurrentSession();
+            const currentSess = session;
             if (currentSess && chronicleEntry) {
                 extractedChronicle = appendWorldLedgerEntry(currentSess, chronicleEntry);
                 console.log(`Horde Matrix: Chronicle Updated — ${chronicleEntry}`);
@@ -9290,10 +9598,7 @@ async function handleChat(isReroll = false, specificCharId = null) {
 
         aiMsgDiv.classList.remove('is-generating');
 
-        if (!fullContent && !requestBody._reasoningContent) {
-            fullContent = `[Provider completed with no visible text${providerFinishReason ? ` (finish reason: ${providerFinishReason})` : ''}. No HTTP timeout was reported; check the provider log and model output format.]`;
-            aiMsgDiv.innerHTML = formatMessageContent(fullContent, 'ai');
-        }
+        if (!fullContent.trim()) throw Error('The provider completed without visible text after removing technical directives. Retry or choose another model.');
 
         if (!isRoom) await updateChatHudFromTurn(targetChar, session, text, fullContent, hudDirective);
         const hudAfterTurn = !isRoom ? safeJsonClone(ensureChatHudState(targetChar, session).state) : null;
@@ -9309,51 +9614,53 @@ async function handleChat(isReroll = false, specificCharId = null) {
             newAiMsg.versionLedgerEntries = [...(rerollLedgerEntries || rerollVersions.map(() => null)), extractedChronicle || null];
         }
         session.messages.push(newAiMsg);
-        if (extractedChronicle) recordImmediateChatMemory(session, config, extractedChronicle, targetChar);
+        replySavedInMemory = true;
+        if (extractedChronicle) recordImmediateChatMemory(session, config, extractedChronicle, targetChar, persona?.id || '');
         await saveState();
-        renderChat(); // Refresh to bind message actions
+        renderOriginChat(); // Refresh only the conversation that generated this reply.
 
         // Trigger non-blocking rolling episodic memory consolidation
-        consolidateSessionEpisodicMemory(session, config).catch(err => {
+        consolidateSessionEpisodicMemory(session, config, persona?.id || '').catch(err => {
             console.warn("Consolidation error in background:", err);
         });
 
     } catch (err) {
-        if (err.name === 'AbortError') {
+        if (replySavedInMemory) {
+            // A save failure is not a provider failure. Retain the complete
+            // reply and the pending save; never append a second restored take.
+            renderOriginChat();
+            return;
+        }
+        if (extractedChronicle) stripChatLedgerEntry(session, { ledgerEntry: extractedChronicle });
+        if (!isRoom && hudBeforeTurn) session.chatHudState = safeJsonClone(hudBeforeTurn);
+        if (err.name === 'AbortError' && !requestTimedOut) {
             console.log('Generation aborted by user');
+            fullContent = extractChatHudDirective(fullContent).text.replace(/\[MEMORY\].*$/is, '').trim();
             fullContent = scrubNarrativeArtifacts(fullContent);
             if (fullContent && fullContent !== pre_ai_prefix) {
-                const partialMsg = { id: newChatMemoryId('message'), role: 'assistant', content: fullContent, charId: targetChar.id };
+                const partialMsg = { id: newChatMemoryId('message'), role: 'assistant', content: fullContent, charId: targetChar.id,
+                    hudBefore: hudBeforeTurn || undefined, hudAfter: hudBeforeTurn || undefined };
                 if (rerollVersions) {
                     partialMsg.versions = [...rerollVersions, fullContent];
                     partialMsg.currentVersion = partialMsg.versions.length - 1;
+                    partialMsg.versionLedgerEntries = [...(rerollLedgerEntries || rerollVersions.map(() => null)), null];
                 }
                 session.messages.push(partialMsg);
                 await saveState();
-                renderChat();
+                renderOriginChat();
             } else if (rerollVersions) {
                 // Aborted reroll with nothing streamed — restore the previous response
                 if (!isRoom && rerollHudAfter) session.chatHudState = safeJsonClone(rerollHudAfter);
-                const restoredMsg = {
-                    id: newChatMemoryId('message'),
-                    role: 'assistant',
-                    content: rerollVersions[rerollVersions.length - 1],
-                    charId: targetChar.id,
-                    versions: rerollVersions.length > 1 ? rerollVersions : undefined,
-                    currentVersion: rerollVersions.length > 1 ? rerollVersions.length - 1 : undefined,
-                    versionLedgerEntries: rerollVersions.length > 1 ? rerollLedgerEntries : undefined,
-                    hudBefore: rerollHudBefore || undefined,
-                    hudAfter: rerollHudAfter || undefined
-                };
+                const restoredMsg = rerollOriginal;
                 // Re-add the restored take's chronicle line (stripped at reroll start)
-                const restoredEntry = rerollLedgerEntries ? rerollLedgerEntries[rerollLedgerEntries.length - 1] : null;
+                const restoredEntry = rerollOriginal.ledgerEntry || null;
                 if (restoredEntry) {
                     appendWorldLedgerEntry(session, restoredEntry);
                     restoredMsg.ledgerEntry = restoredEntry;
                 }
                 session.messages.push(restoredMsg);
                 await saveState();
-                renderChat();
+                renderOriginChat();
             } else {
                 aiMsgDiv.remove();
             }
@@ -9365,19 +9672,9 @@ async function handleChat(isReroll = false, specificCharId = null) {
         // Failed reroll: restore the previous response instead of losing it
         if (isReroll && rerollVersions) {
             if (!isRoom && rerollHudAfter) session.chatHudState = safeJsonClone(rerollHudAfter);
-            const restoredMsg = {
-                id: newChatMemoryId('message'),
-                role: 'assistant',
-                content: rerollVersions[rerollVersions.length - 1],
-                charId: targetChar.id,
-                versions: rerollVersions.length > 1 ? rerollVersions : undefined,
-                currentVersion: rerollVersions.length > 1 ? rerollVersions.length - 1 : undefined,
-                versionLedgerEntries: rerollVersions.length > 1 ? rerollLedgerEntries : undefined,
-                hudBefore: rerollHudBefore || undefined,
-                hudAfter: rerollHudAfter || undefined
-            };
+            const restoredMsg = rerollOriginal;
             // Re-add the restored take's chronicle line (stripped at reroll start)
-            const restoredEntry = rerollLedgerEntries ? rerollLedgerEntries[rerollLedgerEntries.length - 1] : null;
+            const restoredEntry = rerollOriginal.ledgerEntry || null;
             if (restoredEntry) {
                 appendWorldLedgerEntry(session, restoredEntry);
                 restoredMsg.ledgerEntry = restoredEntry;
@@ -9387,11 +9684,11 @@ async function handleChat(isReroll = false, specificCharId = null) {
 
         // If they just typed a message, give it back to them
         if (!isReroll && (text || draftAttachments.length)) {
-            const session = getCurrentSession();
-            const lastMsg = session.messages[session.messages.length - 1];
-            if (lastMsg && lastMsg.role === 'user') {
-                session.messages.pop(); // remove from transcript
-                document.getElementById('user-input').value = text; // restore raw text to box
+            const messageIndex = session.messages.indexOf(submittedMessage);
+            const lastMsg = submittedMessage;
+            if (messageIndex >= 0 && isCurrentChat() && (!userInput.value || userInput.value === text)) {
+                session.messages.splice(messageIndex, 1);
+                document.getElementById('user-input').value = text;
                 document.getElementById('user-input').style.height = 'auto';
                 await deleteChatMessageAssets(lastMsg);
                 if (draftAttachments.length) {
@@ -9399,21 +9696,25 @@ async function handleChat(isReroll = false, specificCharId = null) {
                         if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
                         item.previewUrl = item.kind === 'image' ? URL.createObjectURL(item.file) : '';
                     });
-                    chatPendingAttachments.set(chatInteractionKey(), draftAttachments);
+                    const nextPending = chatPendingAttachments.get(interactionKey) || [];
+                    chatPendingAttachments.set(interactionKey, [...draftAttachments,
+                        ...nextPending.filter(item => !draftAttachments.includes(item))]);
                 }
             }
         }
         
         await saveState();
-        renderChat(); // Reset UI safely
+        renderOriginChat();
         
-        showToast('API Error: ' + humanizeApiError(err), 'error');
+        showToast('API Error: ' + humanizeApiError(err, originProvider), 'error');
     } finally {
+        clearTimeout(requestDeadline);
         generationController = null;
         sendBtn.innerHTML = '➤';
         sendBtn.classList.remove('stop');
         updateChatSendButton();
     }
+    } finally { chatTurnInProgress = false; }
 }
 
 // --- AI Utilities ---
@@ -10276,6 +10577,7 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
     const rejectedEvents = [];
     const informationalEvents = [];
     const entityPatches = [];
+    const projectedNpcConditions = new Map();
     const legacyArgs = { ...receipt.state_updates };
     // A provider can return syntactically valid JSON containing invented
     // fields (for example player_health or inventory_updates). Ignoring those
@@ -10667,11 +10969,16 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
                     { condition, action }
                 ];
             } else {
-                const current = Array.isArray(sess.entityStates?.[actorId]?.conditions)
-                    ? sess.entityStates[actorId].conditions : [];
+                // Patches are applied only after the entire receipt validates.
+                // Fold this actor's events in order rather than deriving every
+                // patch from the same pre-turn array and losing earlier changes.
+                const current = projectedNpcConditions.get(actorId)
+                    || (Array.isArray(sess.entityStates?.[actorId]?.conditions)
+                        ? sess.entityStates[actorId].conditions : []);
                 const next = action === 'add'
                     ? [...new Set([...current, condition])]
                     : current.filter(value => value.toLowerCase() !== condition.toLowerCase());
+                projectedNpcConditions.set(actorId, next);
                 entityPatches.push({ entity_id: actorId, conditions: next, has_conditions: true });
             }
             acceptedEvents.push({ ...base, action, condition });
@@ -11956,6 +12263,38 @@ function worldWithoutUnprovenNpcObservations(world, sess, rawReceipt, playerInpu
     return { receipt, dropped };
 }
 
+function worldClockClaimIsHistorical(narrative, anchorIndex, anchorLength) {
+    const text = String(narrative || '');
+    const index = Number(anchorIndex);
+    const afterClock = text.slice(index + anchorLength);
+    if (/^\s*(?:yesterday|last\s+(?:night|morning|evening|week|month|year))\b/i.test(afterClock)) return true;
+    const lineStart = text.lastIndexOf('\n', index) + 1;
+    const lineEnd = text.indexOf('\n', index);
+    const line = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd);
+    const future = /\b(?:will|shall|must|need\s+to|have\s+to|has\s+to|tomorrow|tonight|or\s+else|otherwise|unless)\b|['’]ll\b/i.test(line);
+    return !future && /\b(?:yesterday|previously|ago|last\s+(?:night|morning|evening|week|month|year)|used\s+to|was|were|had|arrived|returned|finished|delivered|left|closed|died|ended|expired|missed|passed)\b/i.test(line);
+}
+
+function worldNarratedUrgentClockClaim(narrative) {
+    // A clock mention alone is not a new obligation. In particular, testimony
+    // about yesterday and routine opening/meal times must remain ordinary prose.
+    // Normalize dotted clock suffixes before splitting so "4 p.m. or else..."
+    // stays in the same sentence as the consequence that makes it urgent.
+    const prose = String(narrative || '').split(/<details\b/i)[0]
+        .replace(/\b([ap])\.m\./gi, '$1m');
+    const clock = /\b(?:deadline\s+(?:is|at|falls?\s+at)|by|before|within)\s+(?:today\s+|tomorrow\s+|tonight\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d+\s*(?:minutes?|hours?)|midnight|dawn|daybreak|sunrise|first\s+light|noon|sunset|dusk)\b/i;
+    for (const sentence of worldNarrativeSentences(prose)) {
+        const match = sentence.match(clock);
+        if (!match) continue;
+        if (worldClockClaimIsHistorical(sentence, match.index, match[0].length)
+            || /\b(?:no|not\s+(?:a|any)|no\s+longer)\s+(?:urgent\s+)?deadline\b|\bdeadline\b[^.!?]{0,40}\b(?:cancelled|canceled|withdrawn|no\s+longer|does\s+not|is\s+not|isn['’]t)\b/i.test(sentence)) continue;
+        const obligation = /\b(?:deadline|due|must|need\s+to|have\s+to|has\s+to|or\s+else|otherwise)\b/i.test(sentence);
+        const consequence = /\b(?:risk\w*|danger|drown\w*|die|dies|kill\w*|flood\w*|collapse\w*|fail\w*|expire\w*|closes?|miss\w*|lose|lost|trap\w*|stranded|block\w*|attack\w*|burn\w*|destroy\w*|impassable|unreachable)\b|too\s+late|cut\s+off/i.test(sentence);
+        if (obligation || consequence) return match[0];
+    }
+    return '';
+}
+
 // The mandatory receipt may be accepted before a tool-only response receives
 // its final prose. Compare that *final* text with the pre-turn and committed
 // state, without replaying the receipt or giving prose mutation authority.
@@ -11990,10 +12329,9 @@ function worldFinalNarrativeConflicts(world, beforeSession, afterSession, narrat
         // must have been part of the accepted receipt, not invented by the
         // tool-free narrator. This conservative guard only looks for explicit
         // deadlines; it never tries to turn prose into a state transaction.
-        const prose = String(narrative || '').split(/<details\b/i)[0];
-        const clockDeadline = prose.match(/\b(?:deadline\s+(?:is|was|at)|by|before|within)\s+(?:today\s+|tomorrow\s+|tonight\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|\d+\s*(?:minutes?|hours?)|midnight|dawn|daybreak|sunrise|first\s+light|noon|sunset|dusk)\b/i);
+        const clockDeadline = worldNarratedUrgentClockClaim(narrative);
         if (clockDeadline) conflicts.push({ reason: 'uncommitted_urgent_deadline',
-            detail: clockDeadline[0].slice(0, 100) });
+            detail: clockDeadline.slice(0, 100) });
     }
     const committedEvents = (Array.isArray(afterSession.turnEvents) ? afterSession.turnEvents : [])
         .filter(event => event?.committed === true
@@ -12505,45 +12843,70 @@ async function impersonateUser() {
     }
 }
 
-async function getEmbedding(text, onDiagnostics = null) {
+async function getEmbedding(text, onDiagnostics = null, signal = null) {
     if (!hasEmbeddingCredentials()) throw new Error('Embedding provider is not configured');
     const model = state.globalSettings.embeddingModel || 'openai/text-embedding-3-small';
+    const provider = state.globalSettings?.embeddingBaseUrl ? 'separate embedding endpoint' : state.globalSettings?.apiProvider;
+    const url = embeddingApiBase() + '/embeddings';
+    const headers = { ...embeddingAuthHeaders(), 'Content-Type': 'application/json' };
     const startedAt = performance.now();
     let status = 0;
     let usage = null;
     let outcome = 'network_error';
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(signal.reason);
+    if (signal?.aborted) forwardAbort();
+    else signal?.addEventListener('abort', forwardAbort, { once: true });
+    const timeout = setTimeout(() => {
+        const error = new Error('Embedding response did not complete within 30 seconds. Keyword memory remains available.');
+        error.name = 'TimeoutError';
+        error.code = 'HORDE_EMBEDDING_TIMEOUT';
+        controller.abort(error);
+    }, 30_000);
     try {
-        const response = await fetch(embeddingApiBase() + '/embeddings', {
-            method: 'POST',
-            headers: {
-                ...embeddingAuthHeaders(),
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ input: text, model })
-        });
+        const { response } = await HordeWorldModelClient.stream({ url, body: { input: text, model },
+            init: { method: 'POST', headers, signal: controller.signal } });
         status = response.status;
-        const data = await response.json();
+        const raw = await HordeWorldModelClient.readText(response, controller.signal);
+        let data;
+        try { data = raw ? JSON.parse(raw) : {}; }
+        catch (error) {
+            outcome = response.ok ? 'invalid_response' : 'http_error';
+            throw new Error(response.ok ? 'Embedding server returned invalid JSON'
+                : raw.slice(0, 400) || response.statusText || 'Embedding failed');
+        }
         usage = data?.usage || null;
         if (!response.ok) {
             outcome = 'http_error';
-            throw new Error(data.error?.message || 'Embedding failed');
+            throw new Error(data?.error?.message || 'Embedding failed');
+        }
+        if (data?.error) {
+            outcome = 'provider_error';
+            throw new Error(String(data.error.message || data.error || 'Embedding failed'));
         }
         const vector = data?.data?.[0]?.embedding;
         if (!Array.isArray(vector) || !vector.length) {
             outcome = 'empty_vector';
             throw new Error('Embedding server returned no vector');
         }
+        if (!vector.every(value => typeof value === 'number' && Number.isFinite(value))) {
+            outcome = 'invalid_vector';
+            throw new Error('Embedding server returned invalid vector coordinates');
+        }
         outcome = 'ok';
         return vector;
     } catch (error) {
-        if (error?.name === 'AbortError') outcome = 'aborted';
+        if (error?.code === 'HORDE_EMBEDDING_TIMEOUT') outcome = 'timeout';
+        else if (signal?.aborted || error?.name === 'AbortError') outcome = 'aborted';
         else if (status >= 200 && status < 300 && outcome === 'network_error') outcome = 'invalid_response';
         throw error;
     } finally {
-        if (typeof onDiagnostics === 'function') onDiagnostics({
-            model, provider: state.globalSettings?.embeddingBaseUrl ? 'separate embedding endpoint' : state.globalSettings?.apiProvider,
-            status, outcome, usage, durationMs: performance.now() - startedAt
-        });
+        clearTimeout(timeout);
+        signal?.removeEventListener('abort', forwardAbort);
+        if (typeof onDiagnostics === 'function') {
+            try { onDiagnostics({ model, provider, status, outcome, usage, durationMs: performance.now() - startedAt }); }
+            catch (error) { console.warn('Embedding diagnostics failed:', error); }
+        }
     }
 }
 
@@ -13290,11 +13653,7 @@ function setupGlobalSettings() {
         state.globalSettings.companionAlwaysOnEnabled = document.getElementById('global-companion-always-on').checked;
         state.globalSettings.companionAlwaysOnMessages = document.getElementById('global-always-on-messages').checked;
         state.globalSettings.companionAlwaysOnSocial = document.getElementById('global-always-on-social').checked;
-        const previousDailyLimit=state.globalSettings.companionAlwaysOnDailyLimit;
         state.globalSettings.companionAlwaysOnDailyLimit = livingClamp(parseInt(document.getElementById('global-always-on-daily-limit').value) || 6, 1, 1000);
-        if(previousDailyLimit!==state.globalSettings.companionAlwaysOnDailyLimit&&typeof vh2SyncProvider==='function'){
-            for(const human of state.companions.filter(c=>vh2Linked(c)))await vh2SyncProvider(human,{updateDailyLimit:true});
-        }
         state.globalSettings.companionAlwaysOnMinimumMinutes = livingClamp(parseInt(document.getElementById('global-always-on-minimum-minutes').value) || 120, 15, 1440);
         if (state.globalSettings.companionAlwaysOnEnabled) companionAlwaysOnClientId();
         state.globalSettings.localImageBaseUrl = normalizeLoopbackUrl(
@@ -13796,6 +14155,8 @@ function setupGlobalSettings() {
     // --- Full Backup / Restore ---
     const backupBtn = document.getElementById('backup-all-btn');
     if (backupBtn) backupBtn.onclick = () => exportFullBackup().catch(error => showToast(error.message, 'error'));
+    const backupMemoryBtn = document.getElementById('backup-memory-btn');
+    if (backupMemoryBtn) backupMemoryBtn.onclick = () => exportEmergencyMemoryBackup().catch(error => showToast(error.message, 'error'));
 
     const restoreBtn = document.getElementById('restore-all-btn');
     const restoreInput = document.getElementById('restore-all-input');
@@ -13856,12 +14217,130 @@ async function assertBackupSourceRevision(expected, label) {
     }
 }
 
+function inMemoryBackupPayload() {
+    (state.companions || []).forEach(companion => persistCompanionRuntime(companion));
+    return {
+        _format: 'horde-studio-backup',
+        _version: 1,
+        _exportedAt: new Date().toISOString(),
+        globalSettings: redactGlobalSettingsCredentials(state.globalSettings),
+        characters: state.characters,
+        chats: state.chats,
+        chatContinuities: state.chatContinuities,
+        activeSessionId: state.activeSessionId,
+        personas: state.personas,
+        activePersonaId: state.activePersonaId,
+        rooms: state.rooms,
+        theme: state.theme,
+        systemPresets: state.systemPresets,
+        regexScripts: state.regexScripts,
+        worlds: state.worlds,
+        worldInstances: state.worldInstances,
+        worldRecoverySnapshots: state.worldRecoverySnapshots,
+        activeWorldId: state.activeWorldId,
+        videoWorlds: state.videoWorlds,
+        videoWorldSessions: state.videoWorldSessions,
+        activeVideoWorldId: state.activeVideoWorldId,
+        companions: state.companions,
+        companionThreads: state.companionThreads,
+        companionTimelines: portableCompanionTimelineState(state.companionTimelines),
+        activeCompanionId: state.activeCompanionId
+    };
+}
+
+async function exportEmergencyMemoryBackup() {
+    // This is intentionally not called a full backup: IndexedDB-only media and
+    // service checkpoints may be unavailable after storage failure.
+    const payload = structuredClone({
+        ...inMemoryBackupPayload(),
+        _emergencyMemoryOnly: {
+            reason: 'IndexedDB saving was unavailable',
+            omittedChatAssets: true,
+            omittedCompanionVideoAssets: true,
+            omittedVirtualHumanServiceLives: true
+        },
+        chatAssets: {},
+        companionVideoAssets: {}
+    });
+    const blob = await HordeLargeArchive.pack(payload, 'full-backup');
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `horde_EMERGENCY_memory_${new Date().toISOString().slice(0, 10)}.hordebackup`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
+    showToast('Emergency memory copy downloaded. It is not a full backup: separately stored media and Virtual Human service lives may be missing.', 'error');
+}
+
+async function retryPendingStorageWrites() {
+    // A rejected in-flight promise must settle before its coalescing guard is
+    // cleared. Failed batches restore their dirty flags for this retry.
+    for (let pass = 0; pass < 5; pass++) {
+        await Promise.all([saveStateInFlight, worldSaveInFlight, virtualHumanSaveInFlight]
+            .filter(Boolean).map(pending => pending.catch(() => {})));
+        if (!saveStateQueued && !worldSaveQueued && !virtualHumanSaveScope) return;
+        if (saveStateQueued) await saveState();
+        if (worldSaveQueued) await saveWorldsState();
+        if (virtualHumanSaveScope) await saveVirtualHumansState();
+    }
+    throw Error('New changes kept arriving while storage recovered. Keep this tab open and retry saving.');
+}
+
+function showStorageFailureBanner(error) {
+    if (!document.body) return;
+    window.addEventListener('beforeunload', warnAboutUnsavedStorage);
+    let banner = document.getElementById('storage-failure-banner');
+    if (!banner) {
+        banner = document.createElement('section');
+        banner.id = 'storage-failure-banner';
+        banner.setAttribute('role', 'alert');
+        banner.innerHTML = '<strong>Saving is paused — keep this tab open</strong><p></p><div class="storage-failure-actions"><button type="button" data-action="retry" class="btn btn-secondary">Retry saving</button><button type="button" data-action="export" class="btn btn-primary">Export emergency memory copy</button></div><small>This copy may omit separately stored media and Virtual Human service lives. Do not close this tab until you have a verified backup.</small>';
+        document.body.append(banner);
+        banner.querySelector('[data-action="export"]').onclick = () => {
+            exportEmergencyMemoryBackup().catch(failure => {
+                banner.querySelector('p').textContent = `Emergency export failed: ${failure.message || failure}`;
+            });
+        };
+        banner.querySelector('[data-action="retry"]').onclick = async () => {
+            const retry = banner.querySelector('[data-action="retry"]');
+            retry.disabled = true;
+            try {
+                await HordeDB.verifyConnection();
+                await retryPendingStorageWrites();
+                if (HordeDB.unresolvedWriteFailure) {
+                    showStorageFailureBanner(Error('The connection is open, but a previous write failed and may not have been retried. Export an emergency memory copy, then verify and re-save the affected work before closing this tab.'));
+                } else {
+                    clearStorageFailureBanner();
+                    showToast('Storage reconnected and pending changes saved.', 'success');
+                }
+            } catch (failure) {
+                showStorageFailureBanner(failure);
+            } finally { if (retry.isConnected) retry.disabled = false; }
+        };
+    }
+    banner.querySelector('strong').textContent = HordeDB.db && HordeDB.unresolvedWriteFailure && !HordeDB.conflicted
+        ? 'Some work may not be saved'
+        : 'Saving is paused — keep this tab open';
+    banner.querySelector('p').textContent = String(error?.message || error || 'The local database could not be reached.');
+    banner.querySelector('[data-action="retry"]').hidden = HordeDB.conflicted || HordeDB.closedIntentionally;
+}
+
+function clearStorageFailureBanner() {
+    document.getElementById('storage-failure-banner')?.remove();
+    window.removeEventListener('beforeunload', warnAboutUnsavedStorage);
+}
+
+function warnAboutUnsavedStorage(event) {
+    event.preventDefault();
+    event.returnValue = '';
+}
+
 function hasUnsettledCompanionWork() {
     return companionReplyInFlight.size > 0 || companionAgencyInFlight.size > 0;
 }
 
 async function exportFullBackup() {
-    if (worldTurnInProgress) throw new Error('A World turn is still generating. Stop or finish it before exporting a full backup.');
+    if (chatTurnInProgress || generationController || window.HordeVideoWorlds?.hasPendingWork?.()) throw new Error('A chat reply or video generation is still running. Finish it before exporting a full backup.');
+    if (worldTurnInProgress || worldMutationInProgress) throw new Error('A World turn is still generating. Stop or finish it before exporting a full backup.');
     if (hasUnsettledCompanionWork()) throw new Error('A Virtual Human reply or background action is still running. Wait for it to finish before exporting a full backup.');
     const backupButton = document.getElementById('backup-all-btn');
     if (backupButton?.disabled) return;
@@ -13871,17 +14350,18 @@ async function exportFullBackup() {
     await Promise.all([saveStateInFlight, worldSaveInFlight, virtualHumanSaveInFlight].filter(Boolean));
     const startingRevision = HordeDB.revision;
     await assertBackupSourceRevision(startingRevision, 'Saved data');
-    if (worldTurnInProgress) throw new Error('A World turn started during backup export. No incomplete file was downloaded; try again when it finishes.');
+    if (chatTurnInProgress || generationController || window.HordeVideoWorlds?.hasPendingWork?.()) throw new Error('A chat reply or video generation started during backup export. Finish it before exporting a full backup.');
+    if (worldTurnInProgress || worldMutationInProgress) throw new Error('A World turn started during backup export. No incomplete file was downloaded; try again when it finishes.');
     if (hasUnsettledCompanionWork()) throw new Error('A Virtual Human action started during backup export. No incomplete file was downloaded; try again when it finishes.');
-    (state.companions || []).forEach(companion => persistCompanionRuntime(companion));
     const companionVideoAssets = {};
     const assetIds = new Set((state.companions || []).flatMap(companion => [
         ...(companion.videoJobs || []), ...(companion.startingVideoClips || []),
         ...(state.companionTimelines?.[companion.id]?.sessions || []).flatMap(t => t.runtime?.videoJobs || [])
     ].map(job => String(job.assetId || '')).filter(Boolean)));
     for (const assetId of assetIds) {
-        const blob = await HordeDB.get(`companionVideoAsset:${assetId}`).catch(() => null);
-        if (blob instanceof Blob) companionVideoAssets[assetId] = blob;
+        const blob = await HordeDB.get(`companionVideoAsset:${assetId}`);
+        if (!(blob instanceof Blob)) throw Error(`Full backup stopped: video asset ${assetId} is missing. Use the emergency memory copy if storage cannot be repaired.`);
+        companionVideoAssets[assetId] = blob;
     }
     const chatAssets = {};
     const chatAssetIds = new Set(Object.values(state.chats || {}).flatMap(sessions =>
@@ -13890,8 +14370,9 @@ async function exportFullBackup() {
                 (Array.isArray(message?.attachments) ? message.attachments : [])
                     .map(attachment => String(attachment?.id || '')).filter(Boolean)))));
     for (const assetId of chatAssetIds) {
-        const blob = await HordeDB.get(`chatAsset:${assetId}`).catch(() => null);
-        if (blob instanceof Blob) chatAssets[assetId] = blob;
+        const blob = await HordeDB.get(`chatAsset:${assetId}`);
+        if (!(blob instanceof Blob)) throw Error(`Full backup stopped: chat asset ${assetId} is missing. Use the emergency memory copy if storage cannot be repaired.`);
+        chatAssets[assetId] = blob;
     }
     const vh2Checkpoints=[];
     const vh2Worlds=new Set(Object.values(state.companionTimelines||{}).flatMap(store=>(store.sessions||[])
@@ -13913,34 +14394,8 @@ async function exportFullBackup() {
         vh2Checkpoints.push({worldId,data:checkpoint});
     }
     const payload = {
+        ...inMemoryBackupPayload(),
         vh2Checkpoints,
-        _format: 'horde-studio-backup',
-        _version: 1,
-        _exportedAt: new Date().toISOString(),
-        // API keys are credentials, not application data. They are intentionally
-        // excluded so a shared backup cannot leak account access.
-        globalSettings: redactGlobalSettingsCredentials(state.globalSettings),
-        characters: state.characters,
-        chats: state.chats,
-        chatContinuities: state.chatContinuities,
-        activeSessionId: state.activeSessionId,
-        personas: state.personas,
-        activePersonaId: state.activePersonaId,
-        rooms: state.rooms,
-        theme: state.theme,
-        systemPresets: state.systemPresets,
-            regexScripts: state.regexScripts,
-        worlds: state.worlds,
-        worldInstances: state.worldInstances,
-        worldRecoverySnapshots: state.worldRecoverySnapshots,
-        activeWorldId: state.activeWorldId,
-        videoWorlds: state.videoWorlds,
-        videoWorldSessions: state.videoWorldSessions,
-        activeVideoWorldId: state.activeVideoWorldId,
-        companions: state.companions,
-        companionThreads: state.companionThreads,
-        companionTimelines: portableCompanionTimelineState(state.companionTimelines),
-        activeCompanionId: state.activeCompanionId,
         companionVideoAssets,
         chatAssets
     };
@@ -13948,7 +14403,8 @@ async function exportFullBackup() {
         if (backupButton) backupButton.textContent = message;
     });
     await assertBackupSourceRevision(startingRevision, 'Saved data');
-    if (worldTurnInProgress) throw new Error('A World turn started during backup export. No incomplete file was downloaded; try again when it finishes.');
+    if (chatTurnInProgress || generationController || window.HordeVideoWorlds?.hasPendingWork?.()) throw new Error('A chat reply or video generation started during backup export. Finish it before exporting a full backup.');
+    if (worldTurnInProgress || worldMutationInProgress) throw new Error('A World turn started during backup export. No incomplete file was downloaded; try again when it finishes.');
     if (hasUnsettledCompanionWork()) throw new Error('A Virtual Human action started during backup export. No incomplete file was downloaded; try again when it finishes.');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -13973,7 +14429,7 @@ async function importFullBackup(file) {
                 : JSON.parse(await file.text()));
             const recoverableWorldCount=Object.keys(data.worldRecoverySnapshots || {}).length;
             showConfirmModal('Restore Backup',
-                `This will REPLACE all current browser data with the backup from ${data._exportedAt ? data._exportedAt.slice(0, 10) : 'unknown date'} (${(data.characters || []).length} chat characters, ${(data.companions || []).length} virtual humans, ${(data.worlds || []).length} worlds, ${recoverableWorldCount} recoverable World${recoverableWorldCount === 1 ? '' : 's'}).${data.vh2Checkpoints?.length ? ' Saved Virtual Human lives also restore into the local service. Existing lives are never overwritten; an unchanged retry of this exact backup can finish an interrupted restore.' : data.vh2ServiceArchives?.length ? ' Saved Virtual Human lives also restore into the local service. Existing service lives are never overwritten.' : ''} Continue?`,
+                `This will REPLACE all current browser data with the backup from ${data._exportedAt ? data._exportedAt.slice(0, 10) : 'unknown date'} (${(data.characters || []).length} chat characters, ${(data.companions || []).length} virtual humans, ${(data.worlds || []).length} worlds, ${recoverableWorldCount} recoverable World${recoverableWorldCount === 1 ? '' : 's'}).${data._emergencyMemoryOnly ? ' WARNING: This is an emergency memory-only copy. Separately stored chat/video assets and Virtual Human service lives are NOT included; restore those from a separate verified backup if needed.' : ''}${data.vh2Checkpoints?.length ? ' Saved Virtual Human lives also restore into the local service. Existing lives are never overwritten; an unchanged retry of this exact backup can finish an interrupted restore.' : data.vh2ServiceArchives?.length ? ' Saved Virtual Human lives also restore into the local service. Existing service lives are never overwritten.' : ''} Continue?`,
                 async () => {
                     let serviceRestoreAttempted=false,serviceRestoreCommitted=false;
                     try {
@@ -14005,7 +14461,10 @@ async function importFullBackup(file) {
                     // snapshot. Media and canonical state then commit together
                     // in one IndexedDB transaction, or neither changes.
                     await Promise.all([saveStateInFlight, worldSaveInFlight, virtualHumanSaveInFlight].filter(Boolean));
-                    if (worldTurnInProgress) {
+                    if (chatTurnInProgress || generationController || window.HordeVideoWorlds?.hasPendingWork?.()) {
+                        throw new Error('A chat reply or video generation is still running. Finish it before restoring a backup.');
+                    }
+                    if (worldTurnInProgress || worldMutationInProgress) {
                         throw new Error('A World turn is still generating. Stop or finish it before restoring a backup.');
                     }
                     if (hasUnsettledCompanionWork()) {
@@ -14039,7 +14498,7 @@ async function importFullBackup(file) {
                         if(!response.ok)throw Error((await response.json()).error||'Virtual Human service restore failed.');
                         serviceRestoreCommitted=true;
                     }
-                    if (data.vh2Checkpoints?.length || data.vh2ServiceArchives?.length) {
+                    if (data.vh2Checkpoints?.length || data.vh2ServiceArchives?.length || data._emergencyMemoryOnly) {
                         for(const store of Object.values(data.companionTimelines||{}))for(const timeline of store.sessions||[])if(timeline.vh2){
                             timeline.vh2.running=false;timeline.vh2.autoReplies=false;timeline.vh2.outbox=[];
                         }
@@ -14061,6 +14520,11 @@ async function importFullBackup(file) {
                     for (const store of Object.values(data.companionTimelines || {})) {
                         for (const timeline of store?.sessions || []) markUnfinishedClips(timeline.runtime?.videoJobs);
                     }
+                    // Service restore can take minutes; check again before replacing browser state.
+                    if (chatTurnInProgress || generationController || worldTurnInProgress || worldMutationInProgress
+                        || hasUnsettledCompanionWork() || window.HordeVideoWorlds?.hasPendingWork?.()) {
+                        throw new Error('New work started while restoring the service. Browser data was kept; finish that work before retrying this backup.');
+                    }
                     const previous = Object.fromEntries(keys.map(key => [key, state[key]]));
                     const previousMediaDirty = worldMediaDirty;
                     try {
@@ -14076,6 +14540,7 @@ async function importFullBackup(file) {
                     // recoverable. Unversioned post-commit deletion could race
                     // another tab and remove media still in use there.
                     showToast('Backup restored! Reloading...', 'success');
+                    clearStorageFailureBanner();
                     setTimeout(() => window.location.reload(), 800);
                     } catch (error) {
                         const status=serviceRestoreCommitted
@@ -14097,18 +14562,29 @@ async function importFullBackup(file) {
 
 function purgeAllData() {
     showConfirmModal('⚠️ Purge All Data', 'This will permanently delete all characters, settings, and memory. This action cannot be undone. Are you sure?', async () => {
+        if (chatTurnInProgress || generationController || worldTurnInProgress || worldMutationInProgress
+            || hasUnsettledCompanionWork() || window.HordeVideoWorlds?.hasPendingWork?.()) {
+            return showToast('Finish active replies, World actions and media generations before deleting all data.', 'info');
+        }
         try {
-            localStorage.clear();
             HordeDB.close();
             await new Promise((resolve, reject) => {
                 const request = indexedDB.deleteDatabase(DB_NAME);
                 request.onsuccess = () => resolve();
                 request.onerror = () => reject(request.error || new Error('Database deletion failed'));
-                request.onblocked = () => reject(new Error('Close other Horde Studio tabs and try again'));
+                request.onblocked = () => {
+                    // A blocked deletion remains pending and may complete later.
+                    // Never report it as cancelled while the browser can still
+                    // erase the database when another tab closes.
+                    showStorageFailureBanner(Error('Data deletion is waiting for other Horde Studio tabs to close. Keep this tab open; the purge is still pending.'));
+                };
             });
+            localStorage.clear();
             showToast('All data purged. Reloading...', 'success');
+            clearStorageFailureBanner();
             window.location.reload();
         } catch (err) {
+            showStorageFailureBanner(Error(`Purge failed and this tab cannot safely save. Reload to reconnect to the original data: ${err.message}`));
             showToast('Purge failed: ' + err.message, 'error');
         }
     }, 'Yes, Nuke Everything', 'Cancel');
@@ -14852,6 +15328,7 @@ function setupRoomsLogic() {
 
     document.getElementById('delete-room-btn').onclick = () => {
         showConfirmModal('Delete Room', 'Permanently destroy this scenario?', async () => {
+            if (chatTurnInProgress || generationController) return showToast('Wait for the current reply or stop it before changing chat history.', 'info');
             state.rooms = state.rooms.filter(room => room.id !== state.editingRoom.id);
             delete state.chats[state.editingRoom.id];
             await saveState();
@@ -21890,7 +22367,7 @@ function parseMultiplayerReceipt(rawText) {
     throw new Error('The host model returned malformed campaign state. Nothing was committed; retry the round or choose another model.');
 }
 
-async function executeIsolatedMultiplayerTurn(campaign, prompt) {
+async function executeIsolatedMultiplayerTurn(campaign, prompt, options = {}) {
     if (!campaign) throw new Error('The multiplayer campaign is not initialized.');
     const provider = normalizedProviderId(campaign.provider);
     if (!providerHasCredentials(provider)) throw new Error(`Add a ${providerDisplayName(provider)} connection in Settings before hosting.`);
@@ -21909,15 +22386,17 @@ async function executeIsolatedMultiplayerTurn(campaign, prompt) {
     const requestBody = { model: campaign.model || state.globalSettings.defaultModel,
         messages: sanitizeMessagesForProvider(messages, provider), max_tokens: 1800, temperature: 0.72,
         response_format: { type: 'json_object' } };
-    let response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(requestBody) });
+    const request = () => HordeWorldModelClient.json({ url: endpoint, body: requestBody,
+        init: { method: 'POST', headers, signal: options.signal },
+        timeoutMs: options.timeoutMs ?? 120_000 });
+    let { response, data: payload } = await request();
     if (!response.ok && [400, 404, 422].includes(response.status)) {
         // Many reasoning and OpenAI-compatible models reject response_format
         // despite producing valid JSON when the contract is in the prompt.
         delete requestBody.response_format;
-        response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(requestBody) });
+        ({ response, data: payload } = await request());
     }
-    if (!response.ok) throw new Error(humanizeApiError(new Error(await response.text().catch(() => `Request failed (${response.status})`)), provider));
-    const payload = await response.json();
+    if (!response.ok) throw new Error(humanizeApiError(new Error(payload?.error?.message || `Request failed (${response.status})`), provider));
     const raw = multiplayerMessageText(payload?.choices?.[0]?.message?.content);
     if (!raw) throw new Error('The host model returned an empty multiplayer turn.');
     const receipt = parseMultiplayerReceipt(raw);
@@ -22063,6 +22542,10 @@ function leaveMultiplayerExperience() {
 }
 
 async function hardResetActiveWorldTimeline() {
+    if (worldTurnInProgress || worldMutationInProgress) {
+        showToast('Finish the current World action before resetting its timeline.', 'info');
+        return false;
+    }
     const sess = getCurrentWorldSession();
     const world = state.worlds.find(item => item.id === state.activeWorldId);
     if (!sess || !world) return false;
@@ -23097,6 +23580,7 @@ function setupWorldPlayLogic() {
         if (!inst || inst.sessions.length <= 1) return showToast('Cannot delete the last session', 'info');
         
         showConfirmModal('Delete Session', 'Permanently delete this timeline? This cannot be undone.', async () => {
+                if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action before changing its history.', 'info');
             const currentIdx = inst.sessions.findIndex(s => s.id === inst.activeSessionId);
             if (currentIdx !== -1) {
                 const removedSession = inst.sessions[currentIdx];
@@ -26904,6 +27388,7 @@ function appendWorldMessageUI(msg, index = null) {
 
         if (msg.role === 'dm' && versions.length > 1 && isLastEntry) {
             div.querySelector('.prev-ver').onclick = async () => {
+                if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action before changing its history.', 'info');
                 msg.currentVersion = Math.max(0, currentVersionIdx - 1);
                 msg.text = msg.versions[msg.currentVersion]; // keep canonical for API context
                 applyWorldTakeMetadata(msg, msg.versionTakeMetadata?.[msg.currentVersion]);
@@ -26923,6 +27408,7 @@ function appendWorldMessageUI(msg, index = null) {
                 renderWorldPlayState();
             };
             div.querySelector('.next-ver').onclick = async () => {
+                if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action before changing its history.', 'info');
                 msg.currentVersion = Math.min(versions.length - 1, currentVersionIdx + 1);
                 msg.text = msg.versions[msg.currentVersion]; // keep canonical for API context
                 applyWorldTakeMetadata(msg, msg.versionTakeMetadata?.[msg.currentVersion]);
@@ -26945,6 +27431,7 @@ function appendWorldMessageUI(msg, index = null) {
 
         delBtn.onclick = () => {
             showConfirmModal('Delete Timeline Entry', 'This entry and everything after it will be removed so world state stays consistent. Continue?', async () => {
+                if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action before changing its history.', 'info');
                 const deletedMsg = sess.history[index];
                 const world = state.worlds.find(w => w.id === state.activeWorldId);
                 const affectedDm = deletedMsg.role === 'dm'
@@ -26960,6 +27447,7 @@ function appendWorldMessageUI(msg, index = null) {
 
         let isEditing = false;
         editBtn.onclick = async () => {
+                if (worldTurnInProgress || worldMutationInProgress) return showToast('Finish the current World action before changing its history.', 'info');
             if (!isEditing) {
                 isEditing = true;
                 textDiv.classList.add('hidden');
@@ -33044,9 +33532,11 @@ function reconcileNarratedWorldDeadlines(world, sess, receipt, legacyArgs, narra
     const corrections = [];
     urgent.forEach(update => {
         const title = `${update.title || ''} ${update.description || ''}`.toLowerCase();
-        const linked = claims.filter(claim => new RegExp(`\\b${claim.label}\\b`, 'i').test(title));
+        const futureClaims = claims.filter(claim => !worldClockClaimIsHistorical(
+            narrative, claim.index, claim.phrase.length));
+        const linked = futureClaims.filter(claim => new RegExp(`\\b${claim.label}\\b`, 'i').test(title));
         const candidates = linked.length ? linked : urgent.length === 1
-            ? claims.filter(claim => claim.explicitDeadline || claim.corroboratedAgreement) : [];
+            ? futureClaims.filter(claim => claim.explicitDeadline || claim.corroboratedAgreement) : [];
         if (candidates.length !== 1) return;
         const claim = candidates[0];
         const dayStart = Math.floor(now / 1440) * 1440;
@@ -33146,6 +33636,7 @@ function recoverNarratedUrgentDeadline(world, sess, narrative, playerInput = '')
     timeClaims.sort((a, b) => a.index - b.index);
     const stakes = /\b(?:risk\w*|danger|deadline|drown\w*|dead|die|kill\w*|flood\w*|collapse\w*|fail\w*|expire|close\w*|miss\w*|lose|lost|gone|trap\w*|stranded|block\w*|attack\w*|burn\w*|destroy\w*|rescue|save|swallow\w*|sink\w*|impassable|unreachable|surviv\w*|breath\w*|sick\w*|foul\w*|poison\w*|plague\w*)\b|too late|cut off/i;
     for (const claim of timeClaims) {
+        if (worldClockClaimIsHistorical(visible, claim.index, claim.phrase.length)) continue;
         const nearby = visible.slice(Math.max(0, claim.index - 160), Math.min(visible.length, claim.index + 300));
         const speaker = visible.slice(0, claim.index).match(/(?:^|\n)\s*([A-Z][A-Za-z.' -]{1,48}):\s*[“"]?[^\n“"]*$/)?.[1]?.trim() || '';
         const spokenLine = worldDeadlineNarrativeSourceKey(visible, claim.index);
@@ -40674,11 +41165,11 @@ function trimToLastSentence(text) {
 
 const memoryConsolidationJobs = new WeakMap();
 
-async function consolidateSessionEpisodicMemory(session, config) {
+async function consolidateSessionEpisodicMemory(session, config, originPersonaId = state.activePersonaId) {
     if (!session) return;
     const existing = memoryConsolidationJobs.get(session);
     if (existing) return existing;
-    const job = consolidateSessionEpisodicMemoryRun(session, config)
+    const job = consolidateSessionEpisodicMemoryRun(session, config, originPersonaId)
         .finally(() => memoryConsolidationJobs.delete(session));
     memoryConsolidationJobs.set(session, job);
     return job;
@@ -40713,7 +41204,7 @@ function parseStructuredChatMemory(rawText) {
     return { summary: raw.replace(/^\[EPISODIC ARCHIVE\]:?\s*/i, ''), memories: [] };
 }
 
-async function consolidateSessionEpisodicMemoryRun(session, config) {
+async function consolidateSessionEpisodicMemoryRun(session, config, originPersonaId = state.activePersonaId) {
     if (!session) return;
     // Race guard: remember the epoch at read time; if a reroll/edit/restore
     // rewrites history while our API calls are in flight, we must not commit.
@@ -40850,7 +41341,7 @@ Begin your response with: [EPISODIC ARCHIVE]:`
                 sourceMessageIds,
                 startIndex: lastIdx,
                 endIndex: chunkEnd,
-                personaId: state.activePersonaId || ''
+                personaId: originPersonaId || ''
             });
             pendingEmbeddings = inserted;
             totalMemories = continuity.records.filter(record => record.status !== 'superseded').length;
@@ -42252,7 +42743,7 @@ function repairCompanionMessageIds(messages) {
 function normalizeCompanionMessage(raw) {
     const m = isPlainObject(raw) ? raw : {};
     const timestamp = Number.isFinite(m.timestamp) ? m.timestamp : Date.now();
-    const deliveryState = ['sent', 'delivered', 'read'].includes(m.deliveryState)
+    const deliveryState = ['sent', 'delivered', 'read', 'failed'].includes(m.deliveryState)
         ? m.deliveryState
         : (m.role === 'companion' ? '' : 'read');
     return {
@@ -42281,7 +42772,7 @@ function normalizeCompanionMessage(raw) {
         timestamp,
         moodLabel: COMPANION_MOOD_LABELS.includes(m.moodLabel) ? m.moodLabel : '',
         deliveryState,
-        deliveredAt: Number.isFinite(m.deliveredAt) ? m.deliveredAt : (deliveryState ? timestamp : 0),
+        deliveredAt: Number.isFinite(m.deliveredAt) ? m.deliveredAt : (deliveryState && deliveryState !== 'failed' ? timestamp : 0),
         readAt: Number.isFinite(m.readAt) ? m.readAt : (deliveryState === 'read' ? timestamp : 0),
         replyDueAt: Number.isFinite(m.replyDueAt) ? m.replyDueAt : 0,
         awaitingReply: m.awaitingReply === true,
@@ -54935,6 +55426,10 @@ function setupCompanionSocialPanel() {
 function companionDeliveryHTML(message, companion) {
     if (message.role !== 'user') return '';
     const stateLabel = message.deliveryState || 'sent';
+    if (stateLabel === 'failed') {
+        const detail = 'Not sent — saving failed. Keep this tab open, export an emergency copy, then retry the message after storage recovers.';
+        return `<span class="companion-delivery failed" title="${escapeHTML(detail)}" aria-label="${escapeHTML(detail)}">Not sent</span>`;
+    }
     const marks = stateLabel === 'sent' ? '✓' : '✓✓';
     const detail = [
         `Sent ${companionTimestampLabel(companion, message.timestamp)}`,

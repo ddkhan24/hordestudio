@@ -158,6 +158,7 @@ function decodeCompletionBody(raw) {
 
 root.HordeWorldModelClient = {
     json, stream, decodeCompletionBody,
+    runAbortable: awaitAbortable,
     readText: (response, signal) => awaitAbortable(() => response.text(), signal),
     readChunk: (reader, signal) => awaitAbortable(() => reader.read(), signal)
 };

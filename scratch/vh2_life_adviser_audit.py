@@ -1,4 +1,4 @@
-"""Daily review delivery, limits, typed proposals and diverse adult life authoring."""
+"""Daily review delivery, uncapped text usage, typed proposals and diverse adult life authoring."""
 import copy,json,sys,time,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -63,19 +63,27 @@ class Adviser(unittest.TestCase):
   with self.s.connect() as db:
    db.execute('BEGIN IMMEDIATE');rev,state=self.s.read(db,self.w);after=copy.deepcopy(state);story.ensure(after['truth']['companion']).update(status='waiting',error='Waiting for the life to catch up.');self.s.commit_event(db,self.w,rev,state,after,'FIXTURE_STALE_LABEL')
   story.poll(self.s);self.assertEqual(self.state()['truth']['companion']['vh2Story']['adviser']['status'],'failed');self.assertFalse(self.s._story_pending)
- def test_daily_budget_includes_life_advice(self):
-  self.setup_adviser()
+ def test_prior_text_usage_does_not_block_life_advice(self):
+  self.setup_adviser();self.s.story_executor=lambda *args:self.result()
   with self.s.connect() as db:
    provider=self.s.dialogue_provider.current(db,'horde:alex')
    for i in range(20):
     ident='prior-review:'+str(i)
     db.execute('INSERT INTO vh2_story_jobs(id,world_id,status,snapshot,created_at) VALUES (?,?,?,?,?)',(ident,self.w,'completed',json.dumps({'providerId':provider['id']}),self.s.clock()))
     db.execute('INSERT INTO dialogue_usage VALUES (?,?)',(ident,self.s.clock()))
-  story.poll(self.s);self.assertIn('Daily shared request limit reached: 20/20',self.state()['truth']['companion']['vh2Story']['adviser']['error']);self.assertFalse(self.s._story_pending)
- def test_separate_background_zero_blocks_adviser_without_capping_dialogue(self):
+  story.poll(self.s);self.finish()
+  self.assertEqual(self.state()['truth']['companion']['vh2Story']['adviser']['status'],'reviewed')
+  status=self.s.dialogue_provider.status('horde:alex')
+  self.assertEqual(status['usage']['background'],21)
+  self.assertIsNone(status['budgets']['background']['limit'])
+ def test_saved_zero_background_cap_does_not_block_adviser(self):
   self.setup_adviser();config=self.s.dialogue_provider.status('horde:alex');config['budgetPolicy']={'version':1,'dialogueDailyLimit':None,'backgroundDailyLimit':0};self.s.dialogue_provider.save(config)
-  story.poll(self.s);self.assertFalse(self.s._story_pending);self.assertIn('Daily background request limit reached: 0/0',self.state()['truth']['companion']['vh2Story']['adviser']['error'])
-  self.assertFalse(self.s.dialogue_provider.status('horde:alex')['budgets']['dialogue']['exhausted'])
+  self.s.story_executor=lambda *args:self.result();story.poll(self.s);self.finish()
+  self.assertEqual(self.state()['truth']['companion']['vh2Story']['adviser']['status'],'reviewed')
+  status=self.s.dialogue_provider.status('horde:alex')
+  self.assertEqual(status['usage']['background'],1)
+  self.assertFalse(status['budgets']['dialogue']['exhausted'])
+  self.assertFalse(status['budgets']['background']['exhausted'])
  def test_rejected_candidate_retains_diagnostic_reason_without_becoming_advice(self):
   self.setup_adviser();candidate=self.result();candidate['suggestion']['kind']='teleport';self.s.story_executor=lambda *args:candidate
   before=self.state();story.poll(self.s);self.finish();after=self.state();a=after['truth']['companion']['vh2Story']['adviser']
