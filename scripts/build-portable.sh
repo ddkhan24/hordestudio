@@ -5,7 +5,7 @@ set -eu
 # of the public bundle on every Python version and in child processes.
 export PYTHONDONTWRITEBYTECODE=1
 
-VERSION="${1:-18.3.5}"
+VERSION="${1:-18.3.6}"
 case "$VERSION" in
   ''|*[!A-Za-z0-9._-]*) echo "Version must contain only letters, digits, periods, underscores or hyphens." >&2; exit 1 ;;
 esac
@@ -43,6 +43,11 @@ for file in \
   labs-needle-worker.js \
   labs-core.js \
   labs-tasks.js \
+  horde-handbook.js \
+  horde-manual.js \
+  pip-knowledge.js \
+  pip-assistant.js \
+  horde-support.css \
   labs-guide.js \
   labs-ui.js \
   help-system.js \

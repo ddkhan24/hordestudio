@@ -180,9 +180,10 @@
         'labs-budget': 'Hourly local-call ceiling and prompt/output size preset. It limits device work, not cloud-provider spending.',
         'labs-diagnostics-enabled': 'Keep timing, validity and task results without storing the original prompt text.',
         'labs-clear-diagnostics-btn': 'Delete the local Labs trust-dashboard history. This does not change models or policies.',
-        'labs-guide-send-btn': 'Send this question to Pip. Horde Studio facts come directly from the built-in handbook so a tiny model cannot distort them.',
+        'labs-guide-send-btn': 'Ask Pip about Horde Studio. Built-in mode searches the full manual locally; an optional chosen provider answers with relevant guide excerpts.',
+        'pip-configure-btn': 'Choose Pip’s own provider and exact model ID. Credentials come from Settings → Connections. Cloud answers consume provider credits.',
         'pip-clear-chat-btn': 'Clear Pip’s messages in this tab and restore his welcome message. This does not remove the Tiny Brain or any Horde Studio data.',
-        'pip-sidebar-btn': 'Open Pip, the always-available private guide. Pip answers from built-in Horde Studio notes and can optionally polish them with your local Tiny Brain.'
+        'pip-sidebar-btn': 'Open Pip, the Horde Studio support assistant. Choose its provider and model independently, or use the complete offline handbook.'
     });
 
     const VALUE_HELP = Object.freeze({
@@ -358,7 +359,7 @@
         }))).observe(document.body, { childList: true, subtree: true });
     }
 
-    window.HordeHelp = Object.freeze({ enhance, explanationFor, registrySize: Object.keys(HELP_BY_ID).length });
+    window.HordeHelp = Object.freeze({ enhance, explanationFor, knowledgeEntries: () => Object.entries(HELP_BY_ID).map(([id, text]) => ({ id, text })), registrySize: Object.keys(HELP_BY_ID).length });
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
     else start();
 })();

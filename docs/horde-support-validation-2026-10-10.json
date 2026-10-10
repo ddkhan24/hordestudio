@@ -1,0 +1,82 @@
+{
+  "date": "2026-10-10",
+  "status": "passed",
+  "scope": [
+    "NanoGPT discovery and exact model IDs",
+    "Built-in illustrated HTML manual",
+    "Independent handbook-grounded Pip assistant"
+  ],
+  "manual": {
+    "topics": 75,
+    "screenshots": 51,
+    "workflow_diagrams": 4,
+    "indexed_terms": 377
+  },
+  "checks": {
+    "isolated_browser_acceptance": "passed",
+    "offline_knowledge_and_resource_staging": "passed",
+    "nanogpt_provider_checks": 19,
+    "labs_cognition": "passed",
+    "engine_regression_checks": 27,
+    "engine_integrity_checks": 12,
+    "world_calibration_checks": 66,
+    "portable_reproducibility_and_exclusion_checks": 5,
+    "javascript_and_python_syntax": "passed",
+    "git_diff_whitespace": "passed"
+  },
+  "browser_coverage": [
+    "full-text guide search",
+    "linked alphabetical index",
+    "screenshot enlargement",
+    "mobile overflow",
+    "topic deep-link reload",
+    "all screenshot HTTP responses",
+    "full manual print preparation",
+    "independent provider selection",
+    "exact custom IDs",
+    "settings persistence",
+    "OpenRouter and NanoGPT request routing and auth",
+    "manual grounding",
+    "follow-up context",
+    "safe response text rendering",
+    "provider failure fallback",
+    "clear cancels pending response",
+    "Enter-to-send",
+    "catalogs above 500 entries",
+    "Virtual Human custom ID retained after catalog refresh"
+  ],
+  "public_nanogpt_catalog": {
+    "url": "https://nano-gpt.com/api/v1/models?detailed=true",
+    "models_observed": 643,
+    "credentials_used": false,
+    "generation_requests": 0
+  },
+  "primary_reference": "https://docs.nano-gpt.com/api-reference/endpoint/models",
+  "notes": [
+    "Provider generation was mocked; no paid requests were made.",
+    "Two stale calibration test checks were updated to load the actual preset helper and verify the current classifier-model binding.",
+    "Release validation for v18.3.6; provider requests were mocked."
+  ],
+  "pip_rag": {
+    "status": "passed",
+    "product_knowledge_chunks": 254,
+    "sources": [
+      "75-topic illustrated manual",
+      "172 authored control explanations"
+    ],
+    "retrieval": "BM25 full-text, optional hybrid cosine-vector retrieval",
+    "embedding_storage": "versioned browser cache, invalidated by product content or embedding model changes",
+    "browser_checks": [
+      "every selected-provider answer uses chat-completions",
+      "active provider/model injected as authoritative runtime context",
+      "self-identity retrieves Pip documentation without unrelated sources",
+      "batch embeddings are built, sorted by provider index and persisted",
+      "semantic query sends retrieved passages to the selected LLM",
+      "index and retrieval preference survive reload",
+      "no library content or API keys appear in embedding inputs",
+      "LLM failures are explicitly labelled",
+      "Markdown uses safe DOM text nodes"
+    ],
+    "test_scope": "isolated browser and mocked generation/embedding providers; no live paid model or embedding requests"
+  }
+}

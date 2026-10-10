@@ -10,7 +10,7 @@ const WORLD_SHARD_FORMAT = 'gzip-json-v1';
 const SETTINGS_MIRROR_KEY = 'horde_settings_mirror_v1';
 // Bump this when publishing a GitHub Release. The checker accepts tags such as
 // v10.1.0, 10.1 or Horde-Studio-10.1.0.
-const HORDE_STUDIO_VERSION = '18.3.5';
+const HORDE_STUDIO_VERSION = '18.3.6';
 const HORDE_STUDIO_RELEASED_AT = '2026-10-09T18:47:15Z';
 const HORDE_STUDIO_RELEASE_API = 'https://api.github.com/repos/ddkhan24/hordestudio/releases/latest';
 const HORDE_STUDIO_RELEASES_URL = 'https://github.com/ddkhan24/hordestudio/releases/latest';
@@ -4133,6 +4133,7 @@ const views = {
     multiplayer: document.getElementById('multiplayer-view'),
     multiplayerSession: document.getElementById('multiplayer-session-view'),
     pip: document.getElementById('pip-view'),
+    manual: document.getElementById('manual-view'),
     chat: document.getElementById('chat-view'),
     studio: document.getElementById('studio-view'),
     worlds: document.getElementById('worlds-view'),
@@ -4170,28 +4171,35 @@ let openRouterModels = [];
 let modelCatalogSource = null; // which base URL the cached catalog came from
 let modelCatalogFetchedAt = 0;
 
-async function getOpenRouterModels() {
-    if (openRouterModels.length > 0 && modelCatalogSource === apiBase()) return openRouterModels;
-    openRouterModels = [];
-    modelCatalogSource = apiBase();
-    try {
-        const response = await fetch(apiBase() + '/models', {
-            headers: { ...authHeaders(), ...attributionHeaders() }
-        });
-        if (!response.ok) throw new Error(`Model catalog request failed (${response.status})`);
-        const data = await response.json();
-        const catalog = Array.isArray(data) ? data
-            : Array.isArray(data?.data) ? data.data
-                : Array.isArray(data?.models) ? data.models : [];
-        if (catalog.length) {
-            openRouterModels = catalog.filter(model => isPlainObject(model) && typeof model.id === 'string')
-                .map(model => ({ ...model, name: typeof model.name === 'string' ? model.name : model.id }));
-            modelCatalogFetchedAt = Date.now();
-        }
-    } catch (e) {
-        console.error(`Failed to fetch ${isLocalProvider() ? 'local' : cloudProviderName()} models:`, e);
+function normalizeProviderCatalogModel(model, textCatalog = false) {
+    const capabilities = isPlainObject(model.capabilities) ? model.capabilities : {};
+    const parameters = Array.isArray(model.supported_parameters) ? [...model.supported_parameters]
+        : isPlainObject(model.supported_parameters) ? { ...model.supported_parameters } : [];
+    if (Array.isArray(parameters) && capabilities.tool_calling && !parameters.includes('tools')) parameters.push('tools');
+    if (Array.isArray(parameters) && capabilities.structured_output && !parameters.includes('response_format')) parameters.push('response_format');
+    const pricing = { ...(model.pricing || {}) };
+    if (pricing.unit === 'per_million_tokens') {
+        for (const field of ['prompt', 'completion']) if (Number.isFinite(Number(pricing[field]))) pricing[field] = Number(pricing[field]) / 1000000;
+        pricing.unit = 'per_token';
     }
-    return openRouterModels;
+    const architecture = { ...(model.architecture || {}) };
+    if (textCatalog === true && !architecture.output_modalities) architecture.output_modalities = ['text'];
+    if (!architecture.input_modalities && Object.keys(capabilities).length) architecture.input_modalities = ['text', ...(capabilities.vision ? ['image'] : []), ...(capabilities.audio_input ? ['audio'] : [])];
+    return { ...model, name: typeof model.name === 'string' ? model.name : model.id, pricing, architecture, supported_parameters: parameters };
+}
+
+async function getOpenRouterModels() {
+    const provider = normalizedProviderId(state.globalSettings.apiProvider);
+    const source = providerApiBase(provider);
+    if (openRouterModels.length && modelCatalogSource === source && Date.now() - modelCatalogFetchedAt < 300000) return openRouterModels;
+    const models = await getCompanionOutputModels('text', false, provider);
+    // A provider switch during discovery must not poison the next catalog.
+    if (provider === normalizedProviderId(state.globalSettings.apiProvider) && source === apiBase()) {
+        openRouterModels = models;
+        modelCatalogSource = source;
+        modelCatalogFetchedAt = Date.now();
+    }
+    return models;
 }
 
 function verifyModelCapabilities(model, prefix) {
@@ -4325,7 +4333,7 @@ async function setupSearchableDropdown(prefix) {
         const displayList = filtered.slice(0, 50);
 
         if (displayList.length === 0) {
-            resultsDiv.innerHTML = '<div style="padding: 10px; color: var(--text-3); font-size: 0.8rem;">No models found</div>';
+            resultsDiv.innerHTML = '<div style="padding: 10px; color: var(--text-3); font-size: 0.8rem;">No catalog match. Your exact typed model ID is still accepted when saved.</div>';
             resultsDiv.classList.remove('hidden');
             return;
         }
@@ -4374,6 +4382,8 @@ async function setupConfigSearchableDropdown(prefix) {
     });
 
     searchInput.oninput = async () => {
+        const target = prefix === 'w-' ? state.editingWorld : state.editingChar;
+        if (target) target.model = searchInput.value.trim();
         const models = await getOpenRouterModels();
         renderResults(models, searchInput.value.trim());
     };
@@ -4393,7 +4403,7 @@ async function setupConfigSearchableDropdown(prefix) {
         const displayList = filtered.slice(0, 50);
 
         if (displayList.length === 0) {
-            resultsDiv.innerHTML = '<div style="padding: 10px; color: var(--text-3); font-size: 0.8rem;">No models found</div>';
+            resultsDiv.innerHTML = '<div style="padding: 10px; color: var(--text-3); font-size: 0.8rem;">No catalog match. Your exact typed model ID is still accepted when saved.</div>';
             resultsDiv.classList.remove('hidden');
             return;
         }
@@ -5292,7 +5302,51 @@ function setupHordeLabs() {
         }
     });
     document.getElementById('labs-modal-btn').onclick = () => window.HordeLabsUI.open();
-    document.getElementById('pip-configure-btn').onclick = () => window.HordeLabsUI.open();
+    window.HordeManualNavigate = () => switchView('manual');
+    window.HordeManual?.mount();
+    window.HordePip?.mount({
+        getConfig: () => state.globalSettings.pip,
+        setConfig: async config => { const previous = state.globalSettings.pip; state.globalSettings.pip = config; try { await persistGlobalSettingsOnly(); } catch (error) { state.globalSettings.pip = previous; throw error; } },
+        navigate: () => switchView('pip'),
+        connections: () => { document.getElementById('global-settings-btn').click(); document.querySelector('[data-settings-target="accounts"]')?.click(); },
+        models: async (provider, force) => rankCompanionTextModels(await getCompanionOutputModels('text', force, provider)),
+        embeddingSettings: () => { showGlobalSettings(); activateSettingsSection('memory'); },
+        embeddingIdentity: () => hasEmbeddingCredentials() && String(state.globalSettings.embeddingModel || '').trim()
+            ? embeddingApiBase() + '|' + state.globalSettings.embeddingModel.trim() : '',
+        loadIndex: () => HordeDB.get('pipKnowledgeEmbeddings'),
+        saveIndex: index => HordeDB.set('pipKnowledgeEmbeddings', index),
+        embed: async (input, signal) => {
+            if (!hasEmbeddingCredentials() || !state.globalSettings.embeddingModel) throw new Error('Configure an embedding model in Settings → Memory.');
+            const controller = new AbortController();
+            const forward = () => controller.abort();
+            if (signal.aborted) forward(); else signal.addEventListener('abort', forward, { once: true });
+            const timeout = setTimeout(() => controller.abort(), 30000);
+            try {
+                const response = await fetch(embeddingApiBase() + '/embeddings', {
+                    method: 'POST', signal: controller.signal,
+                    headers: { 'Content-Type': 'application/json', ...embeddingAuthHeaders() },
+                    body: JSON.stringify({ model: state.globalSettings.embeddingModel, input })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.error) throw new Error(data.error?.message || `Embedding request failed (${response.status})`);
+                if (!Array.isArray(data.data) || data.data.length !== input.length) throw new Error('Embedding provider returned an incomplete batch.');
+                const ordered = data.data.map((item, position) => ({ ...item, index: item.index ?? position })).sort((a, b) => a.index - b.index);
+                if (!ordered.every((item, position) => item.index === position)) throw new Error('Embedding provider returned invalid batch indices.');
+                return ordered.map(item => item.embedding);
+            } finally { clearTimeout(timeout); signal.removeEventListener('abort', forward); }
+        },
+        complete: async (provider, body, signal) => {
+            const response = await fetch(providerApiBase(provider) + '/chat/completions', {
+                method: 'POST', signal,
+                headers: { 'Content-Type': 'application/json', ...providerAuthHeaders(provider), ...providerAttributionHeaders(provider) },
+                body: JSON.stringify(body)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(`${providerDisplayName(provider)} (${response.status}): ${String(data.error?.message || data.message || response.statusText).slice(0, 350)}`);
+            const content = data.choices?.[0]?.message?.content;
+            return typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => part.text || '').join('\n') : '';
+        }
+    });
 }
 
 async function labsProposal(task, envelope, mode, options = {}) {
@@ -5403,7 +5457,8 @@ async function init() {
     
     renderLibrary();
     
-    switchView('library');
+    if (location.hash.startsWith('#manual/')) window.HordeManual?.route();
+    else switchView('library');
     window.__hordeStartup.readyMs=performance.now()-startupAt;
     schedulePostStartupWork('vectorMemory', () => HordeVectorMemory.init());
     schedulePostStartupWork('bundledHumans', () => installBundledHumans().catch(error => {
@@ -5411,7 +5466,7 @@ async function init() {
         showToast(error.message + ' Open Virtual Humans to retry.', 'error');
     }));
     const fonts=document.getElementById("horde-fonts");if(fonts)fonts.rel="stylesheet";
-    if (!hasApiCredentials() && !state.falApiKey) showGlobalSettings();
+    if (!hasApiCredentials() && !state.falApiKey && !location.hash.startsWith('#manual/')) showGlobalSettings();
     applyGlobalStyles();
     applyTheme();
     setupCustomizeModal();
@@ -5655,6 +5710,7 @@ function setupNavigation() {
 
 function switchView(viewName) {
     const previousView = state.view;
+    if (viewName !== 'manual' && location.hash.startsWith('#manual/')) history.replaceState(null, '', location.pathname + location.search);
     if(viewName!=='companionChat'&&typeof closeCompanionSocialDrawer==='function'&&!document.getElementById('companion-social-panel')?.classList.contains('hidden'))closeCompanionSocialDrawer();
     state.view = viewName;
     
@@ -47702,18 +47758,21 @@ async function getCompanionOutputModels(modality, force = false, providerId = st
     const provider = String(providerId || '').toLowerCase() === 'fal' ? 'fal' : normalizedProviderId(providerId);
     const base = provider === 'fal' ? 'fal://local-bridge' : providerApiBase(provider);
     const key = `${base}|${modality}`;
+    const fingerprint = JSON.stringify(provider === 'fal' ? {} : providerAuthHeaders(provider));
+    const cached = companionOutputModelCache.get(key);
+    if (cached && (cached.fingerprint !== fingerprint || Date.now() - cached.at > 300000)) companionOutputModelCache.delete(key);
     if (force) companionOutputModelCache.delete(key);
-    if (companionOutputModelCache.has(key)) return companionOutputModelCache.get(key);
+    if (companionOutputModelCache.has(key)) return companionOutputModelCache.get(key).models;
     let models = [];
     if (provider === 'fal') {
         models = modality === 'image' ? FAL_IMAGE_MODELS.map(model => safeJsonClone(model)) : [];
-        companionOutputModelCache.set(key, models);
+        companionOutputModelCache.set(key, { models, fingerprint, at: Date.now() });
         return models;
     }
     try {
         const queryModality = modality === 'audio' ? 'speech' : modality;
         const catalogPath = provider === 'nanogpt'
-            ? (modality === 'text' ? '/models' : modality === 'image' ? '/image-models?detailed=true' : '/audio-models?detailed=true')
+            ? (modality === 'text' ? '/models?detailed=true' : modality === 'image' ? '/image-models?detailed=true' : '/audio-models?detailed=true')
             : modality === 'text' ? '/models'
             : (modality === 'image' && provider === 'openrouter'
                 ? '/images/models'
@@ -47728,7 +47787,7 @@ async function getCompanionOutputModels(modality, force = false, providerId = st
             : Array.isArray(data?.models) ? data.models : [];
         models = catalogEntries
             .filter(model => isPlainObject(model) && typeof model.id === 'string')
-            .map(model => ({ ...model, name: typeof model.name === 'string' ? model.name : model.id }));
+            .map(model => normalizeProviderCatalogModel(model, provider === 'nanogpt' && modality === 'text'));
         if (provider === 'gptproto' && modality === 'image') {
             const byId = new Map(models.map(model => [model.id, model]));
             GPTPROTO_IMAGE_MODELS.forEach(curated => {
@@ -47782,7 +47841,7 @@ async function getCompanionOutputModels(modality, force = false, providerId = st
     } catch (error) {
         console.warn(`Could not load ${modality}-output models:`, error);
     }
-    companionOutputModelCache.set(key, models);
+    if (models.length) companionOutputModelCache.set(key, { models, fingerprint, at: Date.now() });
     return models;
 }
 
@@ -50488,12 +50547,12 @@ async function getSettingsProviderCatalog() {
         base = 'https://openrouter.ai/api/v1';
         headers = { Authorization: `Bearer ${value('global-api-key')}`, 'HTTP-Referer': 'https://horde-studio.ai', 'X-Title': 'Horde Studio' };
     }
-    const response = await fetch(base.replace(/\/+$/, '') + '/models', { headers });
+    const response = await fetch(base.replace(/\/+$/, '') + (provider === 'nanogpt' ? '/models?detailed=true' : '/models'), { headers });
     if (!response.ok) throw new Error(`Model catalog request failed (${response.status})`);
     const data = await response.json();
     const catalog = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
     return catalog.filter(model => isPlainObject(model) && typeof model.id === 'string')
-        .map(model => ({ ...model, name: typeof model.name === 'string' ? model.name : model.id }));
+        .map(model => normalizeProviderCatalogModel(model, provider === 'nanogpt'));
 }
 
 async function getSettingsEmbeddingCatalog() {
@@ -50508,7 +50567,7 @@ async function getSettingsEmbeddingCatalog() {
     const data = await response.json();
     const catalog = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
     return catalog.filter(model => isPlainObject(model) && typeof model.id === 'string')
-        .map(model => ({ ...model, name: typeof model.name === 'string' ? model.name : model.id }));
+        .map(normalizeProviderCatalogModel);
 }
 
 function setupCatalogModelSearchFields() {
@@ -50524,7 +50583,9 @@ function setupCatalogModelSearchFields() {
         const input = document.getElementById(definition.inputId);
         const results = document.getElementById(definition.resultsId);
         if (!input || !results) return;
+        let discoveryEpoch = 0;
         const render = async () => {
+            const request = ++discoveryEpoch;
             let rawModels = [];
             try {
                 rawModels = definition.inputId === 'global-default-model' || definition.providerAware
@@ -50534,6 +50595,7 @@ function setupCatalogModelSearchFields() {
                         : await getOpenRouterModels();
             }
             catch (error) { console.warn(`Could not load models for ${definition.inputId}:`, error); }
+            if (request !== discoveryEpoch) return;
             const models = definition.kind === 'embedding'
                 ? rawModels.filter(model => {
                     const outputs = modelOutputModalities(model);
@@ -51685,15 +51747,14 @@ function rankCompanionTextModels(models) {
                 inputModalities,
                 promptPrice: Number.isFinite(promptPrice) && promptPrice >= 0 ? promptPrice : null,
                 description: String(model.description || ''),
-                maxOutput: Number(model?.top_provider?.max_completion_tokens) || 0
+                maxOutput: Number(model?.top_provider?.max_completion_tokens || model.max_output_tokens) || 0
             };
         })
         .sort((a, b) =>
             Number(b.supportsTools) - Number(a.supportsTools)
             || Number(b.supportsJSON) - Number(a.supportsJSON)
             || (a.promptPrice ?? Number.POSITIVE_INFINITY) - (b.promptPrice ?? Number.POSITIVE_INFINITY)
-            || a.name.localeCompare(b.name))
-        .slice(0, 500);
+            || a.name.localeCompare(b.name));
 }
 
 function rankCompanionObserverModels(models) {
@@ -51814,7 +51875,7 @@ function renderCompanionTextModelResults(companion) {
     );
     const visible = matches.slice(0, 100);
     if (!visible.length) {
-        results.innerHTML = '<div class="vh-model-empty">No text models match this search. Try a provider name, family, or exact model ID.</div>';
+        results.innerHTML = '<div class="vh-model-empty">No catalog match. Enter an exact ID in the custom model field. NanoGPT visibility may be restricted by your account’s Models settings.</div>';
     } else {
         results.innerHTML = visible.map(model => {
             const selected = String(companion.model || '').trim() === model.id;
@@ -51874,7 +51935,7 @@ async function populateCompanionTextModelPicker(companion, force = false) {
             await getCompanionOutputModels('text', force, textProvider));
     }
     catch (error) { console.warn('Could not load Virtual Human text models:', error); }
-    if (state.editingCompanionId !== companion.id) return;
+    if (state.editingCompanionId !== companion.id || companionTextProviderId(companion) !== textProvider) return;
     companionTextModelCatalog = ranked;
 
     let chosen = String(companion.model || '').trim();

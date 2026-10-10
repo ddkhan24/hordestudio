@@ -27,6 +27,9 @@ buildContext(vm, [
     'getOppositeDirection', 'formatWorldMapType', 'isValidScheduleTime', 'safeJsonClone'
 ], context);
 
+// Match the real app's preset dependency rather than silently stubbing it.
+vm.runInContext(require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'presets.js'), 'utf8'), context);
+
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
 
@@ -518,7 +521,7 @@ test('every structured caller routes through the chosen model', () => {
     const audit = app.slice(app.indexOf('async function runAIWorldAudit('));
     assert(/structuredModelFor\(world\)/.test(audit.slice(0, 4000)),
         'the Deep Audit does not use the audit model');
-    assert(/recoverWorldLedgerEntry\(structuredModelFor\(world\)/.test(app),
+    assert(/const classifierModel = structuredModelFor\(world\);\s*const recovered = await recoverWorldLedgerEntry\(classifierModel/.test(app),
         'the chronicle classifier still uses the narration model');
 });
 

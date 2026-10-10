@@ -180,6 +180,7 @@
     }
 
     function renderPipRuntime(config, configured) {
+        if (window.HordePip) { window.HordePip.renderStatus(); return; }
         const badge = byId('pip-runtime-state');
         if (!badge) return;
         const embedded = config.runtime === 'embedded';
@@ -728,6 +729,7 @@
         byId('labs-guide-send-btn').onclick = () => askGuide();
         byId('pip-clear-chat-btn').onclick = clearGuideChat;
         byId('labs-guide-input').addEventListener('keydown', event => {
+            if (window.HordePip) return; // The independent assistant owns this composer.
             if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
                 void askGuide();

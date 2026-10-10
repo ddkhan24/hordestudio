@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Extract a portable ZIP and verify its layout, references, and launch routing."""
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -42,6 +43,13 @@ def main():
         assert {p.name for p in root.iterdir()} == {
             'app', 'START HERE.txt', 'Start Horde Studio.command',
             'Start Horde Studio.bat', 'start-horde-studio.sh'}
+        for name in ('horde-handbook.js', 'horde-manual.js', 'pip-assistant.js', 'pip-knowledge.js', 'horde-support.css'):
+            assert (app / name).is_file(), f'Missing support resource: {name}'
+        handbook = (app / 'horde-handbook.js').read_text()
+        topics = json.loads(handbook.split('Object.freeze(', 1)[1].rsplit(');', 1)[0])['pages']
+        for topic in topics:
+            if topic.get('image'):
+                assert (app / topic['image']).is_file(), f'Missing manual screenshot: {topic["image"]}'
         self_host = app / 'deploy/vh2-self-host'
         assert {name for name in ('Dockerfile','compose.yaml','Caddyfile','.env.example','README.md')
                 if not (self_host / name).is_file()} == set(), 'Private VH2 deployment kit is incomplete'

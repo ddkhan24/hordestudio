@@ -12,6 +12,7 @@
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="style.css?v=20261009-v18-3-5">
     <link rel="stylesheet" href="virtual_humans/frontend/vh-workspace.css?v=20261009-chat-diagnostics">
+<link rel="stylesheet" href="horde-support.css?v=20261010-pip-rag">
 </head>
 <body>
 <div id="app">
@@ -40,9 +41,13 @@
                 <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="8" r="3"/><path d="M2.5 20v-1.5A5.5 5.5 0 018 13h0a5.5 5.5 0 015.5 5.5V20M13 14.2A5.5 5.5 0 0121.5 19v1"/></svg>
                 <span>Multiplayer</span><span class="multiplayer-nav-badge">BETA</span>
             </button>
-            <button class="nav-item pip-nav-item" data-view="pip" id="pip-sidebar-btn" type="button" title="Open Pip, Horde Studio's private local guide">
+            <button class="nav-item pip-nav-item" data-view="pip" id="pip-sidebar-btn" type="button" title="Open Pip, Horde Studio's support assistant">
                 <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6M10 3v6l-5 9a2 2 0 001.7 3h10.6a2 2 0 001.7-3l-5-9V3"/><path d="M7.5 16h9"/></svg>
-                <span>Pip</span><span class="pip-nav-badge">LOCAL</span>
+                <span>Pip</span><span class="pip-nav-badge">HELP</span>
+            </button>
+            <button class="nav-item" data-view="manual" type="button" title="Search the illustrated Horde Studio manual">
+                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6c-3-2-6-2-10-1v14c4-1 7-1 10 1 3-2 6-2 10-1V5c-4-1-7-1-10 1zM12 6v14"/></svg>
+                <span>User manual</span>
             </button>
         </nav>
         <button class="settings-btn" id="personas-modal-btn" style="margin-bottom: 5px;">
@@ -387,37 +392,52 @@
         </section>
 
         <!-- ────────── PIP LOCAL GUIDE ────────── -->
+        <section id="manual-view" class="view hidden"><div class="manual-shell">
+            <aside class="manual-sidebar"><span class="vh-eyebrow">HORDE STUDIO</span><h2>Illustrated manual</h2><p class="form-hint">Setup, examples and reference · v18.3.6</p>
+                <input id="manual-search" class="form-input" type="search" placeholder="Search all guide topics…" aria-label="Search the complete manual">
+                <div class="manual-tools"><button id="manual-index-btn" class="btn btn-ghost" type="button">A–Z index</button><button id="manual-print-btn" class="btn btn-ghost" type="button">Print manual</button></div>
+                <span id="manual-search-count" class="form-hint" aria-live="polite"></span><nav id="manual-toc" class="manual-toc" aria-label="Guide chapters and topics"></nav>
+            </aside><div id="manual-content" class="manual-content"><article id="manual-article" class="manual-article"></article></div>
+        </div></section>
         <section id="pip-view" class="view hidden pip-view">
             <div class="pip-shell">
                 <header class="pip-header">
                     <div class="pip-identity">
                         <div class="pip-avatar" aria-hidden="true">🧠</div>
                         <div>
-                            <span class="vh-eyebrow">LOCAL SUPPORT</span>
+                            <span class="vh-eyebrow">HORDE STUDIO SUPPORT</span>
                             <h1 class="page-title">Pip</h1>
                             <p class="page-subtitle">Ask about Horde Studio, paste an error, or find a setting.</p>
                         </div>
                     </div>
                     <div class="pip-header-actions">
                         <span id="pip-runtime-state" class="labs-tier-badge pip-runtime-state">BUILT-IN ONLY</span>
+                        <button id="pip-open-manual" class="btn btn-ghost" type="button">User manual</button>
                         <button id="pip-clear-chat-btn" class="btn btn-ghost" type="button">Clear</button>
-                        <button id="pip-configure-btn" class="btn btn-ghost" type="button">TinyBrain settings</button>
+                        <button id="pip-configure-btn" class="btn btn-ghost" type="button">Assistant settings</button>
                     </div>
                 </header>
-                <main class="pip-conversation" aria-label="Conversation with Pip">
+                <section id="pip-settings-panel" class="pip-settings-panel hidden" aria-label="Pip assistant settings">
+                    <h2>Pip’s provider and model</h2><p class="form-hint">Independent of your roleplay models. Uses the credentials configured in Settings → Connections. Cloud answers use provider credits.</p>
+                    <div class="pip-settings-grid"><label>Provider<select id="pip-provider" class="form-select"></select></label><label>Exact model ID<input id="pip-model" class="form-input" list="pip-model-options" placeholder="Choose a model or type its exact ID"><datalist id="pip-model-options"></datalist></label></div>
+                    <div class="manual-tools"><button id="pip-save-settings" class="btn btn-primary" type="button">Save assistant settings</button><button id="pip-test-assistant" class="btn btn-ghost" type="button">Test assistant</button><button id="pip-refresh-models" class="btn btn-ghost" type="button">Refresh models</button><button id="pip-open-connections" class="btn btn-ghost" type="button">Open Connections</button></div><p id="pip-catalog-status" class="form-hint" aria-live="polite"></p><hr><h3>Horde Studio knowledge base</h3>
+                    <label class="pip-knowledge-label">Retrieval<select id="pip-knowledge-mode" class="form-select"><option value="text">Full-text knowledge retrieval</option><option value="semantic">Semantic + full-text retrieval (embeddings)</option></select></label>
+                    <p class="form-hint">The LLM answers your question using retrieved manual and control-reference evidence. Semantic indexing uses the embedding model configured in Settings → Memory. Building an index and semantic searches can incur embedding-provider charges. Only product documentation is indexed.</p>
+                    <div class="manual-tools"><button id="pip-build-index" class="btn btn-ghost" type="button">Build semantic index</button><button id="pip-cancel-index" class="btn btn-ghost hidden" type="button">Cancel indexing</button><button id="pip-embedding-settings" class="btn btn-ghost" type="button">Embedding settings</button></div><p id="pip-index-status" class="form-hint" aria-live="polite"></p>
+                </section><main class="pip-conversation" aria-label="Conversation with Pip">
                     <div id="labs-guide-messages" class="labs-guide-messages pip-messages" aria-live="polite"></div>
                     <div id="pip-response-actions" class="pip-response-actions hidden" aria-live="polite"></div>
                     <div class="labs-guide-prompts pip-prompts" aria-label="Suggested questions">
-                        <button type="button" data-guide-question="Diagnose my TinyBrain and Labs setup">Diagnose TinyBrain</button>
+                        <button type="button" data-guide-question="How do I set up my first Virtual Human and start their life?">Set up a Virtual Human</button>
                         <button type="button" data-guide-question="How do I test and troubleshoot a provider connection?">Fix a provider</button>
-                        <button type="button" data-guide-question="How do World movement and travel time work?">World movement</button>
+                        <button type="button" data-guide-question="How do I create and enter my first playable World?">Build a first World</button>
                         <button type="button" data-guide-question="How do Virtual Humans remember me and know time?">Virtual Human memory</button>
                     </div>
                     <div class="labs-guide-composer pip-composer">
-                        <textarea id="labs-guide-input" class="form-textarea" rows="2" maxlength="1200" placeholder="Ask about Horde Studio or paste an error…" aria-label="Ask Pip about Horde Studio"></textarea>
+                        <textarea id="labs-guide-input" class="form-textarea" rows="2" maxlength="6000" placeholder="Ask about Horde Studio or paste an error…" aria-label="Ask Pip about Horde Studio"></textarea>
                         <button id="labs-guide-send-btn" class="btn btn-primary" type="button">Send</button>
                     </div>
-                    <p id="labs-guide-status" class="form-hint pip-status-line">Pip answers product questions from the local handbook. TinyBrain 2 may route the question, but cannot alter a save.</p>
+                    <p id="labs-guide-status" class="form-hint pip-status-line">Pip searches the complete illustrated handbook. Choose an optional provider and model in Assistant settings.</p>
                 </main>
             </div>
         </section>
@@ -5304,9 +5324,13 @@
 <script src="labs-embedded.js?v=20260810-pip-conversation-v2"></script>
 <script src="labs-core.js?v=20260822-v161"></script>
 <script src="labs-tasks.js?v=20260822-v161"></script>
-<script src="labs-guide.js?v=20260822-v161"></script>
-    <script src="help-system.js?v=20261009-v18-3-5"></script>
-<script src="labs-ui.js?v=20260822-v161"></script>
+<script src="horde-handbook.js?v=20261010-rag"></script>
+<script src="horde-manual.js?v=20261010"></script>
+<script src="pip-knowledge.js?v=20261010-rag"></script>
+<script src="pip-assistant.js?v=20261010-rag"></script>
+<script src="labs-guide.js?v=20261010-rag"></script>
+    <script src="help-system.js?v=20261010-pip-rag"></script>
+<script src="labs-ui.js?v=20261010-pip"></script>
 <script src="rpg-mechanics.js?v=20260823-v166-rpg-release"></script>
 <script src="multiplayer-engine.js?v=20261009-v18-3-5"></script>
 <script src="multiplayer.js?v=20261009-v18-3-5"></script>
@@ -5332,6 +5356,9 @@
     <script src="worlds/model-client.js?v=20261009-v18-3-5"></script>
     <script src="worlds/scene-draft.js?v=20261009-worlds-check-contract"></script>
     <script src="worlds/turn-context.js?v=20261009-worlds-check-contract"></script>
-    <script src="app.js?v=20261009-v18-3-5"></script>
+    <script src="app.js?v=20261010-pip-rag"></script>
+<dialog id="manual-image-dialog" class="manual-dialog"><button class="btn btn-ghost" data-close-manual-dialog type="button">Close</button><div><img id="manual-large-image" alt=""></div></dialog>
+<dialog id="manual-index-dialog" class="manual-dialog"><button class="btn btn-ghost" data-close-manual-dialog type="button">Close</button><h2>Alphabetical index</h2><div id="manual-index-list" class="manual-index-list"></div></dialog>
+<div id="manual-print" class="manual-print"></div>
 </body>
 </html>

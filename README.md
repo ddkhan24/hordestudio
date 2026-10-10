@@ -8,9 +8,15 @@
 
 Character cards & group rooms · Living Worlds · Virtual Humans 2.0 · Optional RPG rules · Multiplayer · Video Adventures
 
-[**Download v18.3.5**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.3.5) · [Release notes](docs/releases/v18.3.5.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
+[**Download v18.3.6**](https://github.com/ddkhan24/hordestudio/releases/tag/v18.3.6) · [Release notes](docs/releases/v18.3.6.md) · [Quick start](#quick-start) · [Discord](https://discord.gg/9eyjcMbsST)
 
 Horde Studio brings your characters, stories and simulations into one local application. Import a character card and start a conversation, build a world with places and consequences, host a campaign with friends, or create a virtual human whose conversations draw on an ongoing life. Connect your own local models or cloud providers; the application does not include paid inference.
+
+## Built-in user manual and Pip
+
+Open **User manual** directly beneath **Pip** in the sidebar. The complete illustrated guide includes searchable setup instructions, real screenshots, examples, workflow diagrams and a linked A–Z index, with detailed routes for Worlds and Virtual Humans. **Print manual** prepares the full guide for printing or your browser’s Save as PDF option.
+
+Pip searches this same knowledge offline. In **Pip → Assistant settings**, choose a separate provider and model for guided answers, including DeepSeek through OpenRouter. Configure credentials in **Settings → Connections** first; an exact model ID is accepted even when it is absent from the provider catalog. The selected LLM generates each answer using retrieved manual and control-reference passages. **Test assistant** confirms a real model response and its active identity. Optional **Semantic + full-text retrieval** uses the embedding model in **Settings → Memory**; **Build semantic index** indexes product documentation only, with no library or timeline data. Cloud chat and embedding requests use provider credits.
 
 ## New in v18: Virtual Humans 2.0
 
@@ -128,7 +134,7 @@ Horde Studio is free to run and its source is available in this repository. The 
 
 ## Quick start
 
-Download the [v18.3.5 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.3.5), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
+Download the [v18.3.6 portable ZIP](https://github.com/ddkhan24/hordestudio/releases/tag/v18.3.6), extract the complete folder, then run the launcher for your operating system. Do not open `index.html` by itself. When updating, keep a verified backup, restart the launcher and refresh the browser.
 
 ### Requirements
 

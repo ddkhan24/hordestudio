@@ -1,0 +1,446 @@
+[
+  {
+    "page": 6,
+    "title": "How to use this manual",
+    "bottom": 473.2899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 7,
+    "title": "Installation and first launch",
+    "bottom": 271.4899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 8,
+    "title": "Choose your experience",
+    "bottom": 113.08999999999997,
+    "screenshot": "home-library"
+  },
+  {
+    "page": 9,
+    "title": "Connect a text model",
+    "bottom": 213.6900000000001,
+    "screenshot": "settings-models"
+  },
+  {
+    "page": 10,
+    "title": "Connections, local servers and credentials",
+    "bottom": 101.58999999999986,
+    "screenshot": "settings-accounts"
+  },
+  {
+    "page": 11,
+    "title": "Personas and player identity",
+    "bottom": 427.4899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 12,
+    "title": "Create or import a character",
+    "bottom": 148.08999999999997,
+    "screenshot": "character-basics"
+  },
+  {
+    "page": 13,
+    "title": "Conversation tools and timelines",
+    "bottom": 478.6899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 14,
+    "title": "Presets, sampling and context",
+    "bottom": 222.68999999999988,
+    "screenshot": "character-ai"
+  },
+  {
+    "page": 15,
+    "title": "Lorebooks, author notes and regex",
+    "bottom": 120.68999999999988,
+    "screenshot": "character-lore"
+  },
+  {
+    "page": 16,
+    "title": "Memory, HUD meters and group rooms",
+    "bottom": 208.2899999999999,
+    "screenshot": "character-hud"
+  },
+  {
+    "page": 17,
+    "title": "Understand the person and the life",
+    "bottom": 344.09,
+    "screenshot": "vh-edit-overview"
+  },
+  {
+    "page": 18,
+    "title": "First conversation: the shortest setup",
+    "bottom": 115.69000000000023,
+    "screenshot": "vh-chat-unstarted"
+  },
+  {
+    "page": 19,
+    "title": "Identity, appearance and history",
+    "bottom": 146.69,
+    "screenshot": "vh-edit-identity"
+  },
+  {
+    "page": 20,
+    "title": "Psychology and starting relationship",
+    "bottom": 104.88999999999987,
+    "screenshot": "vh-edit-mind"
+  },
+  {
+    "page": 21,
+    "title": "Conversation, expression and opening messages",
+    "bottom": 96.09000000000009,
+    "screenshot": "vh-edit-chat-style"
+  },
+  {
+    "page": 22,
+    "title": "Use AI drafts without losing control",
+    "bottom": 119.28999999999994,
+    "screenshot": "vh-draft-dialog"
+  },
+  {
+    "page": 23,
+    "title": "Build a small starting world",
+    "bottom": 94.68999999999988,
+    "screenshot": "vh-edit-life"
+  },
+  {
+    "page": 24,
+    "title": "Start the persistent life and verify it",
+    "bottom": 204.69000000000017,
+    "screenshot": "vh-start"
+  },
+  {
+    "page": 25,
+    "title": "Read the life overview and reply status",
+    "bottom": 237.08999999999997,
+    "screenshot": "vh-live-overview"
+  },
+  {
+    "page": 26,
+    "title": "Routines: commitments versus activities",
+    "bottom": 110.29000000000013,
+    "screenshot": "vh-live-life"
+  },
+  {
+    "page": 27,
+    "title": "Hands-on: add a museum work commitment",
+    "bottom": 194.68999999999997,
+    "screenshot": "vh-commitment-dialog"
+  },
+  {
+    "page": 28,
+    "title": "Places, rooms and local time",
+    "bottom": 119.2899999999999,
+    "screenshot": "vh-live-places"
+  },
+  {
+    "page": 29,
+    "title": "Maps, travel and transport",
+    "bottom": 222.69,
+    "screenshot": "vh-live-connections"
+  },
+  {
+    "page": 30,
+    "title": "Supporting people and independent lives",
+    "bottom": 132.28999999999985,
+    "screenshot": "vh-live-people"
+  },
+  {
+    "page": 31,
+    "title": "Relationships, emotions and memory",
+    "bottom": 208.28999999999996,
+    "screenshot": "vh-live-inspector"
+  },
+  {
+    "page": 32,
+    "title": "Wardrobe, outfits and possessions",
+    "bottom": 120.68999999999988,
+    "screenshot": "vh-live-closet"
+  },
+  {
+    "page": 33,
+    "title": "Money, costs and autonomy permissions",
+    "bottom": 208.28999999999985,
+    "screenshot": "vh-live-money"
+  },
+  {
+    "page": 34,
+    "title": "Photos and identity references",
+    "bottom": 117.88999999999987,
+    "screenshot": "vh-edit-voice"
+  },
+  {
+    "page": 35,
+    "title": "Chat media permissions and camera behavior",
+    "bottom": 236.68999999999988,
+    "screenshot": null
+  },
+  {
+    "page": 36,
+    "title": "Reference Library and asset bible",
+    "bottom": 175.8900000000001,
+    "screenshot": "vh-live-references"
+  },
+  {
+    "page": 37,
+    "title": "Social feed, gallery and media jobs",
+    "bottom": 208.2899999999999,
+    "screenshot": "vh-live-media"
+  },
+  {
+    "page": 38,
+    "title": "Social profile setup and audience boundaries",
+    "bottom": 83.99999999999997,
+    "screenshot": "vh-edit-social"
+  },
+  {
+    "page": 39,
+    "title": "Video clips and voice",
+    "bottom": 104.88999999999987,
+    "screenshot": "vh-edit-video"
+  },
+  {
+    "page": 40,
+    "title": "World information, feeds and events",
+    "bottom": 184.89,
+    "screenshot": "vh-live-connections"
+  },
+  {
+    "page": 41,
+    "title": "Save destinations, errors and diagnostics",
+    "bottom": 464.2899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 42,
+    "title": "Back up, share and restore a human",
+    "bottom": 346.0899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 43,
+    "title": "Always-on server and recovery",
+    "bottom": 329.69,
+    "screenshot": "vh-live-recovery"
+  },
+  {
+    "page": 44,
+    "title": "Worked example: Maya's first complete life",
+    "bottom": 294.69000000000017,
+    "screenshot": null
+  },
+  {
+    "page": 45,
+    "title": "Understand a World template and campaign",
+    "bottom": 287.28999999999985,
+    "screenshot": "home-worlds"
+  },
+  {
+    "page": 46,
+    "title": "First playable scene: build a small World",
+    "bottom": 190.2900000000002,
+    "screenshot": "world-overview"
+  },
+  {
+    "page": 47,
+    "title": "Basics: narrator, rules and opening",
+    "bottom": 148.08999999999997,
+    "screenshot": "world-basics"
+  },
+  {
+    "page": 48,
+    "title": "Locations, regions and connected exits",
+    "bottom": 133.68999999999988,
+    "screenshot": "world-locations"
+  },
+  {
+    "page": 49,
+    "title": "People, knowledge and NPC schedules",
+    "bottom": 132.28999999999985,
+    "screenshot": "world-entities"
+  },
+  {
+    "page": 50,
+    "title": "Items, equipment and commerce",
+    "bottom": 148.08999999999997,
+    "screenshot": "world-items"
+  },
+  {
+    "page": 51,
+    "title": "Factions, lore and private information",
+    "bottom": 222.69,
+    "screenshot": "world-factions"
+  },
+  {
+    "page": 52,
+    "title": "Starting Lives and sandbox society",
+    "bottom": 132.2899999999999,
+    "screenshot": "world-sandbox"
+  },
+  {
+    "page": 53,
+    "title": "Choose mechanical depth and HUD modules",
+    "bottom": 180.28999999999996,
+    "screenshot": "world-hud"
+  },
+  {
+    "page": 54,
+    "title": "Dice checks, skills, perks and flaws",
+    "bottom": 376.69,
+    "screenshot": null
+  },
+  {
+    "page": 55,
+    "title": "Quests, consequences and the clock",
+    "bottom": 375.2899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 56,
+    "title": "AI Config, scene compiler and repair policy",
+    "bottom": 170.4899999999999,
+    "screenshot": "world-ai"
+  },
+  {
+    "page": 57,
+    "title": "World Architect, Architect Agent and AI Builder",
+    "bottom": 118.68999999999994,
+    "screenshot": "world-architect-agent"
+  },
+  {
+    "page": 58,
+    "title": "Visual presentation and consistent art",
+    "bottom": 132.2899999999999,
+    "screenshot": "world-visuals"
+  },
+  {
+    "page": 59,
+    "title": "Play: movement, actions and the status panel",
+    "bottom": 194.68999999999994,
+    "screenshot": "world-play"
+  },
+  {
+    "page": 60,
+    "title": "Map, ledger, memory and state inspection",
+    "bottom": 208.28999999999985,
+    "screenshot": "world-map"
+  },
+  {
+    "page": 61,
+    "title": "Timelines, corrections and audit workflow",
+    "bottom": 449.8899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 62,
+    "title": "Export a template or a playable campaign",
+    "bottom": 334.19,
+    "screenshot": null
+  },
+  {
+    "page": 63,
+    "title": "Worked example: Harbour Museum Mystery",
+    "bottom": 307.89000000000016,
+    "screenshot": null
+  },
+  {
+    "page": 64,
+    "title": "Host a shared Chat or World session",
+    "bottom": 311.6900000000002,
+    "screenshot": "home-multiplayer"
+  },
+  {
+    "page": 65,
+    "title": "Invites, voting and Internet relay",
+    "bottom": 478.69,
+    "screenshot": null
+  },
+  {
+    "page": 66,
+    "title": "Plan a branching film",
+    "bottom": 222.69,
+    "screenshot": "video-studio"
+  },
+  {
+    "page": 67,
+    "title": "References, render jobs and timelines",
+    "bottom": 449.8899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 68,
+    "title": "Images: ComfyUI and compatible local endpoints",
+    "bottom": 136.89000000000016,
+    "screenshot": "settings-images"
+  },
+  {
+    "page": 69,
+    "title": "MCP media, speech and certificate problems",
+    "bottom": 180.28999999999985,
+    "screenshot": "settings-runtime"
+  },
+  {
+    "page": 70,
+    "title": "Labs and TinyBrain local cognition",
+    "bottom": 193.88999999999987,
+    "screenshot": "labs-panel"
+  },
+  {
+    "page": 71,
+    "title": "Pip, customization and reading comfort",
+    "bottom": 222.69,
+    "screenshot": "home-pip"
+  },
+  {
+    "page": 72,
+    "title": "Data storage, backup and upgrades",
+    "bottom": 184.88999999999993,
+    "screenshot": "settings-data"
+  },
+  {
+    "page": 73,
+    "title": "Service storage and database maintenance",
+    "bottom": 464.2899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 74,
+    "title": "Troubleshoot by symptom",
+    "bottom": 280.79,
+    "screenshot": null
+  },
+  {
+    "page": 75,
+    "title": "Provider errors and useful bug reports",
+    "bottom": 324.6899999999999,
+    "screenshot": null
+  },
+  {
+    "page": 76,
+    "title": "Feature map and quickest paths",
+    "bottom": 160.78999999999996,
+    "screenshot": null
+  },
+  {
+    "page": 77,
+    "title": "Glossary: authoring and simulation",
+    "bottom": 345.49000000000035,
+    "screenshot": null
+  },
+  {
+    "page": 78,
+    "title": "Glossary: models, media and storage",
+    "bottom": 336.49000000000035,
+    "screenshot": null
+  },
+  {
+    "page": 79,
+    "title": "Sources, version and further reading",
+    "bottom": 304.9899999999999,
+    "screenshot": null
+  }
+]

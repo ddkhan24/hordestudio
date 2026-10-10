@@ -143,6 +143,11 @@ PROVIDERS = {
     },
 }
 STATIC_FILES = {
+    "/horde-handbook.js": ("horde-handbook.js", "text/javascript"),
+    "/horde-manual.js": ("horde-manual.js", "text/javascript"),
+    "/pip-knowledge.js": ("pip-knowledge.js", "text/javascript"),
+    "/pip-assistant.js": ("pip-assistant.js", "text/javascript"),
+    "/horde-support.css": ("horde-support.css", "text/css"),
     "/vh2.html": ("virtual_humans/frontend/vh2.html", "text/html"),
     "/vh2-dashboard.js": ("virtual_humans/frontend/vh2-dashboard.js", "text/javascript"),
     "/": ("index.html", "text/html"),
@@ -289,6 +294,7 @@ STATIC_FILES.update({
 # application directory through the localhost bridge.
 STATIC_MEDIA_ROOTS = (
     ("/world-packs/", APP_DIR / "world-packs"),
+    ("/assets/manual/", APP_DIR / "assets" / "manual"),
     ("/assets/bundled/", APP_DIR / "assets" / "bundled"),
     ("/assets/worlds/", APP_DIR / "assets" / "worlds"),
 )

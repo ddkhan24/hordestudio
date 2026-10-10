@@ -10,7 +10,7 @@ import tempfile
 import zipfile
 
 TREES = ('world-packs', 'worlds', 'virtual_humans', 'assets/bundled',
-         'assets/worlds', 'multiplayer-relay', 'deploy/vh2-self-host')
+         'assets/worlds', 'assets/manual', 'multiplayer-relay', 'deploy/vh2-self-host')
 PRIVATE_NAMES = {'.env', '.git', '.venv', 'venv', 'node_modules', '.wrangler',
                  'mcp-auth.json', 'always-on-queue.json', 'storage-state.json', 'cookies.json'}
 NOISE_NAMES = {'__pycache__', '.DS_Store', '__MACOSX'}
