@@ -24,7 +24,8 @@ const context = {
 };
 buildContext(vm, [
     'normalizeWorldTurnReceipt', 'validateWorldTurnReceipt', 'commitWorldTurnReceipt',
-    'buildWorldSceneFrame', 'extractInlineWorldTurnReceipt', 'getWorldTimeData'
+    'buildWorldSceneFrame', 'extractInlineWorldTurnReceipt', 'getWorldTimeData',
+    'applyRegexScripts', 'detectNarratedPresence'
 ], context);
 
 function fixture() {
@@ -112,6 +113,60 @@ test('same-turn entity assertions validate against the projected ending scene', 
     assert.equal(result.entityPatches[0].activity, 'entering the chapel');
 });
 
+test('consecutive NPC movement legs use the projected origin', () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const { world, sess } = fixture();
+        const candidate = receipt({
+            state_updates: { time_skip_minutes: 120 },
+            events: [
+                { type: 'movement', actor_id: 'rowena', status: 'completed',
+                    from_location_id: 'square', to_location_id: 'chapel' },
+                { type: 'movement', actor_id: 'rowena', status: 'completed',
+                    from_location_id: 'chapel', to_location_id: 'square' }
+            ]
+        });
+        const result = context.validateWorldTurnReceipt(world, sess, candidate);
+        assert(!result.rejectedEvents.some(item => item.reason === 'actor_origin_mismatch'),
+            JSON.stringify(result.rejectedEvents));
+        assert.equal(result.acceptedEvents.filter(item => item.type === 'movement').length, 2);
+        assert.equal(result.acceptedEvents[1].from_location_id, 'chapel');
+        context.commitWorldTurnReceipt(world, sess, candidate, {}, 'test');
+        assert.equal(sess.entityStates.rowena.location, 'square');
+    }
+});
+
+test('an incorrect second NPC origin remains rejected', () => {
+    const { world, sess } = fixture();
+    const result = context.validateWorldTurnReceipt(world, sess, receipt({
+        state_updates: { time_skip_minutes: 120 },
+        events: [
+            { type: 'movement', actor_id: 'rowena', status: 'completed',
+                from_location_id: 'square', to_location_id: 'chapel' },
+            { type: 'movement', actor_id: 'rowena', status: 'completed',
+                from_location_id: 'inn', to_location_id: 'square' }
+        ]
+    }));
+    assert(result.rejectedEvents.some(item => item.reason === 'actor_origin_mismatch'));
+    assert.equal(result.acceptedEvents.filter(item => item.type === 'movement').length, 1);
+});
+
+test('display regex does not turn a present NPC into a canonical arrival claim', () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const { world, sess } = fixture();
+        context.state.regexScripts = [{ find: 'Rowena', replace: 'Maera', target: 'ai', enabled: true }];
+        const rawNarrative = 'Rowena stands beside you in the square.';
+        const display = context.applyRegexScripts(rawNarrative, 'ai');
+        assert.equal(display, 'Maera stands beside you in the square.');
+        assert.equal(context.detectNarratedPresence(world, sess, rawNarrative).length, 0);
+        assert.equal(context.detectNarratedPresence(world, sess, display)[0]?.id, 'maera');
+    }
+    const auditBlock = app.slice(app.indexOf('// Scrubber: Remove any hallucinated location/system headers'),
+        app.indexOf('const audit = sess.lastTurnAudit;', app.indexOf('// Scrubber: Remove any hallucinated location/system headers')));
+    assert.match(auditBlock, /const auditText = cleanText;/);
+    assert.match(auditBlock, /detectNarratedPresence\(world, sess, auditText\)/);
+    context.state.regexScripts = [];
+});
+
 test('"walks toward" is tracked but does not complete movement', () => {
     const { world, sess } = fixture();
     const result = context.validateWorldTurnReceipt(world, sess, receipt({
@@ -192,6 +247,36 @@ test('NPC outfit changes patch the NPC, never the player', () => {
     assert.equal(result.legacyArgs.outfit_update, undefined);
     assert.equal(result.entityPatches[0].entity_id, 'rowena');
     assert.equal(result.entityPatches[0].outfit, 'gold vestments');
+});
+
+test('several NPC outfits stay actor-scoped and incomplete NPC clothing rejects', () => {
+    const { world, sess } = fixture();
+    const result = context.validateWorldTurnReceipt(world, sess, receipt({ events: [
+        { type: 'outfit', actor_id: 'rowena', status: 'completed', outfit: 'gold vestments' },
+        { type: 'outfit', actor_id: 'maera', status: 'completed', outfit: 'grey coat' },
+        { type: 'outfit', actor_id: 'maera', status: 'completed', outfit: '' }
+    ] }));
+    assert.deepEqual(JSON.parse(JSON.stringify(result.entityPatches.map(item => [item.entity_id, item.outfit]))),
+        [['rowena', 'gold vestments'], ['maera', 'grey coat']]);
+    assert(result.rejectedEvents.some(item => item.reason === 'missing_outfit'));
+    assert.equal(result.legacyArgs.outfit_update, undefined);
+    assert.equal(sess.outfit, 'shirt and trousers');
+});
+
+test('an empty player outfit echo uses only a verified precommitted outfit', () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const { world, sess } = fixture();
+        sess.outfit = 'linen shirt';
+        const candidate = receipt({ events: [{ type: 'outfit', actor_id: 'player',
+            status: 'completed', outfit: '' }] });
+        const result = context.validateWorldTurnReceipt(world, sess, candidate,
+            { precommittedOutfit: 'linen shirt' });
+        assert(!result.rejectedEvents.some(item => item.reason === 'missing_outfit'));
+        assert.equal(result.acceptedEvents[0]?.outfit, 'linen shirt');
+        assert.equal(sess.outfit, 'linen shirt');
+        const unsupported = context.validateWorldTurnReceipt(world, sess, candidate);
+        assert(unsupported.rejectedEvents.some(item => item.reason === 'missing_outfit'));
+    }
 });
 
 test('actorless legacy outfit and inventory mutations cannot touch the player', () => {

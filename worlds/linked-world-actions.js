@@ -6,6 +6,10 @@ const workingApi = typeof module !== 'undefined' && module.exports
     ? require('./working-state') : root.HordeWorkingState;
 const registryApi = typeof module !== 'undefined' && module.exports
     ? require('./effect-registry') : root.HordeEffectRegistry;
+// The browser loads this file before scene-draft.js; resolve its API when an
+// action runs, after both modules have loaded.
+const sceneApi = typeof module !== 'undefined' && module.exports
+    ? require('./scene-draft') : null;
 const copy = value => value === undefined ? undefined : structuredClone(value);
 const safeId = value => typeof value === 'string' && /^[a-zA-Z][a-zA-Z0-9_-]{0,119}$/.test(value);
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
@@ -390,6 +394,7 @@ function executeLinkedActions(plan, world, session, context = {}) {
     const effects = createWorldEffectRegistry(context.legacyEffectKeys || [], capability);
     const facts = createFactRegistry();
     const travelAccounting = {minutes:0};
+    const initialBonusMinutes = Number(working.getSession('bonusTimeMinutes')) || 0;
     const outcomes = new Map();
     const events = [];
     const errors = [];
@@ -463,6 +468,15 @@ function executeLinkedActions(plan, world, session, context = {}) {
                 const witnessedInteraction = responseLinked && completed.some(event =>
                     event.type === 'interaction' && event.actor_id === 'player'
                     && event.passage_id === action.response_id);
+                const localInteractionProof = action.verifiedLocalInteraction === true
+                    && responseLinked && !operations.length
+                    && (sceneApi || root.HordeWorldSceneDraft)?.localInteraction(action.request, {
+                        inventory: working.getSession('inventory') || [],
+                        actors: (world.entities || []).filter(entity => entity?.type === 'npc'),
+                        present: (world.entities || []).filter(entity => entity?.type === 'npc'
+                            && working.getEntity(entity.id).state?.location === working.getSession('playerLocation')
+                            && !working.getEntity(entity.id).state?.journey).map(entity => entity.id)
+                    });
                 const proved = action.kind === 'travel'
                     ? executed.some(effect => effect.type === 'actor_move'
                         && (effect.payload.actor_id === 'player'
@@ -470,7 +484,7 @@ function executeLinkedActions(plan, world, session, context = {}) {
                     : action.kind === 'wait'
                         ? executed.some(effect => ['time_advance', 'time_skip_minutes'].includes(effect.type))
                         : action.kind === 'physical'
-                            ? physicalEffect || witnessedInteraction
+                            ? physicalEffect || witnessedInteraction || localInteractionProof
                             : stateEffect || ['speech', 'question', 'observation', 'other']
                                 .includes(action.kind) && responseLinked;
                 if (!proved) throw new Error('unverified_action_success');
@@ -555,7 +569,7 @@ function executeLinkedActions(plan, world, session, context = {}) {
     const visiblePassages = (plan.narrative || []).filter(passage =>
         !passage.action_id || !['skipped', 'unresolved'].includes(outcomes.get(passage.action_id)));
     return { ok: true, working, outcomes, events,
-        elapsedMinutes: Math.max(0, (Number(working.getSession('bonusTimeMinutes')) || 0) - (Number(session.bonusTimeMinutes) || 0)),
+        elapsedMinutes: Math.max(0, (Number(working.getSession('bonusTimeMinutes')) || 0) - initialBonusMinutes),
         narrative: visiblePassages.map(passage => passage.text).join('\n\n'),
         skipped: [...outcomes].filter(([, result]) => result === 'skipped').map(([id]) => id) };
 }

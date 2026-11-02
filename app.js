@@ -11176,7 +11176,7 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
             }
             // Reporting the actor at their existing mapped place is not travel.
             // Providers often emit this redundant event even on a greeting.
-            const actualPlace = actorId === 'player' ? sess.playerLocation : sess.entityStates?.[actorId]?.location;
+            const actualPlace = projectedLocations.get(actorId);
             if (actualPlace === toLoc.id && (!fromLoc || fromLoc.id === actualPlace)) {
                 informationalEvents.push(movement);
                 return;
@@ -11214,7 +11214,10 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
                 reject(index, event, 'inactive_or_missing_actor', actorId);
                 return;
             }
-            if (!proposedDestination.introduced && !worldNpcCanMove(world, sess, actorId, toLoc.id, movement.movement_mode === 'teleport', movement.explore)) {
+            const actualFrom = getLocationRef(world, projectedLocations.get(actorId)
+                || npcState.location || npcState.journey?.originId);
+            if (!proposedDestination.introduced && !worldNpcCanMove(world, sess, actorId, toLoc.id,
+                movement.movement_mode === 'teleport', movement.explore, actualFrom?.id)) {
                 reject(index, event, 'npc_access_denied', 'The actor has no permitted route to this place.');
                 return;
             }
@@ -11228,7 +11231,6 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
                 reject(index, event, 'actor_in_transit', 'This journey has not reached its destination.');
                 return;
             }
-            const actualFrom = getLocationRef(world, npcState.location || npcState.journey?.originId);
             if (fromLoc && actualFrom && fromLoc.id !== actualFrom.id) {
                 reject(index, event, 'actor_origin_mismatch', `${actualFrom.id} ≠ ${fromLoc.id}`);
                 return;
@@ -11300,7 +11302,12 @@ function validateWorldTurnReceipt(world, sess, rawReceipt, context = {}) {
             return;
         }
         if (type === 'outfit') {
-            const outfit = String(event.outfit || event.current_outfit || event.value || '').trim().slice(0, 240);
+            const suppliedOutfit = String(event.outfit || event.current_outfit || event.value || '').trim();
+            // An empty model echo may refer to an outfit already committed by
+            // deterministic player intent. Reuse only that exact known state.
+            const outfit = (suppliedOutfit || (actorId === 'player'
+                && context.precommittedOutfit === sess.outfit ? context.precommittedOutfit : '') || '')
+                .slice(0, 240);
             if (!outfit) {
                 reject(index, event, 'missing_outfit');
                 return;
@@ -22410,9 +22417,9 @@ function worldNpcAccess(world, npcId, locationId, sess = null) {
     return globalThis.HordeWorldLore?.access(world, npcId, locationId) || { ok: true };
 }
 
-function worldNpcCanMove(world, sess, npcId, destinationId, teleport = false, explore = false) {
+function worldNpcCanMove(world, sess, npcId, destinationId, teleport = false, explore = false, originOverride = '') {
     const view = worldForSession(world, sess);
-    const origin = sess.entityStates?.[npcId]?.location || sess.entityStates?.[npcId]?.journey?.originId;
+    const origin = originOverride || sess.entityStates?.[npcId]?.location || sess.entityStates?.[npcId]?.journey?.originId;
     if (origin === destinationId) return true;
     if (!worldNpcAccess(view, npcId, destinationId, sess).ok) return false;
     if (globalThis.HordeWorldLore && !globalThis.HordeWorldLore.placeAwareness(view, npcId, destinationId, sess).known && !explore) return false;
@@ -25617,9 +25624,9 @@ function worldReceiptRepairOutputLimit(configuredLimit, providerLimit = 0, conte
     const contextTokens = Number(contextLimit) > 0 ? Number(contextLimit) : Infinity;
     const promptTokens = Math.ceil(Math.max(0, Number(promptCharacters) || 0) / 3.2);
     const contextCap = Number.isFinite(contextTokens)
-        ? Math.max(256, contextTokens - promptTokens - Math.max(1000, Math.ceil(contextTokens * 0.01)))
+        ? Math.max(0, contextTokens - promptTokens - Math.max(1000, Math.ceil(contextTokens * 0.01)))
         : Infinity;
-    return Math.max(1, Math.floor(Math.min(desired, providerCap, contextCap)));
+    return Math.max(0, Math.floor(Math.min(desired, providerCap, contextCap)));
 }
 
 function normalizeWorldDiceConfig(world) {
@@ -31400,7 +31407,7 @@ ${directorNotesRequired ? 'Keep the required Plot Momentum block inside the fina
 
         // Reroll Anti-Cache & Variance Directive
         if (isReroll) {
-            messages.push({ role: 'user', content: `[SYSTEM: Reroll requested. Generate a completely different narrative response. Change the prose, actions, and structural approach from the previous attempt. Break determinism. Anti-Cache Seed: ${Math.random()}]` });
+            messages.push({ role: 'user', content: `[SYSTEM: Reroll requested. Re-evaluate the same player action from the restored pre-turn world state. Vary the narration and plausible outcome, but keep the submitted action and all action references accurate. Anti-Cache Seed: ${Math.random()}]` });
         }
 
         const controller = new AbortController();
@@ -32101,6 +32108,8 @@ ${directorNotesRequired ? 'Keep the required Plot Momentum block inside the fina
             draftInstruction = draftInstruction.replace('\nCurrent day:', compactRules + '\nCurrent day:');
         }
         if (linkedWorldTurn) draftInstruction = `[LINKED SCENE DRAFT V3]\nUse the existing commit_world_turn call with protocol:"scene_draft_v3". Interpret the whole player input once. Return ordered narrative passages, actions, events and typed action_effects in that same response. Every action has a unique lowercase action_id; its response_id names a passage carrying the same action_id. Every event carries its causing action_id. Use depends_on only with an earlier action_id and one confirmed outcome: succeeded, failed or blocked. Pending checks never release another action; stop before a check result and use the normal continuation flow. State conditions read registered facts. Each action_effects field contains only the typed operations exposed by this schema. Use exact IDs from World lore. Unknown technical changes cannot be committed. A completed action must have its technical changes in action_effects; failed or blocked steps describe the obstacle without claiming a state change. A later step may depend on failure or a confirmed world fact. Show already successful steps even if a later step fails. Do not invent people, places, items, routes, capabilities, door access, or property names. Movement is one mapped edge per actor_move; use several actions for a multi-stage route. A named companion moves through companion_ids or an established follower relation. Door states use interactable_transition, including existing key and access rules. New entities and locations must be explicitly introduced before later actions reference them. Speech and nonpersistent gestures may have no technical effect. Do not duplicate changes in top-level effects, which must be {}. Keep the narrative concise and consistent with the proposed outcomes. The engine validates and may reject the entire draft; this text is private until durable commit.${sceneDraftFieldGuide}\nCurrent day: ${days}; minute of day: ${hours24 * 60 + mins}.\nExact player request to cover: ${JSON.stringify(latestActionText || '')}\nIf tools are unavailable, enclose the same complete draft in <world_turn_receipt> tags.`;
+        if (linkedWorldTurn) draftInstruction = draftInstruction.replace('Pending checks never release another action;',
+            'Use status pending_check only with exactly one valid action_effects.checks entry. Ordinary gestures, showing an already held item, and conversation need no check: use resolved or answered when the passage shows they happened. Showing an item leaves it with its holder; do not invent a transfer or possession event unless the player actually gives it away. A clothing change from a known outfit needs an exact resulting outfit_set and no invented garments. Pending checks never release another action;');
         if (sceneDrafts) draftInstruction = draftInstruction.replace('\nCurrent day:',
             '\nSchedule a commitment only for an explicit future promise or agreed deadline with a supported time. A rhetorical question about having somewhere to be is not a commitment. A newly scheduled due time must be strictly later than the current World day and minute; never guess a future date to make an unsupported commitment valid. A pause, glance, expression or momentary reaction belongs in narrative, not a completed status, time, condition or relationship event. Claim a completed mechanical event only when its matching typed action_effects change is present and valid.\nCurrent day:');
         if (sceneLedger) draftInstruction = `[SCENE RECORD MODE] Return protocol:"scene_draft_v2", narrative:[{id,text}], ending_scene:{location_id,present_character_ids,groups:[{id,label,count}],departures:[{actor_id,to_location_id}],departed_group_ids:[]}. Supply actions/events/effects/speech/commitments/resolutions only for enabled mechanics, durable knowledge or deadlines. Use exact IDs and record the complete established ending cast, including for look/init/continue. Mere mentions, plans and flashbacks do not change the scene. New speakers require effects.npc_introduced and new locations require effects.location_introduced with an explicit connection. No unrequested movement. Stop before unresolved checks; engine dice and mechanical consequences remain authoritative. Respond to the full player request: ${JSON.stringify(latestActionText || "")}. If tools are unavailable enclose the same draft in <world_turn_receipt> tags.` + `\nCurrent day: ${days}; minute of day: ${hours24 * 60 + mins}.`;
@@ -32180,7 +32189,7 @@ ${directorNotesRequired ? 'Keep the required Plot Momentum block inside the fina
         // Introduce micro-jitter for rerolls to prevent exact caching
         if (isReroll) {
             temp = Math.min(2.0, temp + (Math.random() * 0.05));
-            requestBody.seed = Math.floor(Math.random() * 1000000);
+            if (supported.includes('seed')) requestBody.seed = Math.floor(Math.random() * 1000000);
         }
 
         addParam('temperature', temp);
@@ -32499,6 +32508,7 @@ ${directorNotesRequired ? 'Keep the required Plot Momentum block inside the fina
             playerStartLocationId: receiptPlayerStart,
             specialCommand: !resolveFirst,
             precommittedAction: !!committedMovement || !!committedDoor || !!committedOutfit,
+            precommittedOutfit: committedOutfit?.to || '',
             precommittedArrival: command === 'look'
                 && turnSnapshot?.receiptCheckpoint?.tail?.audit?.source === 'engine_travel'
                 ? (() => {
@@ -33352,9 +33362,13 @@ ${directorNotesRequired ? 'Keep the required Plot Momentum block inside the fina
                 const repairBudgetBase = repairingScene ? GEN_LIMIT : Math.min(GEN_LIMIT, 2048);
                 repairBody.max_tokens = worldReceiptRepairOutputLimit(repairBudgetBase,
                     repairModelInfo?.top_provider?.max_completion_tokens, CONTEXT_LIMIT, repairPromptCharacters);
+                if (repairBody.max_tokens < 512) receiptValidationFeedback = [{
+                    reason: 'insufficient_repair_context',
+                    detail: `Only ${repairBody.max_tokens} output tokens remain after the repair prompt; use a larger context or shorter world history.`
+                }];
                 const initialRepairInstruction = repairBody.messages[0].content;
                 const repairSupplementalMessages = repairBody.messages.slice(1);
-                for (let repairAttempt = 0; repairAttempt < (sceneDrafts ? (repairingActionLink || repairingPastCommitment || repairingUncommittedEvent ? 2 : 1) : 2) && !repairedReceiptApplied; repairAttempt++) {
+                for (let repairAttempt = 0; repairBody.max_tokens >= 512 && repairAttempt < (sceneDrafts ? (repairingActionLink || repairingPastCommitment || repairingUncommittedEvent ? 2 : 1) : 2) && !repairedReceiptApplied; repairAttempt++) {
                     if (repairAttempt) repairBody.messages = [{ role: 'system', content:
                         `${initialRepairInstruction}\nThe first repair was rejected. Its exact validation failures: ${JSON.stringify(receiptValidationFeedback)}. Rejected repair proposal: ${JSON.stringify(rejectedReceiptProposal).slice(0, 8000)}. Return a corrected receipt using only supported fields and event types; preserve the established action outcome and scene. No prose or code fence.` },
                         ...repairSupplementalMessages];
@@ -33362,6 +33376,11 @@ ${directorNotesRequired ? 'Keep the required Plot Momentum block inside the fina
                         repairModelInfo?.top_provider?.max_completion_tokens, CONTEXT_LIMIT,
                         JSON.stringify({ messages: repairBody.messages, tools: repairBody.tools || [],
                             response_format: repairBody.response_format }).length);
+                    if (repairBody.max_tokens < 512) {
+                        receiptValidationFeedback = [{ reason: 'insufficient_repair_context',
+                            detail: `Only ${repairBody.max_tokens} output tokens remain after the retry prompt.` }];
+                        break;
+                    }
                     turnCallAudit.receiptRepair++;
                     const { response: repairResponse, data: repairData } = await fetchWorldTurnJSON('receiptRepair', repairBody, {
                         method: 'POST',
@@ -33994,6 +34013,9 @@ ${directorNotesRequired ? 'Keep the required Plot Momentum block inside the fina
             cleanText = cleanText.replace(/\[Loc:.*?\]\s*/gi, '').replace(/\[DISTANT EVENT.*?\]:\s*/gi, '').trim();
             // Scrub tool/engine artifacts models emit as plain text (JSON payloads, tool-call wrappers)
             cleanText = scrubNarrativeArtifacts(cleanText);
+            // Presentation filters must not alter the text used to audit
+            // claims against the committed world state.
+            const auditText = cleanText;
             // The failure notice is app-owned safety copy, not model prose.
             if (!frozenReceiptApplied && !narrativeConflict) {
                 if (state.globalSettings.slopStripper) cleanText = stripSlop(cleanText);
@@ -34009,13 +34031,13 @@ ${directorNotesRequired ? 'Keep the required Plot Momentum block inside the fina
             const startOutfit = turnSnapshot?.session?.outfit;
             const outfitChangedThisTurn = startOutfit !== undefined && sess.outfit !== startOutfit;
             const narratedLocationCandidate = shouldAuditNarratedWorldLocation(command, turnSnapshot, movedThisTurn)
-                ? detectNarratedLocation(world, sess, cleanText) : null;
+                ? detectNarratedLocation(world, sess, auditText) : null;
             const narratedPresenceCandidates = command !== 'init'
-                ? detectNarratedPresence(world, sess, cleanText) : [];
+                ? detectNarratedPresence(world, sess, auditText) : [];
             const narratedDepartureCandidates = command !== 'init'
-                ? detectNarratedDepartures(world, sess, cleanText) : [];
+                ? detectNarratedDepartures(world, sess, auditText) : [];
             const narratedOutfitCandidate = (command !== 'init' && !outfitChangedThisTurn)
-                ? detectNarratedOutfit(cleanText) : null;
+                ? detectNarratedOutfit(auditText) : null;
             const audit = sess.lastTurnAudit;
             if (audit) {
                 if (narratedLocationCandidate && narratedLocationCandidate.id !== sess.playerLocation) {
@@ -34796,7 +34818,8 @@ function detectPlayerOutfitIntent(input) {
         const item = normalizeOutfitItem(remove[1]);
         if (item) return { mode: 'remove', item };
     }
-    if (/\bI\b[^.!?]{0,25}\b(?:strip|stripped|undress|undressed|get|got)\b[^.!?]{0,20}\b(?:naked|undressed|bare|out of my clothes)\b/i.test(prose)) {
+    if (/\bI\s+(?:undress|strip)(?:\s+(?:completely|fully|entirely))?\s*(?:[.!?;]|$|and\b)/i.test(prose)
+        || /\bI\b[^.!?]{0,25}\b(?:strip|stripped|undress|undressed|get|got)\b[^.!?]{0,20}\b(?:naked|undressed|bare|out of my clothes)\b/i.test(prose)) {
         return { mode: 'clear', item: '' };
     }
     return null;
@@ -34806,6 +34829,8 @@ function applyPlayerOutfitIntent(sess, input) {
     const intent = detectPlayerOutfitIntent(input);
     if (!intent) return null;
     const previous = String(sess.outfit || '').trim();
+    // Removing one named garment does not reveal the rest of an unknown outfit.
+    if (intent.mode === 'remove' && !previous) return null;
     let next = previous;
     if (intent.mode === 'replace') {
         next = intent.item;

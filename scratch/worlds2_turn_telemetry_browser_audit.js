@@ -47,15 +47,24 @@ const root = path.resolve(__dirname, '..');
             const reply = `The lamp hums softly.\n<world_turn_receipt>${JSON.stringify(receipt)}</world_turn_receipt>`;
             let modelCalls = 0;
             let mode = 'inline';
+            let rerollRequest = null;
             const realFetch = window.fetch;
             window.fetch = async (url, options = {}) => {
                 if (!String(url).includes('/chat/completions')) return realFetch(url, options);
                 modelCalls++;
                 const body = JSON.parse(options.body || '{}');
+                if (body.messages?.some(message => String(message.content || '').includes('[SYSTEM: Reroll requested.'))) {
+                    rerollRequest = body;
+                    if (body.seed !== undefined) return new Response('seed unsupported', { status: 400 });
+                }
                 if (mode === 'failed') return new Response('provider unavailable', { status: 503 });
                 if (mode === 'streamBreak' && body.stream) {
                     return new Response(new ReadableStream({ start(controller) { controller.error(new Error('stream interrupted')); } }),
                         { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+                }
+                if (mode === 'truncated' && body.stream) {
+                    const sse = `data: ${JSON.stringify({ choices: [{ delta: { content: 'The hall is quiet.\n<world_turn_receipt>{"scene":' }, finish_reason: 'length' }] })}\n\ndata: [DONE]\n\n`;
+                    return new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
                 }
                 if (mode === 'toolFallback' && body.tools) return new Response('tool use not supported', { status: 400 });
                 if (body.stream) {
@@ -84,7 +93,12 @@ const root = path.resolve(__dirname, '..');
             document.getElementById('world-user-input').value = 'I knock on the wall.';
             await executeWorldTurn();
             const dm = [...sess.history].reverse().find(message => message.role === 'dm');
-            const persisted = (await HordeDB.get('worldInstance:telemetry_fixture'))?.sessions?.[0]?.history?.at(-1)?.callAudit || null;
+            mode = 'truncated';
+            document.getElementById('world-user-input').value = 'I wait and listen.';
+            await executeWorldTurn();
+            const truncatedDm = [...sess.history].reverse().find(message => message.role === 'dm');
+            const persisted = (await HordeDB.get('worldInstance:telemetry_fixture'))?.sessions?.[0]?.history
+                ?.find(message => message.id === dm.id)?.callAudit || null;
             const firstSnapshotCompacted = firstDm.snapshotCompacted === true && !firstDm.versionSnapshots;
             // Mirror deleting the later user turn: restore its DM's pre-turn
             // state, trim the tail, then reroll the formerly compacted scene.
@@ -151,13 +165,19 @@ const root = path.resolve(__dirname, '..');
                 details: document.getElementById('world-director-model-attempts')?.textContent || ''
             };
             window.fetch = realFetch;
-            return { modelCalls, firstText: firstDm?.text || '', firstAudit: firstDm?.callAudit || null,
+            return { modelCalls, rerollSeed: rerollRequest?.seed ?? null,
+                rerollPrompt: rerollRequest?.messages?.find(message => String(message.content || '').includes('[SYSTEM: Reroll requested.'))?.content || '',
+                firstText: firstDm?.text || '', firstAudit: firstDm?.callAudit || null,
                 secondText: secondDm?.text || '', secondAudit: secondDm?.callAudit || null,
                 thirdText: thirdDm?.text || '', thirdAudit: thirdDm?.callAudit || null,
                 fourthText: dm?.text || '', fourthAudit: dm?.callAudit || null,
+                truncatedText: truncatedDm?.text || '', truncatedAudit: truncatedDm?.callAudit || null,
                 persisted, firstSnapshotCompacted, reroll, failure, modelLedger };
         });
         assert(result.modelCalls >= 8, 'normal, repair, fallback and empty-reply rescue requests should occur');
+        assert.equal(result.rerollSeed, null, 'unsupported providers must not receive seed on reroll');
+        assert(!result.rerollPrompt.includes('Change the prose, actions'),
+            'rerolls must replay the same player action');
         assert(result.firstText.includes('The lamp hums softly.'), 'the first World turn should complete');
         assert(result.secondText.includes('The door stays shut.'), 'the repaired World turn should complete');
         assert.equal(result.firstAudit.calls[0].kind, 'main');
@@ -174,6 +194,11 @@ const root = path.resolve(__dirname, '..');
         assert(result.fourthText.includes('The lights flicker, then settle.'));
         assert.equal(result.fourthAudit.narrativeRescue, 1);
         assert(result.fourthAudit.calls.some(call => call.kind === 'narrativeRescue' && call.usage?.total === 35));
+        assert(result.truncatedAudit.receiptRepair >= 1, 'truncated envelope must trigger bounded repair');
+        assert(result.truncatedAudit.calls.some(call => call.kind === 'receiptRepair'),
+            'the repair request must reach the provider');
+        assert(!result.truncatedText.includes('could not be verified'),
+            'a complete corrected receipt must commit after a truncated stream');
         assert(result.persisted.calls.some(call => call.kind === 'narrativeRescue' && call.usage?.total === 35));
         assert.equal(result.firstSnapshotCompacted, true);
         assert.equal(result.reroll.versions, 2);
@@ -210,7 +235,7 @@ const root = path.resolve(__dirname, '..');
         assert(result.modelLedger.summary.includes('unknown cost'));
         assert(result.modelLedger.details.includes('stream_error'));
         assert.deepEqual(errors, []);
-        console.log(`PASS: mocked World turns persist main, repair, fallback and empty-reply rescue diagnostics (${result.modelCalls} model endpoint calls across 4 completed turns, 1 reroll, 2 failed turns)`);
+        console.log(`PASS: mocked World turns persist main, repair, truncated-stream recovery, fallback and empty-reply rescue diagnostics (${result.modelCalls} model endpoint calls)`);
     } finally {
         await browser.close();
     }

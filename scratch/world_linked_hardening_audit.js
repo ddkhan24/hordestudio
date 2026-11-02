@@ -140,6 +140,78 @@ const localSuccess = linked.executeLinkedActions(repaired.linkedPlan, world,
     structuredClone(initial), { capability });
 assert(localSuccess.ok, JSON.stringify(localSuccess.errors));
 assert.equal(localSuccess.outcomes.get('wave'), 'succeeded');
+for (let attempt = 0; attempt < 3; attempt++) {
+    const prematureCheck = { ...draft,
+        events: [],
+        actions: [{ ...draft.actions[0], status: 'pending_check' }] };
+    const recoveredGesture = scene.compile(prematureCheck, context);
+    assert(recoveredGesture.ok, JSON.stringify(recoveredGesture.errors));
+    assert.equal(recoveredGesture.actions[0].status, 'resolved');
+    assert.equal(recoveredGesture.actions[0].verifiedLocalInteraction, true);
+    assert(linked.executeLinkedActions(recoveredGesture.linkedPlan, world,
+        structuredClone(initial), { capability }).ok);
+    assert.equal(prematureCheck.actions[0].status, 'pending_check', 'proposal remains immutable');
+}
+const mislabeledWave = scene.compile({ ...draft, events: [],
+    actions: [{ ...draft.actions[0], kind: 'speech', status: 'pending_check',
+        request: 'I wave to Guide.' }] },
+    { ...context, input: 'I wave to Guide.', actors: [{ id: 'guide_1', name: 'Guide' }] });
+assert(mislabeledWave.ok, JSON.stringify(mislabeledWave.errors));
+assert.equal(mislabeledWave.actions[0].kind, 'physical');
+assert.equal(mislabeledWave.actions[0].status, 'resolved');
+const pendingWithInteraction = scene.compile({ ...draft,
+    events: [{ ...draft.events[0], action_id: 'wave' }],
+    actions: [{ ...draft.actions[0], status: 'pending_check' }] }, context);
+assert(pendingWithInteraction.ok, JSON.stringify(pendingWithInteraction.errors));
+assert.equal(pendingWithInteraction.actions[0].status, 'resolved');
+const unresolvedWave = scene.compile({ ...draft, events: [],
+    narrative: [{ id: 'p1', action_id: 'wave', text: 'You try to wave, but cannot move your arm.' }],
+    actions: [{ ...draft.actions[0], status: 'pending_check' }] }, context);
+assert(!unresolvedWave.ok, 'an unperformed gesture without a check remains invalid');
+const lockedDoor = scene.compile({ ...draft, events: [],
+    narrative: [{ id: 'p1', action_id: 'door', text: 'You try to open the locked door.' }],
+    actions: [{ ...draft.actions[0], action_id: 'door', request: 'I open the locked door.',
+        status: 'pending_check' }] }, { ...context, input: 'I open the locked door.' });
+assert(!lockedDoor.ok, 'a persistent interaction cannot be normalized as a harmless gesture');
+const namedWave = scene.compile({ ...draft, events: [],
+    actions: [{ ...draft.actions[0], request: 'I wave to Guide.' }] },
+    { ...context, input: 'I wave to Guide.', actors: [{ id: 'guide_1', name: 'Guide' }] });
+assert(namedWave.ok, JSON.stringify(namedWave.errors));
+assert.equal(namedWave.actions[0].verifiedLocalInteraction, true);
+assert(linked.executeLinkedActions(namedWave.linkedPlan, world,
+    structuredClone(initial), { capability }).ok, 'a gesture to a present NPC needs no durable effect');
+const selectedTake = { ...structuredClone(initial), bonusTimeMinutes: 30 };
+const rerollBase = { ...structuredClone(initial), bonusTimeMinutes: 0 };
+const rerollWorking = workingApi.createWorkingState(world, selectedTake);
+rerollWorking.applyDetached((_world, session) => Object.assign(session, rerollBase));
+const rerollWait = linked.executeLinkedActions({
+    narrative: [{ id: 'wait_passage', action_id: 'wait', text: 'You wait five minutes.' }],
+    actions: [{ action_id: 'wait', request: 'I wait five minutes.', response_id: 'wait_passage',
+        kind: 'wait', status: 'resolved', action_effects: { time_advance: [{ minutes: 5 }] } }],
+    events: []
+}, world, selectedTake, { capability, workingState: rerollWorking });
+assert(rerollWait.ok, JSON.stringify(rerollWait.errors));
+assert.equal(rerollWait.elapsedMinutes, 5, 'reroll time is measured from the restored base');
+const gestureAndSpeechInput = 'I wave and ask Guide to wait.';
+const gestureAndSpeechDraft = { protocol: 'scene_draft_v3', narrative: [
+    { id: 'wave_reply', action_id: 'wave', text: 'You wave to Guide.' },
+    { id: 'ask_reply', action_id: 'ask', text: 'Guide says she will wait.' }
+], actions: [
+    { action_id: 'wave', request: 'I wave', kind: 'physical', status: 'resolved',
+        response_id: 'wave_reply', action_effects: {} },
+    { action_id: 'ask', request: 'and ask Guide to wait.', kind: 'speech', status: 'resolved',
+        response_id: 'ask_reply', action_effects: {} }
+], events: [], effects: {}, speech: [], commitments: [] };
+const gestureAndSpeech = scene.compile(gestureAndSpeechDraft, { ...context,
+    input: gestureAndSpeechInput,
+    contract: scene.schema({ events: { type: 'array', items: { type: 'object',
+        properties: { type: { type: 'string' }, actor_id: { type: 'string' },
+            status: { type: 'string' } } } }, ...legacySchemas }, 'scene_draft_v3',
+    { linkedRequired: true, capability, input: gestureAndSpeechInput }) });
+assert(gestureAndSpeech.ok, JSON.stringify(gestureAndSpeech.errors));
+assert.equal(gestureAndSpeech.actions[0].verifiedLocalInteraction, true);
+assert(linked.executeLinkedActions(gestureAndSpeech.linkedPlan, world,
+    structuredClone(initial), { capability }).ok);
 const spokenInput = 'That is the wrong answer; do not forget your purpose.';
 const spokenDraft = { protocol: 'scene_draft_v3', narrative: [{ id: 'reply',
     action_id: 'spoken_correction', text: 'The response acknowledges the correction.' }],

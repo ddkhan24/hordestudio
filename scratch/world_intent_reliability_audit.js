@@ -160,6 +160,25 @@ test('player outfit replacement, addition and removal preserve the right state',
     assert.match(session.outfit, /blue evening dress/i);
 });
 
+test('removing clothing from unspecified state does not assert undressed', () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const session = { outfit: '' };
+        assert.equal(context.applyPlayerOutfitIntent(session, 'I take off my coat.'), null);
+        assert.equal(session.outfit, '');
+    }
+});
+
+test('last known garment and explicit undressing keep distinct meanings', () => {
+    const lastKnown = { outfit: 'blue coat' };
+    const removed = context.applyPlayerOutfitIntent(lastKnown, 'I take off my blue coat.');
+    assert.equal(removed?.mode, 'remove');
+    assert.equal(lastKnown.outfit, 'Undressed.');
+    const unspecified = { outfit: '' };
+    const explicit = context.applyPlayerOutfitIntent(unspecified, 'I undress completely.');
+    assert.equal(explicit?.mode, 'clear');
+    assert.equal(unspecified.outfit, 'Undressed.');
+});
+
 test('natural first-person outfit declarations update state without a model tool call', () => {
     const exactReport = {
         outfit: 'Standard attire.'

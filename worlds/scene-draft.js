@@ -169,7 +169,7 @@ function schema(legacy, protocol = 'scene_draft_v2', options = {}) {
         if (events.items.properties.next_status) events.items.properties.next_status.description =
             'Only for type status: the NPC lifecycle value alive, dead or gone. Do not use a status event for an activity, pose, mood or temporary condition.';
         if (events.items.properties.outfit) events.items.properties.outfit.description =
-            'Required for an outfit event. Describe the resulting complete outfit. If no outfit is established and the scene establishes or changes clothing, invent a plausible outfit consistent with the character, setting, weather and story; never leave blank.';
+            'Required for an outfit event. State only the resulting clothing that is known. If the remaining garments are unknown, say so explicitly; do not invent garments or use Undressed unless the scene establishes that state. Omit an outfit event when no resulting clothing state can be established.';
         delete events.items.properties.evidence;
         events.items.properties.passage_id = passage;
         events.items.required = [...new Set([...(events.items.required || []).filter(k => k !== 'evidence'), 'actor_id', 'passage_id'])];
@@ -609,6 +609,30 @@ function compile(draft, context) {
         });
         if (errors.length) return { ok: false, errors };
     }
+    // Some local models label an already narrated, harmless gesture as
+    // pending_check without proposing a check. Only an exact known local
+    // interaction with an explicit completed passage can be normalized.
+    if (draft.protocol === 'scene_draft_v3' && Array.isArray(draft.actions)
+        && Array.isArray(draft.narrative)) for (const action of draft.actions) {
+        const request = action?.request || (draft.actions.length === 1
+            && simpleRequest(context.input) ? context.input : '');
+        if (!['physical', 'speech', 'other'].includes(action?.kind) || action.status !== 'pending_check'
+            || !action.action_id || !simpleRequest(request)
+            || Object.keys(action.action_effects || {}).length
+            || Object.keys(draft.effects || {}).length
+            || (draft.events || []).some(event => event?.action_id === action.action_id
+                && !(event.type === 'interaction' && event.actor_id === 'player'
+                    && event.status === 'completed' && event.passage_id === action.response_id))
+            || (draft.commitments || []).some(item => item?.action_id === action.action_id)
+            || (draft.resolutions || []).some(item => item?.action_id === action.action_id)
+            || !localInteraction(request, context)) continue;
+        const passage = draft.narrative.find(item => item?.id === action.response_id);
+        const prose = String(passage?.text || '');
+        if (/\b(?:try|attempt|cannot|can't|fail|blocked|refus|hesitat|almost)\b/i.test(prose)
+            || !/\b(?:you|i)\b[^.!?]{0,100}\b(?:wave|rais\w* your hand|nod|smile|greet|approach|tap|touch|pat|shake)\b/i.test(prose)) continue;
+        action.kind = 'physical';
+        action.status = 'resolved';
+    }
     const linkedPlan = validateActionLinks(draft, context, fail);
     if (linkedPlan) linkedPlan.repairs.push(...discardedSpeechEvents);
     if (context.linkedRequired && draft.protocol === 'scene_draft_v3'
@@ -790,14 +814,16 @@ function compile(draft, context) {
     // and all narrative conflicts still pass through the domain validator.
     actions.forEach(action => {
         if (object(action)) delete action.verifiedLocalInteraction;
+        const owns = item => !linkedPlan || item?.action_id === action?.action_id;
         if (object(action) && action.kind === 'physical' && action.status === 'resolved'
-            && actions.length === 1 && !Object.keys(effects).length
-            && (draft.events || []).every((event, index) => cosmeticGestureEvents.has(index)
+            && (linkedPlan || actions.length === 1) && !Object.keys(effects).length
+            && !Object.keys(action.action_effects || {}).length
+            && (draft.events || []).every((event, index) => !owns(event) || cosmeticGestureEvents.has(index)
                 || event?.actor_id === 'player' && event.status === 'completed'
                     && ['interaction', 'activity', 'other'].includes(event.type)
                     && event.action_id === action.action_id)
-            && !(draft.commitments || []).length
-            && !(draft.resolutions || []).length
+            && !(draft.commitments || []).some(owns)
+            && !(draft.resolutions || []).some(owns)
             && localInteraction(action.request, context)) action.verifiedLocalInteraction = true;
     });
     if (linkedPlan) linkedPlan.actions.forEach((action, index) => {
